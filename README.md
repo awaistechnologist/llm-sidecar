@@ -219,7 +219,7 @@ one directly and never touches the config file.
 ## Tests
 
 ```bash
-venv/bin/python -m pytest tests/test_llm_sidecar.py -q     # 37 passing
+venv/bin/python -m pytest llm_sidecar/tests -q              # 37 passing
 ```
 
 Fully offline — every network path is stubbed. Live-provider behaviour is
