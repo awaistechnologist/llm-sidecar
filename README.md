@@ -4,9 +4,10 @@ A local capability sidecar for AI tooling. One dependency that any program on
 the machine can lean on for inference, search, and grounded fact-checking —
 without hardcoding a provider, an API key, or a model name.
 
-> **Status: early.** Lives inside the Agora repo while the API settles. It has
-> no dependency on Agora and will move to its own repo once it has a second
-> real consumer.
+> **Status: early (0.1.0).** The API may still move. Extracted from
+> [Agora](https://github.com/awaistechnologist/agora), where the routing and
+> verification logic was originally built and proven; Agora will become a
+> consumer rather than the owner.
 
 ## Why
 
@@ -34,11 +35,20 @@ interface:
 
 ## Install
 
-Nothing to install beyond the parent repo's requirements while it lives here.
+Not on PyPI yet.
 
 ```bash
-pip install -r requirements.txt
+git clone https://github.com/awaistechnologist/llm-sidecar
+cd llm-sidecar
+pip install -e ".[all]"
 ```
+
+The core depends only on `httpx`. Install just what you need instead:
+`.[search]` for web search, `.[daemon]` for the HTTP server, `.[mcp]` for the
+MCP server.
+
+Nothing else is required — with Ollama installed, every feature below works
+with no API key at all.
 
 ## Library
 
@@ -219,7 +229,7 @@ one directly and never touches the config file.
 ## Tests
 
 ```bash
-venv/bin/python -m pytest llm_sidecar/tests -q              # 37 passing
+pytest                                    # 37 passing, fully offline
 ```
 
 Fully offline — every network path is stubbed. Live-provider behaviour is
