@@ -31,7 +31,15 @@ CATALOGUE = [
 
 
 @pytest.fixture
-def cfg():
+def cfg(tmp_path, monkeypatch):
+    """A config with cache and ledger pointed at a temp dir, so tests never
+    touch the developer's real cache or spend history."""
+    from llm_sidecar import cache, ledger
+
+    monkeypatch.setattr(cache, "_COMPLETIONS", tmp_path / "completions")
+    monkeypatch.setattr(cache, "_SEARCHES", tmp_path / "searches")
+    monkeypatch.setattr(ledger, "DATA_DIR", tmp_path / "data")
+    monkeypatch.setattr(ledger, "LEDGER_FILE", tmp_path / "data" / "usage.jsonl")
     return Config(openrouter_api_key="test-key", models={}, default_budget="free")
 
 
@@ -221,7 +229,7 @@ def test_rotation_drops_failed_model(cfg, monkeypatch):
     handed = iter(["bad/model", "good/model"])
     monkeypatch.setattr(picker, "pick", lambda *a, **k: Pick(model_id=next(handed), model_name="m"))
 
-    def fake_complete(prompt, model, config, **k):
+    def fake_complete(messages, model, config, **k):
         if model == "bad/model":
             raise RuntimeError("429 forever")
         return Completion(text="ok", model=model)
@@ -371,10 +379,8 @@ def api(cfg, monkeypatch):
     monkeypatch.setattr(picker, "pick", lambda config, budget=None, **k: Pick(f"auto/{budget}", "auto"))
     monkeypatch.setattr(
         client_mod, "complete",
-        lambda prompt, model, config, system=None, **k: Completion(
-            text=f"[{system or 'no-system'}] {prompt}",
-            model=model,
-            usage=Usage(1, 2, 3, 0.001),
+        lambda messages, model, config, **k: Completion(
+            text=json.dumps(messages), model=model, usage=Usage(1, 2, 3, 0.001),
         ),
     )
     return TestClient(daemon.create_app(cfg))
@@ -403,12 +409,17 @@ def test_response_has_the_standard_shape(api):
     assert body["x_sidecar"]["cost_usd"] == 0.001
 
 
-def test_system_messages_are_split_out(api):
-    body = api.post("/v1/chat/completions", json={
-        "model": "auto",
-        "messages": [{"role": "system", "content": "BE TERSE"}, {"role": "user", "content": "hi"}],
-    }).json()
-    assert body["choices"][0]["message"]["content"] == "[BE TERSE] hi"
+def test_messages_pass_through_intact(api):
+    """Regression: the daemon used to flatten a conversation into one prompt,
+    losing turn boundaries. Multi-turn must reach the model as-is."""
+    convo = [
+        {"role": "system", "content": "BE TERSE"},
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "hello"},
+        {"role": "user", "content": "and now?"},
+    ]
+    body = api.post("/v1/chat/completions", json={"model": "auto", "messages": convo}).json()
+    assert json.loads(body["choices"][0]["message"]["content"]) == convo
 
 
 def test_empty_messages_rejected(api):
@@ -450,3 +461,303 @@ def test_health_needs_no_token(cfg):
 
     cfg.daemon_token = "s3cret"
     assert TestClient(daemon.create_app(cfg)).get("/health").status_code == 200
+
+
+# ── messages ──────────────────────────────────────────────────────────────────
+
+def test_build_messages_shapes():
+    from llm_sidecar.client import build_messages
+
+    assert build_messages("hi") == [{"role": "user", "content": "hi"}]
+    assert build_messages("hi", system="S") == [
+        {"role": "system", "content": "S"}, {"role": "user", "content": "hi"}
+    ]
+    convo = [{"role": "user", "content": "a"}, {"role": "assistant", "content": "b"}]
+    assert build_messages(messages=convo) == convo
+    # Both given: the prompt continues the conversation.
+    assert build_messages("c", messages=convo)[-1] == {"role": "user", "content": "c"}
+    with pytest.raises(ValueError):
+        build_messages()
+
+
+# ── cache ─────────────────────────────────────────────────────────────────────
+
+def test_only_deterministic_requests_are_cached():
+    from llm_sidecar import cache
+
+    assert cache.cacheable(0.0)
+    assert not cache.cacheable(0.7)
+
+
+def test_cache_round_trip_and_temperature_split(cfg):
+    from llm_sidecar import cache
+
+    msgs = [{"role": "user", "content": "hi"}]
+    assert cache.get_completion(cfg, msgs, "m", 100, 0.0) is None
+    cache.put_completion(cfg, msgs, "m", 100, 0.0, {"text": "cached!"})
+    assert cache.get_completion(cfg, msgs, "m", 100, 0.0)["text"] == "cached!"
+    # A creative request must not be served the deterministic answer.
+    assert cache.get_completion(cfg, msgs, "m", 100, 0.9) is None
+
+
+def test_cache_respects_ttl(cfg):
+    from llm_sidecar import cache
+
+    msgs = [{"role": "user", "content": "hi"}]
+    cache.put_completion(cfg, msgs, "m", 100, 0.0, {"text": "x"})
+    cfg.cache_ttl_seconds = -1  # everything is instantly stale
+    assert cache.get_completion(cfg, msgs, "m", 100, 0.0) is None
+
+
+def test_cache_can_be_disabled(cfg):
+    from llm_sidecar import cache
+
+    cfg.cache_enabled = False
+    msgs = [{"role": "user", "content": "hi"}]
+    cache.put_completion(cfg, msgs, "m", 100, 0.0, {"text": "x"})
+    assert cache.get_completion(cfg, msgs, "m", 100, 0.0) is None
+
+
+def test_sidecar_serves_second_identical_call_from_cache(cfg, monkeypatch):
+    from llm_sidecar import client, picker
+    from llm_sidecar.types import Completion, Pick, Usage
+
+    calls = []
+    monkeypatch.setattr(picker, "pick", lambda *a, **k: Pick("m/1", "m"))
+
+    def counted(messages, model, config, **k):
+        calls.append(1)
+        return Completion(text="answer", model=model, usage=Usage(1, 1, 2, 0.5))
+
+    monkeypatch.setattr(client, "complete", counted)
+    sc = Sidecar(cfg)
+    first = sc.complete("q", temperature=0.0)
+    second = sc.complete("q", temperature=0.0)
+
+    assert len(calls) == 1
+    assert first.text == second.text == "answer"
+    assert not first.cached and second.cached
+
+
+# ── ledger ────────────────────────────────────────────────────────────────────
+
+def test_ledger_records_and_summarises(cfg):
+    from llm_sidecar import ledger
+
+    ledger.record("m/a", 10, 20, 0.5, operation="complete")
+    ledger.record("m/a", 5, 5, 0.25, operation="verify")
+    ledger.record("m/b", 1, 1, 0.0, cached=True)
+
+    s = ledger.summary()
+    assert s["calls"] == 3
+    assert s["cost_usd"] == 0.75
+    assert s["total_tokens"] == 42
+    assert s["cached"] == 1
+    assert s["by_model"][0]["model"] == "m/a"      # sorted by spend
+    assert s["by_model"][0]["calls"] == 2
+
+
+def test_ledger_skips_corrupt_lines(cfg):
+    from llm_sidecar import ledger
+
+    ledger.record("m/a", 1, 1, 0.1)
+    with ledger.LEDGER_FILE.open("a") as f:
+        f.write("{not json\n\n")
+    ledger.record("m/b", 1, 1, 0.2)
+    assert ledger.summary()["calls"] == 2
+
+
+def test_ledger_never_raises_on_bad_path(monkeypatch, tmp_path):
+    from llm_sidecar import ledger
+
+    # A file where the directory should be — writes must fail silently.
+    blocker = tmp_path / "blocked"
+    blocker.write_text("x")
+    monkeypatch.setattr(ledger, "DATA_DIR", blocker)
+    monkeypatch.setattr(ledger, "LEDGER_FILE", blocker / "usage.jsonl")
+    ledger.record("m", 1, 1, 0.0)   # must not raise
+    assert ledger.summary()["calls"] == 0
+
+
+# ── hardware ──────────────────────────────────────────────────────────────────
+
+def test_assess_verdicts():
+    from llm_sidecar import hardware
+
+    hw = {"total_ram_gib": 16.0}          # 13 GiB usable after headroom
+    assert hardware.assess(2 * 1024**3, hw)["verdict"] == "fits"
+    assert hardware.assess(11 * 1024**3, hw)["verdict"] == "tight"
+    # Exactly at the edge counts as over: 12 GiB weights + 1 GiB KV > 13.
+    assert hardware.assess(12 * 1024**3, hw)["verdict"] == "too_big"
+    assert hardware.assess(40 * 1024**3, hw)["verdict"] == "too_big"
+    assert hardware.assess(1024**3, {})["verdict"] == "unknown"
+
+
+def test_bigger_context_costs_memory():
+    from llm_sidecar import hardware
+
+    small = hardware.requirement_gib(4 * 1024**3, context_tokens=2000)
+    large = hardware.requirement_gib(4 * 1024**3, context_tokens=64000)
+    assert large > small
+
+
+def test_vram_wins_over_system_ram():
+    from llm_sidecar import hardware
+
+    assert hardware.usable_gib({"total_ram_gib": 64.0, "vram_gib": 8.0}) == 5.0
+
+
+# ── ops ───────────────────────────────────────────────────────────────────────
+
+class _Stub:
+    """Minimal stand-in for Sidecar that returns a canned completion."""
+
+    def __init__(self, text):
+        self.text = text
+        self.seen = {}
+
+    def complete(self, prompt=None, **k):
+        from llm_sidecar.types import Completion
+        self.seen = {"prompt": prompt, **k}
+        return Completion(text=self.text, model="stub")
+
+
+def test_classify_rejects_invented_labels():
+    from llm_sidecar import ops
+
+    stub = _Stub('{"results": [{"item": 1, "label": "bug"}, {"item": 2, "label": "wombat"}]}')
+    out = ops.classify(stub, ["crash on save", "make it blue"], ["bug", "feature"])
+    assert out[0]["label"] == "bug"
+    assert out[1]["label"] == "unknown"      # not silently accepted
+
+
+def test_classify_handles_missing_entries():
+    from llm_sidecar import ops
+
+    stub = _Stub('{"results": [{"item": 1, "label": "a"}]}')
+    out = ops.classify(stub, ["one", "two"], ["a", "b"])
+    assert [o["label"] for o in out] == ["a", "unknown"]
+
+
+def test_classify_needs_two_labels():
+    from llm_sidecar import ops
+
+    with pytest.raises(SidecarError):
+        ops.classify(_Stub("{}"), ["x"], ["only"])
+
+
+def test_extract_pins_the_schema():
+    from llm_sidecar import ops
+
+    stub = _Stub('{"total": "42", "surprise": "extra", "due": null}')
+    out = ops.extract(stub, "some invoice", {"total": "the total", "due": "the due date"})
+    assert out == {"total": "42", "due": None}   # extra key dropped, gap explicit
+
+
+def test_ops_run_deterministically():
+    from llm_sidecar import ops
+
+    stub = _Stub("a summary")
+    ops.summarise(stub, "long text")
+    assert stub.seen["temperature"] == 0.0
+
+
+def test_summarise_rejects_bad_style_and_empty():
+    from llm_sidecar import ops
+
+    with pytest.raises(SidecarError):
+        ops.summarise(_Stub("x"), "text", style="interpretive-dance")
+    with pytest.raises(SidecarError):
+        ops.summarise(_Stub("x"), "   ")
+
+
+def test_parse_json_handles_arrays_and_fences():
+    from llm_sidecar.ops import parse_json_response
+
+    assert parse_json_response('```json\n{"a": 1}\n```') == {"a": 1}
+    assert parse_json_response("[1, 2]") == {"result": [1, 2]}
+
+
+# ── resolution TTL ────────────────────────────────────────────────────────────
+
+def test_resolution_expires(cfg, monkeypatch):
+    from llm_sidecar import picker
+    from llm_sidecar.types import Pick
+
+    picks = iter(["m/1", "m/2"])
+    monkeypatch.setattr(picker, "pick", lambda *a, **k: Pick(next(picks), "m"))
+
+    cfg.resolution_ttl_seconds = 900
+    sc = Sidecar(cfg)
+    assert sc.model_for() == "m/1"
+    assert sc.model_for() == "m/1"          # cached
+
+    cfg.resolution_ttl_seconds = -1          # everything instantly stale
+    assert sc.model_for() == "m/2"           # re-verified
+
+
+# ── parallel evidence ─────────────────────────────────────────────────────────
+
+def test_gather_all_returns_every_claim(cfg, monkeypatch):
+    from llm_sidecar import verify as verify_mod
+
+    monkeypatch.setattr(verify_mod, "gather_evidence",
+                        lambda c, cfg, **k: [{"title": c, "url": f"http://{c}", "snippet": "s"}])
+    out = verify_mod.gather_all(["a", "b", "c"], cfg)
+    assert set(out) == {"a", "b", "c"}
+
+
+def test_one_failed_search_does_not_sink_the_batch(cfg, monkeypatch):
+    from llm_sidecar import verify as verify_mod
+
+    def flaky(claim, config, **k):
+        if claim == "boom":
+            raise RuntimeError("provider down")
+        return [{"title": claim, "url": "http://x", "snippet": "s"}]
+
+    monkeypatch.setattr(verify_mod, "gather_evidence", flaky)
+    out = verify_mod.gather_all(["ok", "boom"], cfg)
+    assert out["boom"] == []
+    assert len(out["ok"]) == 1
+
+
+# ── daemon: new endpoints ─────────────────────────────────────────────────────
+
+def test_usage_and_cache_endpoints(api):
+    assert api.get("/usage").status_code == 200
+    assert "removed" in api.post("/cache/clear").json()
+
+
+def test_verify_endpoint(api, monkeypatch):
+    from llm_sidecar import verify as verify_mod
+    from llm_sidecar.types import ClaimVerdict
+
+    monkeypatch.setattr(
+        verify_mod, "verify_claims",
+        lambda claims, config, model=None, sidecar=None: [
+            ClaimVerdict(claim=c, verdict="supported", note="n", sources=["u"]) for c in claims
+        ],
+    )
+    body = api.post("/v1/verify", json={"claims": ["x", "y"]}).json()
+    assert len(body["results"]) == 2
+    assert body["results"][0]["verdict"] == "supported"
+
+
+def test_receipt_reports_cache_hits(api):
+    a = api.post("/v1/chat/completions", json={
+        "model": "auto", "messages": [{"role": "user", "content": "q"}], "temperature": 0.0}).json()
+    b = api.post("/v1/chat/completions", json={
+        "model": "auto", "messages": [{"role": "user", "content": "q"}], "temperature": 0.0}).json()
+    assert a["x_sidecar"]["cached"] is False
+    assert b["x_sidecar"]["cached"] is True
+
+
+def test_judge_prompt_covers_namesakes():
+    """Regression: a search for "The Eiffel Tower is in Berlin" surfaced a
+    replica, and the judge graded the claim supported. The prompt now has to
+    tell it that a namesake is not the subject."""
+    from llm_sidecar.verify import JUDGE_SYSTEM
+
+    lowered = JUDGE_SYSTEM.lower()
+    assert "replica" in lowered
+    assert "namesake" in lowered

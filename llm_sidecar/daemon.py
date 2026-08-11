@@ -27,7 +27,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from . import Sidecar
+from . import Sidecar, __version__
 from .config import Config
 from .types import NoWorkingModel, SidecarError
 
@@ -41,6 +41,11 @@ BUDGET_ALIASES = ("free", "cheap", "best")
 class Message(BaseModel):
     role: str
     content: str = ""
+
+
+class VerifyRequest(BaseModel):
+    claims: list[str]
+    model: str = ""
 
 
 class ChatRequest(BaseModel):
@@ -57,7 +62,7 @@ def create_app(config: Config | None = None) -> FastAPI:
 
     cfg = config or config_mod.load()
     sidecar = Sidecar(cfg)
-    app = FastAPI(title="llm-sidecar", version="0.1.0")
+    app = FastAPI(title="llm-sidecar", version=__version__)
 
     def require_token(authorization: str | None = Header(default=None)) -> None:
         """Optional shared-secret gate.
@@ -93,30 +98,39 @@ def create_app(config: Config | None = None) -> FastAPI:
             return {"model": n}
         return {}
 
-    def flatten(messages: list[Message]) -> tuple[str, str | None]:
-        """Split the message list into (prompt, system).
-
-        The core takes a single prompt plus an optional system string, so a
-        multi-turn conversation is rendered back into one prompt. Lossy for
-        long chats — a proper messages-through path is the obvious next step."""
-        system_parts = [m.content for m in messages if m.role == "system"]
-        rest = [m for m in messages if m.role != "system"]
-
-        if len(rest) == 1:
-            prompt = rest[0].content
-        else:
-            prompt = "\n\n".join(f"{m.role}: {m.content}" for m in rest)
-        return prompt, ("\n\n".join(system_parts) or None)
-
     @app.get("/health")
     def health() -> dict:
-        return {
-            "ok": True,
-            "version": "0.1.0",
-            "has_cloud": cfg.has_cloud,
-            "budget": cfg.default_budget,
-            "resolved": sidecar.resolved,
-        }
+        return {"ok": True, "version": __version__, "has_cloud": cfg.has_cloud,
+                "budget": cfg.default_budget, "resolved": sidecar.resolved}
+
+    @app.get("/status")
+    def status(_: None = Depends(require_token)) -> dict:
+        """Everything about this sidecar: hardware, local model fit, search
+        provider, resolved tiers, cache size, 30-day spend."""
+        return sidecar.status()
+
+    @app.get("/usage")
+    def usage(days: int | None = None, _: None = Depends(require_token)) -> dict:
+        return sidecar.usage(days)
+
+    @app.post("/cache/clear")
+    def cache_clear(_: None = Depends(require_token)) -> dict:
+        from . import cache as cache_mod
+        return {"removed": cache_mod.clear()}
+
+    @app.post("/v1/verify")
+    def verify(req: VerifyRequest, _: None = Depends(require_token)) -> dict:
+        """Grounded fact-checking. Not part of the chat-completions standard —
+        it's the capability the daemon exists to share, so it gets an endpoint
+        alongside the compatibility surface."""
+        try:
+            verdicts = sidecar.verify(req.claims, model=req.model or None)
+        except SidecarError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        except Exception as e:
+            logger.exception("verify failed")
+            raise HTTPException(status_code=502, detail=str(e)) from e
+        return {"results": [v.__dict__ for v in verdicts]}
 
     @app.get("/v1/models")
     def list_models(_: None = Depends(require_token)) -> dict:
@@ -142,24 +156,24 @@ def create_app(config: Config | None = None) -> FastAPI:
         if not req.messages:
             raise HTTPException(status_code=400, detail="`messages` must not be empty.")
 
-        prompt, system = flatten(req.messages)
         target = resolve_target(req.model)
+        msgs = [m.model_dump() for m in req.messages]
         created = int(time.time())
         rid = f"chatcmpl-{uuid.uuid4().hex[:24]}"
 
         if req.stream:
             return StreamingResponse(
-                _stream_body(sidecar, rid, created, prompt, system, target, req),
+                _stream_body(sidecar, rid, created, msgs, target, req),
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
             )
 
         try:
             completion = sidecar.complete(
-                prompt,
-                system=system,
+                messages=msgs,
                 max_tokens=req.max_tokens,
                 temperature=req.temperature,
+                operation="daemon",
                 **target,
             )
         except NoWorkingModel as e:
@@ -190,6 +204,8 @@ def create_app(config: Config | None = None) -> FastAPI:
             "x_sidecar": {
                 "cost_usd": completion.usage.cost_usd,
                 "local": completion.is_local,
+                "cached": completion.cached,
+                "latency_s": completion.latency_s,
                 "requested_model": req.model,
             },
         }
@@ -197,7 +213,7 @@ def create_app(config: Config | None = None) -> FastAPI:
     return app
 
 
-async def _stream_body(sidecar, rid, created, prompt, system, target, req):
+async def _stream_body(sidecar, rid, created, msgs, target, req):
     """SSE chunks in the standard streaming shape, terminated by [DONE]."""
     def chunk(delta: dict, model: str, finish: str | None = None) -> str:
         payload = {
@@ -215,8 +231,7 @@ async def _stream_body(sidecar, rid, created, prompt, system, target, req):
         yield chunk({"role": "assistant", "content": ""}, model)
 
         async for ev in sidecar.stream(
-            prompt,
-            system=system,
+            messages=msgs,
             max_tokens=req.max_tokens,
             temperature=req.temperature,
             model=model,

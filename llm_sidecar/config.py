@@ -43,6 +43,27 @@ class Config:
     search_provider: str = "auto"  # auto | ddg | searxng
     searxng_url: str = "http://localhost:8888"
 
+    # ── cache ─────────────────────────────────────────────────────────────
+    # Only deterministic (temperature 0) completions are cached — see cache.py.
+    cache_enabled: bool = True
+    cache_ttl_seconds: float = 7 * 24 * 60 * 60
+    # Searches expire faster: the point of a live search is that it's live.
+    search_cache_ttl_seconds: float = 60 * 60
+
+    # ── ledger ────────────────────────────────────────────────────────────
+    ledger_enabled: bool = True
+
+    # ── concurrency ───────────────────────────────────────────────────────
+    # Parallel searches when gathering evidence for many claims at once.
+    # Higher finishes sooner but is likelier to trip a provider's rate limit;
+    # DuckDuckGo in particular does not enjoy this.
+    max_search_workers: int = 4
+
+    # ── resolution ────────────────────────────────────────────────────────
+    # How long a tier keeps its resolved model before being re-verified. The
+    # pretest proved the model worked *then*; free tiers do not stay working.
+    resolution_ttl_seconds: float = 15 * 60
+
     # ── daemon ────────────────────────────────────────────────────────────
     # Loopback by default and deliberately so: this process holds an API key
     # and will spend real money on request. Binding it to 0.0.0.0 hands that
@@ -110,6 +131,10 @@ def _from_env() -> dict:
             pass
     if os.getenv("LLM_SIDECAR_TOKEN"):
         out["daemon_token"] = os.environ["LLM_SIDECAR_TOKEN"]
+    if os.getenv("LLM_SIDECAR_NO_CACHE"):
+        out["cache_enabled"] = False
+    if os.getenv("LLM_SIDECAR_NO_LEDGER"):
+        out["ledger_enabled"] = False
 
     # Per-tier pins: LLM_SIDECAR_MODEL_FAST etc.
     models = {}

@@ -49,14 +49,27 @@ def search(
     """Search the web. Returns [] rather than raising when a provider is down —
     callers treat "no evidence" and "search broken" the same way, and an
     exception here would take down whatever it was feeding."""
-    from .. import config as config_mod
+    from .. import cache, config as config_mod
+
     config = config or config_mod.load()
     provider = resolve_provider(config)
+    name = provider.__name__.rsplit(".", 1)[-1]
+
+    hit = cache.get_search(config, query, name, max_results, news)
+    if hit is not None:
+        return [SearchResult(**r) for r in hit]
+
     results = provider.search(query, config, max_results=max_results, news=news)
 
     if not results and provider is searxng:
         logger.info("SearXNG returned nothing; falling back to DuckDuckGo.")
         results = ddg.search(query, config, max_results=max_results, news=news)
+
+    # Only cache a non-empty result. An empty list is usually a throttle or a
+    # transient failure, and caching that would turn a blip into an hour of
+    # confidently returning nothing.
+    if results:
+        cache.put_search(config, query, name, max_results, news, [r.__dict__ for r in results])
     return results
 
 

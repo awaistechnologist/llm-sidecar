@@ -4,7 +4,7 @@ A local capability sidecar for AI tooling. One dependency that any program on
 the machine can lean on for inference, search, and grounded fact-checking —
 without hardcoding a provider, an API key, or a model name.
 
-> **Status: early (0.1.0).** The API may still move. Extracted from
+> **Status: early (0.2.0).** The API may still move. Extracted from
 > [Agora](https://github.com/awaistechnologist/agora), where the routing and
 > verification logic was originally built and proven; Agora will become a
 > consumer rather than the owner.
@@ -75,6 +75,31 @@ sc.read_url("https://example.com/article")     # full text, not a snippet
 for v in sc.verify(["The Eiffel Tower is in Berlin"]):
     print(v.verdict, v.note, v.sources)
     # contradicted  The evidence states the Eiffel Tower is in Paris.  [...]
+
+sc.fact_check(article_text)        # extract every claim, then verify each
+
+# Structured work, all at temperature 0 so it's repeatable and cached
+sc.summarise(long_text, style="bullets", focus="security implications")
+sc.classify(tickets, labels=["bug", "feature", "question"])
+sc.extract(invoice, {"total": "amount with currency", "due_date": "ISO date"})
+
+# Introspection
+sc.local_models()   # installed Ollama models scored against this machine
+sc.usage(days=30)   # what you have spent, by model
+sc.status()         # everything at once
+```
+
+### Conversations
+
+`complete` and `stream` take a full message list, not just a prompt:
+
+```python
+sc.complete(messages=[
+    {"role": "system",    "content": "Answer in one word."},
+    {"role": "user",      "content": "Capital of France?"},
+    {"role": "assistant", "content": "Paris"},
+    {"role": "user",      "content": "And Japan?"},
+])   # -> "Tokyo"
 ```
 
 Everything above runs with **no API key** if you have Ollama installed.
@@ -129,7 +154,8 @@ llm-sidecar mcp                   # stdio
 ```
 
 Tools: `search_web`, `read_url`, `verify_claims`, `extract_claims`,
-`delegate`, `sidecar_status`.
+`fact_check_document`, `summarise`, `classify`, `extract_fields`, `delegate`,
+`usage_report`, `sidecar_status`.
 
 Note what's *not* here: a general "call an LLM" tool. An MCP client is already
 a model, so exposing inference to it is close to a no-op. What it can't do for
@@ -141,8 +167,12 @@ bulk work rather than for reasoning.
 
 ```bash
 llm-sidecar status                        # what's configured and reachable
+llm-sidecar models                        # local models scored against your RAM
+llm-sidecar usage --days 30               # what you have spent, by model
 llm-sidecar ask "explain CRDTs" --budget free
 llm-sidecar verify "The Eiffel Tower is in Berlin"
+llm-sidecar sum README.md --style bullets
+llm-sidecar cache stats                   # or: cache clear
 ```
 
 `verify` exits non-zero if any claim came back contradicted, so it drops into
@@ -164,6 +194,8 @@ keyword arguments to `Sidecar(...)`.
 | `LLM_SIDECAR_HOST` | `127.0.0.1` | Daemon bind address |
 | `LLM_SIDECAR_PORT` | `4001` | Daemon port |
 | `LLM_SIDECAR_TOKEN` | — | Require `Authorization: Bearer <token>` |
+| `LLM_SIDECAR_NO_CACHE` | — | Set to disable the response cache |
+| `LLM_SIDECAR_NO_LEDGER` | — | Set to stop recording usage |
 
 The daemon binds loopback deliberately. It holds an API key and spends real
 money on request; on `0.0.0.0` that capability belongs to anything on the
@@ -216,9 +248,13 @@ automatically; if it stops answering, searches fall back to DuckDuckGo.
 | `search/` | Provider dispatch, DDG, SearXNG, `read_url` |
 | `verify.py` | Claim extraction, evidence gathering, judging |
 | `__init__.py` | The `Sidecar` facade |
+| `cache.py` | Response + search cache, deterministic requests only |
+| `ledger.py` | Append-only usage and spend record |
+| `hardware.py` | Memory probe and local-model fit scoring |
+| `ops.py` | `summarise` / `classify` / `extract` with pinned schemas |
 | `daemon.py` | HTTP server, chat-completions format |
 | `mcp_server.py` | MCP tools |
-| `cli.py` | `serve` / `mcp` / `status` / `ask` / `verify` |
+| `cli.py` | `serve` / `mcp` / `status` / `models` / `usage` / `ask` / `verify` / `sum` / `cache` |
 
 The core imports nothing but `httpx`. FastAPI and `mcp` are optional extras,
 pulled in only by the doors that need them — a program that wants
@@ -229,29 +265,39 @@ one directly and never touches the config file.
 ## Tests
 
 ```bash
-pytest                                    # 37 passing, fully offline
+pytest                                    # 63 passing, fully offline
 ```
 
 Fully offline — every network path is stubbed. Live-provider behaviour is
 verified by hand; see the PR description for what was checked against real
 Ollama and OpenRouter endpoints.
 
+## Caching and cost
+
+Deterministic requests (`temperature=0`) are cached to disk, which is why
+re-checking a document after an edit does not re-pay for the claims that
+didn't change. Creative requests are deliberately **not** cached — returning
+a byte-identical answer to someone who asked for randomness is a surprise.
+Searches cache for an hour; a live search that isn't live is worthless.
+
+Every call is appended to a usage ledger (`~/.local/share/llm-sidecar/`), so
+`llm-sidecar usage` can tell you what you actually spent and on which models.
+Both are opt-out via `LLM_SIDECAR_NO_CACHE` / `LLM_SIDECAR_NO_LEDGER`.
+
 ## Not built yet
 
-- Response caching keyed on prompt + model
-- Hardware-aware scoring of local models (which Ollama models actually fit)
-- A persistent usage ledger — costs are per-response today, nothing aggregates
-- Multi-turn: the daemon flattens a message list into one prompt (see below)
+- Streaming does not consult the cache (it would have to replay stored tokens)
+- No embeddings, vector store, or cross-session memory — different product
+- The daemon is single-process; no request queue or concurrency limit
 
 ## Known rough edges
 
-- **The daemon flattens conversations.** The core takes a single prompt plus a
-  system string, so multi-turn chats are rendered into one prompt with role
-  prefixes. Fine for one-shot tool calls, lossy for a long chat. A proper
-  messages-through path is the main thing standing between this and being a
-  drop-in for chat UIs.
 - `read_url` is a regex text extractor, not a readability port. It keeps nav
   chrome. Fine for feeding a model, not for display.
+- **Verification quality is bounded by search quality.** The judge can only
+  grade what the search returned. Ambiguous evidence — a namesake, a replica,
+  a stale page — produces a wrong verdict, and a local SearXNG with full-text
+  `read_url` is a meaningful upgrade over DuckDuckGo snippets here.
 - The `PREFERRED` model lists in `picker.py` go stale as the catalogue churns.
   Missing entries are skipped silently, so staleness degrades ranking rather
   than breaking anything.

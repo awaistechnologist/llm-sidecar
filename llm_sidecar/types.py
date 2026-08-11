@@ -19,6 +19,8 @@ class Completion:
     text: str
     model: str
     usage: Usage = field(default_factory=Usage)
+    latency_s: float = 0.0
+    cached: bool = False
 
     @property
     def is_local(self) -> bool:

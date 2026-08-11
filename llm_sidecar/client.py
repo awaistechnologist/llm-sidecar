@@ -4,6 +4,10 @@ Ollama and OpenRouter both speak OpenAI-compatible chat completions, so the
 only difference is the base URL and the auth header. That symmetry is what
 makes "local or cloud, same call" possible without an abstraction layer.
 
+The unit of work is a **message list**, not a prompt string. A single prompt is
+just the one-message case, and collapsing a conversation into one string loses
+turn boundaries that models are trained to attend to.
+
 Rate limits are handled in two places, on purpose:
   - here, by retrying the same model with backoff (transient throttling)
   - in picker.pick(exclude=...), by rotating to a different model (exhausted)
@@ -15,7 +19,7 @@ import asyncio
 import json
 import logging
 import time
-from typing import AsyncIterator
+from typing import AsyncIterator, Iterable
 
 import httpx
 
@@ -27,6 +31,8 @@ logger = logging.getLogger("llm_sidecar.client")
 OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
 OLLAMA_PREFIX = "ollama/"
 RETRYABLE_STATUS = (429, 503)
+
+Messages = list[dict]
 
 
 def _route(model: str, config: Config) -> tuple[str, str, dict]:
@@ -49,12 +55,26 @@ def _route(model: str, config: Config) -> tuple[str, str, dict]:
     )
 
 
-def _messages(prompt: str, system: str | None) -> list[dict]:
-    msgs = []
+def build_messages(
+    prompt: str | None = None,
+    system: str | None = None,
+    messages: Iterable[dict] | None = None,
+) -> Messages:
+    """Normalise the three ways a caller can express a request.
+
+    `messages` passes through untouched (the fidelity path). `prompt`/`system`
+    is the convenience path. Given both, the prompt is appended as a final
+    user turn — that's what a caller continuing a conversation means."""
+    out: Messages = []
     if system:
-        msgs.append({"role": "system", "content": system})
-    msgs.append({"role": "user", "content": prompt})
-    return msgs
+        out.append({"role": "system", "content": system})
+    if messages:
+        out.extend({"role": m["role"], "content": m.get("content", "")} for m in messages)
+    if prompt is not None:
+        out.append({"role": "user", "content": prompt})
+    if not out:
+        raise ValueError("Nothing to send: provide `prompt` or `messages`.")
+    return out
 
 
 def _usage_from(raw: dict, is_local: bool) -> Usage:
@@ -68,10 +88,9 @@ def _usage_from(raw: dict, is_local: bool) -> Usage:
 
 
 def complete(
-    prompt: str,
+    messages: Messages,
     model: str,
     config: Config,
-    system: str | None = None,
     max_tokens: int = 1000,
     temperature: float = 0.7,
 ) -> Completion:
@@ -80,12 +99,13 @@ def complete(
     is_local = model.startswith(OLLAMA_PREFIX)
     payload = {
         "model": wire_model,
-        "messages": _messages(prompt, system),
+        "messages": messages,
         "temperature": temperature,
         "max_tokens": max_tokens,
     }
 
     delays = config.retry_delays
+    started = time.time()
     for attempt in range(len(delays) + 1):
         try:
             r = httpx.post(url, json=payload, headers=headers, timeout=config.request_timeout)
@@ -96,6 +116,7 @@ def complete(
                 text=text,
                 model=model,
                 usage=_usage_from(data.get("usage") or {}, is_local),
+                latency_s=round(time.time() - started, 3),
             )
         except httpx.HTTPStatusError as e:
             status = e.response.status_code if e.response is not None else 0
@@ -109,10 +130,9 @@ def complete(
 
 
 async def stream(
-    prompt: str,
+    messages: Messages,
     model: str,
     config: Config,
-    system: str | None = None,
     max_tokens: int = 1000,
     temperature: float = 0.7,
     client: httpx.AsyncClient | None = None,
@@ -125,7 +145,7 @@ async def stream(
     is_local = model.startswith(OLLAMA_PREFIX)
     payload = {
         "model": wire_model,
-        "messages": _messages(prompt, system),
+        "messages": messages,
         "temperature": temperature,
         "max_tokens": max_tokens,
         "stream": True,

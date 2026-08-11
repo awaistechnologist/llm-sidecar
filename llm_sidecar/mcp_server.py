@@ -21,7 +21,12 @@ from __future__ import annotations
 
 import logging
 
-from mcp.server.fastmcp import FastMCP
+# SDK 2.0 renamed FastMCP to MCPServer and moved it up a level. The decorator
+# and run() APIs are unchanged, so supporting both is just the import.
+try:
+    from mcp.server import MCPServer as _Server
+except ImportError:  # mcp < 2.0
+    from mcp.server.fastmcp import FastMCP as _Server
 
 from . import Sidecar
 from .types import SidecarError
@@ -30,7 +35,7 @@ from .types import SidecarError
 # traffic corrupts the session.
 logging.basicConfig(level=logging.WARNING)
 
-mcp = FastMCP(
+mcp = _Server(
     name="llm-sidecar",
     instructions=(
         "Local capability sidecar. Use search_web and read_url to gather live "
@@ -175,27 +180,115 @@ def delegate(prompt: str, tier: str = "fast", budget: str = "") -> dict:
 
 
 @mcp.tool()
+def summarise(text: str, style: str = "brief", focus: str = "") -> dict:
+    """
+    Condense text using a cheap or local model, so long documents don't have
+    to pass through your own context.
+
+    Args:
+        text:  The text to summarise.
+        style: "brief" (2-3 sentences), "bullets", "detailed", or "tldr".
+        focus: Optional — narrow the summary to one aspect, e.g. "security
+               implications" or "what changed".
+    """
+    try:
+        return {"summary": sidecar().summarise(text, style=style, focus=focus)}
+    except SidecarError as e:
+        return {"error": str(e)}
+    except Exception as e:
+        return {"error": f"Summarise failed: {e}"}
+
+
+@mcp.tool()
+def classify(items: list[str], labels: list[str], multi: bool = False) -> dict:
+    """
+    Sort items into labels you provide. Useful for triaging logs, tickets,
+    or search results in bulk.
+
+    Labels are enforced: anything the model invents is discarded and the item
+    comes back as "unknown" rather than silently mislabelled.
+
+    Args:
+        items:  The things to classify.
+        labels: The allowed labels (at least two).
+        multi:  Allow more than one label per item.
+    """
+    try:
+        return {"results": sidecar().classify(items, labels, multi=multi)}
+    except SidecarError as e:
+        return {"error": str(e)}
+    except Exception as e:
+        return {"error": f"Classify failed: {e}"}
+
+
+@mcp.tool()
+def extract_fields(text: str, fields: dict) -> dict:
+    """
+    Pull named fields out of unstructured text into a JSON object.
+
+    Args:
+        text:   The source text.
+        fields: Map of field name -> description of what it is, e.g.
+                {"invoice_total": "the total amount including tax",
+                 "due_date": "the payment due date in ISO format"}.
+
+    Fields not present in the text come back as null rather than a guess.
+    """
+    try:
+        return {"fields": sidecar().extract(text, fields)}
+    except SidecarError as e:
+        return {"error": str(e)}
+    except Exception as e:
+        return {"error": f"Extract failed: {e}"}
+
+
+@mcp.tool()
+def fact_check_document(text: str) -> dict:
+    """
+    Extract every factual claim from a document and verify each against live
+    web evidence. Combines extract_claims and verify_claims in one pass.
+
+    Use on drafts, articles, or AI-generated text before publishing.
+    """
+    try:
+        verdicts = sidecar().fact_check(text)
+    except SidecarError as e:
+        return {"error": str(e)}
+    except Exception as e:
+        return {"error": f"Fact check failed: {e}"}
+    return {
+        "checked": len(verdicts),
+        "contradicted": sum(1 for v in verdicts if v.verdict == "contradicted"),
+        "results": [
+            {"claim": v.claim, "verdict": v.verdict, "note": v.note, "sources": v.sources}
+            for v in verdicts
+        ],
+    }
+
+
+@mcp.tool()
+def usage_report(days: int = 30) -> dict:
+    """
+    What this sidecar has spent and on which models, over the last N days.
+    Counts cached responses separately since those cost nothing.
+    """
+    try:
+        return sidecar().usage(days)
+    except Exception as e:
+        return {"error": f"Usage lookup failed: {e}"}
+
+
+@mcp.tool()
 def sidecar_status() -> dict:
     """
-    What this sidecar can currently do: whether a cloud key is present, which
-    local models are installed, the active search provider, and which models
-    the tiers have resolved to so far.
+    What this sidecar can currently do: whether a cloud key is present, the
+    active search provider, this machine's memory and which local models
+    actually fit in it, resolved tiers, cache size, and 30-day spend.
     """
-    sc = sidecar()
-    from .search import resolve_provider
-
-    local = [m.id for m in sc.models() if m.is_local]
     try:
-        provider = resolve_provider(sc.config).__name__.rsplit(".", 1)[-1]
-    except Exception:
-        provider = "unknown"
-    return {
-        "cloud_configured": sc.config.has_cloud,
-        "default_budget": sc.config.default_budget,
-        "search_provider": provider,
-        "local_models": local,
-        "resolved_tiers": sc.resolved,
-    }
+        return sidecar().status()
+    except Exception as e:
+        return {"error": f"Status failed: {e}"}
 
 
 def main() -> None:

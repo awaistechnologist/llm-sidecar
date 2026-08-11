@@ -16,9 +16,8 @@ it gains SearXNG and full-text fetching automatically.
 
 from __future__ import annotations
 
-import json
 import logging
-import re
+from concurrent.futures import ThreadPoolExecutor
 
 from .config import Config
 from .types import ClaimVerdict, SidecarError
@@ -40,6 +39,11 @@ given web search evidence. Grade each claim STRICTLY on the evidence provided:
 IMPORTANT: grade the claim exactly as stated, including its negations. A line that says
 "X is a myth" or "X? Not true" is asserting NOT-X — if the evidence debunks X, that line
 is "supported", not "contradicted".
+IMPORTANT: match the claim's actual subject, not merely its words. Evidence about a
+replica, a namesake, a model, a different entity sharing the name, or a differently
+located branch does NOT support a claim about the principal subject. "The Eiffel Tower
+is in Berlin" is contradicted by evidence placing the Eiffel Tower in Paris, even if
+some source mentions an Eiffel Tower replica in Berlin.
 Never use outside knowledge to mark a claim "supported" — evidence only. You may use
 well-established knowledge to mark an obviously false claim "contradicted".
 Respond ONLY with valid JSON, no markdown fences, no commentary."""
@@ -59,23 +63,10 @@ Respond ONLY with valid JSON: {"claims": ["...", "..."]}"""
 
 
 def _parse_json(raw: str) -> dict:
-    """Models wrap JSON in prose or fences no matter how firmly you ask them not to."""
-    text = raw.strip()
-    fence = re.search(r"```(?:json)?\s*(.*?)```", text, re.S)
-    if fence:
-        text = fence.group(1).strip()
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
-    # Last resort: the outermost brace pair.
-    start, end = text.find("{"), text.rfind("}")
-    if start != -1 and end > start:
-        try:
-            return json.loads(text[start:end + 1])
-        except json.JSONDecodeError:
-            pass
-    raise SidecarError(f"Judge returned unparseable JSON: {raw[:200]}")
+    """Shared with ops — models wrap JSON in prose or fences regardless."""
+    from .ops import parse_json_response
+
+    return parse_json_response(raw)
 
 
 def gather_evidence(claim: str, config: Config, max_results: int = MAX_EVIDENCE_PER_CLAIM) -> list[dict]:
@@ -89,13 +80,35 @@ def gather_evidence(claim: str, config: Config, max_results: int = MAX_EVIDENCE_
     ]
 
 
+def gather_all(claims: list[str], config: Config) -> dict[str, list[dict]]:
+    """Evidence for every claim, searched in parallel.
+
+    Sequential search was the dominant cost of a multi-claim check — twenty
+    claims meant twenty round trips end to end. The worker count is capped in
+    config because providers notice; DuckDuckGo especially."""
+    workers = max(1, min(config.max_search_workers, len(claims)))
+    if workers == 1:
+        return {c: gather_evidence(c, config) for c in claims}
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {c: pool.submit(gather_evidence, c, config) for c in claims}
+        out = {}
+        for claim, fut in futures.items():
+            try:
+                out[claim] = fut.result()
+            except Exception as e:
+                # One failed search shouldn't sink the batch — the claim just
+                # gets graded with no evidence, which means "unverified".
+                logger.warning(f"Evidence search failed for {claim[:50]!r}: {e}")
+                out[claim] = []
+        return out
+
+
 def _judge_batch(
     batch: list[tuple[str, list[dict]]],
-    model: str,
-    config: Config,
+    sidecar,
+    model: str | None,
 ) -> list[dict]:
-    from . import client
-
     blocks = []
     for i, (claim, evidence) in enumerate(batch, 1):
         lines = [f"CLAIM {i}: {claim}", "EVIDENCE:"]
@@ -106,30 +119,28 @@ def _judge_batch(
             lines.append("- (no evidence found)")
         blocks.append("\n".join(lines))
 
-    prompt = JUDGE_TEMPLATE.format(blocks="\n\n".join(blocks))
-    completion = client.complete(
-        prompt,
-        model=model,
-        config=config,
+    completion = sidecar.complete(
+        JUDGE_TEMPLATE.format(blocks="\n\n".join(blocks)),
         system=JUDGE_SYSTEM,
+        model=model,
+        tier="fast",
         max_tokens=1200,
         temperature=0.0,
+        operation="verify",
     )
-    parsed = _parse_json(completion.text)
-    return parsed.get("results") or []
+    return _parse_json(completion.text).get("results") or []
 
 
-def extract_claims(text: str, config: Config, model: str) -> list[str]:
+def extract_claims(text: str, sidecar, model: str | None = None) -> list[str]:
     """Pull self-contained factual claims out of a block of prose."""
-    from . import client
-
-    completion = client.complete(
+    completion = sidecar.complete(
         f"Text:\n\n{text}",
-        model=model,
-        config=config,
         system=EXTRACT_SYSTEM,
+        model=model,
+        tier="fast",
         max_tokens=1500,
         temperature=0.0,
+        operation="extract_claims",
     )
     claims = _parse_json(completion.text).get("claims") or []
     return [c for c in claims if isinstance(c, str) and c.strip()]
@@ -139,29 +150,31 @@ def verify_claims(
     claims: list[str],
     config: Config,
     model: str | None = None,
+    sidecar=None,
 ) -> list[ClaimVerdict]:
     """Verify a list of claims. Returns one verdict per claim, in order.
 
-    `model` defaults to the configured fast tier, or an auto-picked one."""
-    from . import picker
-
+    Routing goes through a Sidecar so the judge calls are cached and recorded
+    like any other completion — re-checking a document after an edit should
+    not re-pay for the claims that didn't change."""
     claims = [c.strip() for c in claims if c and c.strip()]
     if not claims:
         return []
     if len(claims) > MAX_CLAIMS:
         raise SidecarError(f"Too many claims ({len(claims)}); the limit is {MAX_CLAIMS}.")
 
-    if not model:
-        model = config.tier_model("fast") or picker.pick(config).model_id
+    if sidecar is None:
+        from . import Sidecar
+        sidecar = Sidecar(config)
 
-    evidence_by_claim = {c: gather_evidence(c, config) for c in claims}
+    evidence_by_claim = gather_all(claims, config)
 
     verdicts: list[ClaimVerdict] = []
     for start in range(0, len(claims), BATCH_SIZE):
         chunk = claims[start:start + BATCH_SIZE]
         batch = [(c, evidence_by_claim[c]) for c in chunk]
         try:
-            graded = _judge_batch(batch, model, config)
+            graded = _judge_batch(batch, sidecar, model)
         except Exception as e:
             logger.warning(f"Judge call failed for batch at {start}: {e}")
             graded = []
