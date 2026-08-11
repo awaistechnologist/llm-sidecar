@@ -56,37 +56,51 @@ class Sidecar:
 
     def __init__(self, config: Config | None = None, **overrides):
         self.config = config or config_mod.load(**overrides)
-        # Resolved tier -> model id for this process. Picking costs a live
-        # pretest call, so we do it once per tier and reuse, rotating only
-        # when a model actually fails.
+        # Resolved "tier:budget" -> model id for this process. Picking costs a
+        # live pretest call, so we do it once per combination and reuse,
+        # rotating only when a model actually fails.
+        #
+        # Budget is part of the key on purpose: a request for the `best`
+        # budget must not be served the model a previous `free` request
+        # resolved to. Getting a cheap model when you asked for an expensive
+        # one is a silent wrong answer, which is worse than a slow one.
         self._resolved: dict[str, str] = {}
         self._failed: set[str] = set()
 
     # ── model resolution ──────────────────────────────────────────────────
 
+    @property
+    def resolved(self) -> dict[str, str]:
+        """What each tier:budget combination has resolved to so far."""
+        return dict(self._resolved)
+
     def model_for(self, tier: str | None = None, budget: str | None = None) -> str:
         """The model id this tier resolves to — a pin if configured, else a
         freshly verified pick."""
         tier = tier or self.config.default_tier
+        budget = budget or self.config.default_budget
         pinned = self.config.tier_model(tier)
         if pinned:
             return pinned
-        if tier in self._resolved:
-            return self._resolved[tier]
+
+        key = f"{tier}:{budget}"
+        if key in self._resolved:
+            return self._resolved[key]
         chosen = picker.pick(self.config, budget, exclude=self._failed).model_id
-        self._resolved[tier] = chosen
+        self._resolved[key] = chosen
         return chosen
 
     def pool(self, budget: str | None = None) -> dict[str, Pick]:
         """Three distinct verified models mapped to tiers, for parallel work."""
+        budget = budget or self.config.default_budget
         picks = picker.pick_pool(self.config, budget, exclude=self._failed)
-        self._resolved.update({tier: p.model_id for tier, p in picks.items()})
+        self._resolved.update({f"{tier}:{budget}": p.model_id for tier, p in picks.items()})
         return picks
 
     def _rotate(self, model: str) -> None:
         """Mark a model dead for this process so the next pick skips it."""
         self._failed.add(model)
-        self._resolved = {t: m for t, m in self._resolved.items() if m != model}
+        self._resolved = {k: m for k, m in self._resolved.items() if m != model}
 
     # ── inference ─────────────────────────────────────────────────────────
 

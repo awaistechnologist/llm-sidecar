@@ -43,6 +43,17 @@ class Config:
     search_provider: str = "auto"  # auto | ddg | searxng
     searxng_url: str = "http://localhost:8888"
 
+    # ── daemon ────────────────────────────────────────────────────────────
+    # Loopback by default and deliberately so: this process holds an API key
+    # and will spend real money on request. Binding it to 0.0.0.0 hands that
+    # to anything on the network.
+    daemon_host: str = "127.0.0.1"
+    daemon_port: int = 4001
+    # When set, requests must present it as `Authorization: Bearer <token>`.
+    # Off by default — on a loopback socket the OS is already the boundary —
+    # but worth setting on a shared machine.
+    daemon_token: str | None = None
+
     # ── network ───────────────────────────────────────────────────────────
     request_timeout: float = 300.0
     pretest_timeout: float = 15.0
@@ -90,6 +101,15 @@ def _from_env() -> dict:
         out["search_provider"] = os.environ["LLM_SIDECAR_SEARCH_PROVIDER"]
     if os.getenv("SEARXNG_URL"):
         out["searxng_url"] = os.environ["SEARXNG_URL"]
+    if os.getenv("LLM_SIDECAR_HOST"):
+        out["daemon_host"] = os.environ["LLM_SIDECAR_HOST"]
+    if os.getenv("LLM_SIDECAR_PORT"):
+        try:
+            out["daemon_port"] = int(os.environ["LLM_SIDECAR_PORT"])
+        except ValueError:
+            pass
+    if os.getenv("LLM_SIDECAR_TOKEN"):
+        out["daemon_token"] = os.environ["LLM_SIDECAR_TOKEN"]
 
     # Per-tier pins: LLM_SIDECAR_MODEL_FAST etc.
     models = {}

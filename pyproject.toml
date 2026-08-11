@@ -1,0 +1,53 @@
+# Packaging metadata for llm-sidecar.
+#
+# The package currently lives inside the Agora repo. This file is here so the
+# extraction into a standalone repo is a `git subtree split` plus moving this
+# up one level — not a rewrite. Nothing in Agora reads it.
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "llm-sidecar"
+version = "0.1.0"
+description = "A local capability sidecar for AI tooling: routed inference, web search, and grounded fact-checking."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+keywords = ["llm", "ollama", "openrouter", "mcp", "fact-checking", "local-first", "sidecar"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+# The core library stays deliberately thin — a program that only wants
+# `Sidecar().complete()` should not be made to install a web framework.
+dependencies = [
+    "httpx>=0.28.0",
+]
+
+[project.optional-dependencies]
+# Keyless web search.
+search = ["ddgs>=9.10.0"]
+# The OpenAI-compatible HTTP daemon.
+daemon = ["fastapi", "uvicorn[standard]", "pydantic"]
+# The MCP server.
+mcp = ["mcp>=1.0.0"]
+all = ["ddgs>=9.10.0", "fastapi", "uvicorn[standard]", "pydantic", "mcp>=1.0.0"]
+dev = ["pytest", "openai"]
+
+[project.scripts]
+llm-sidecar = "llm_sidecar.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/awaistechnologist/llm-sidecar"
+Issues = "https://github.com/awaistechnologist/llm-sidecar/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["llm_sidecar"]
