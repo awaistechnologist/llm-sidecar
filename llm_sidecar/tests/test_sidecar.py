@@ -2188,19 +2188,30 @@ def test_default_install_covers_every_door():
         assert needed in deps, f"{needed} must be a default dependency, not an extra"
 
 
-def test_service_refuses_a_tcc_protected_location():
+def test_service_refuses_a_tcc_protected_location(monkeypatch):
     """macOS gates ~/Documents behind a privacy prompt that background
     services never get. A launchd agent pointed there dies on startup and,
-    with KeepAlive, is restarted forever — which is what happened."""
+    with KeepAlive, is restarted forever — which is what happened.
+
+    Darwin is forced so the logic is exercised on every runner; the function
+    correctly no-ops elsewhere, since TCC is a macOS thing. Paths are built
+    with Path so separators are native on Windows."""
     from pathlib import Path
 
-    from llm_sidecar.service import _protected_location
+    from llm_sidecar import service
 
-    home = str(Path.home())
-    assert _protected_location(f"{home}/Documents/x/.venv/bin/llm-sidecar") == "Documents"
-    assert _protected_location(f"{home}/Desktop/x/bin/llm-sidecar") == "Desktop"
-    assert _protected_location(f"{home}/Library/Application Support/pipx/venvs/x/bin/llm-sidecar") is None
-    assert _protected_location("/opt/homebrew/bin/llm-sidecar") is None
+    monkeypatch.setattr(service.platform, "system", lambda: "Darwin")
+    home = Path.home()
+
+    assert service._protected_location(str(home / "Documents" / "x" / "bin" / "llm-sidecar")) == "Documents"
+    assert service._protected_location(str(home / "Desktop" / "x" / "llm-sidecar")) == "Desktop"
+    assert service._protected_location(
+        str(home / "Library" / "Application Support" / "pipx" / "venvs" / "x" / "llm-sidecar")) is None
+    assert service._protected_location(str(Path("/opt/homebrew/bin/llm-sidecar"))) is None
+
+    # And it must stay a no-op off macOS, where the whole concept is absent.
+    monkeypatch.setattr(service.platform, "system", lambda: "Linux")
+    assert service._protected_location(str(home / "Documents" / "x" / "llm-sidecar")) is None
 
 
 def test_service_install_explains_the_fix(monkeypatch):
