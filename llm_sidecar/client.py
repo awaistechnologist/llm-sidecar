@@ -31,6 +31,44 @@ logger = logging.getLogger("llm_sidecar.client")
 OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
 OLLAMA_PREFIX = "ollama/"
 RETRYABLE_STATUS = (429, 503)
+
+
+class UpstreamError(RuntimeError):
+    """A provider failed inside an otherwise-successful HTTP response.
+
+    OpenRouter proxies many providers, and a provider failure often arrives as
+    HTTP 200 with an `error` object and no choices. Checking only the status
+    code turned that into an empty completion recorded as a success — the
+    caller got "" and no rotation happened, because nothing had raised."""
+
+    def __init__(self, message: str, status: int = 0):
+        super().__init__(message)
+        self.status = status
+
+# OpenRouter can retrieve and answer in a single call via its web plugin.
+# This is NOT a search API — you cannot ask it for results without paying for
+# a completion too — which is why it lives here rather than in search/.
+#
+# It is also NOT free: OpenRouter bills roughly $4 per 1000 results on top of
+# tokens. Never enabled implicitly; the caller has to ask.
+WEB_PLUGIN_ID = "web"
+DEFAULT_WEB_RESULTS = 5
+
+
+def _citations_from(message: dict) -> list[dict]:
+    """Pull url_citation annotations out of a response message."""
+    out = []
+    for note in message.get("annotations") or []:
+        if note.get("type") != "url_citation":
+            continue
+        c = note.get("url_citation") or {}
+        if c.get("url"):
+            out.append({
+                "title": c.get("title", ""),
+                "url": c["url"],
+                "content": (c.get("content") or "")[:600],
+            })
+    return out
 # Never sleep longer than this on a provider's say-so. Some hand out
 # Retry-After values in the hundreds of seconds, which is a hang as far as
 # the caller is concerned — better to rotate to another model.
@@ -99,6 +137,17 @@ def build_messages(
     return out
 
 
+def _raise_for_body(data: dict, model: str) -> None:
+    """Catch provider failures that arrive dressed as success."""
+    err = data.get("error")
+    if err:
+        message = err.get("message") if isinstance(err, dict) else str(err)
+        status = err.get("code") if isinstance(err, dict) else 0
+        raise UpstreamError(f"{model}: {message}", status=status if isinstance(status, int) else 0)
+    if not data.get("choices"):
+        raise UpstreamError(f"{model}: response contained no choices")
+
+
 def _usage_from(raw: dict, is_local: bool) -> Usage:
     # Local inference has no bill, whatever the response claims.
     return Usage(
@@ -115,8 +164,15 @@ def complete(
     config: Config,
     max_tokens: int = 1000,
     temperature: float = 0.7,
+    web: bool = False,
+    web_results: int = DEFAULT_WEB_RESULTS,
 ) -> Completion:
-    """One blocking completion, retrying transient throttling with backoff."""
+    """One blocking completion, retrying transient throttling with backoff.
+
+    `web=True` asks OpenRouter to search and answer in one call. Ignored for
+    Ollama, which has no such facility — silently, because the sensible
+    fallback for a local model is simply to answer without it, and raising
+    would make `web=True` unusable as a default."""
     url, wire_model, headers = _route(model, config)
     is_local = model.startswith(OLLAMA_PREFIX)
     payload = {
@@ -125,6 +181,10 @@ def complete(
         "temperature": temperature,
         "max_tokens": max_tokens,
     }
+    if web and not is_local:
+        payload["plugins"] = [{"id": WEB_PLUGIN_ID, "max_results": web_results}]
+    elif web and is_local:
+        logger.info(f"web=True ignored for local model {model}")
 
     delays = config.retry_delays
     started = time.time()
@@ -133,18 +193,24 @@ def complete(
             r = httpx.post(url, json=payload, headers=headers, timeout=config.request_timeout)
             r.raise_for_status()
             data = r.json()
-            text = (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
+            _raise_for_body(data, model)
+            message = (data.get("choices") or [{}])[0].get("message", {}) or {}
             return Completion(
-                text=text,
+                text=message.get("content", ""),
                 model=model,
                 usage=_usage_from(data.get("usage") or {}, is_local),
                 latency_s=round(time.time() - started, 3),
+                citations=_citations_from(message),
             )
-        except httpx.HTTPStatusError as e:
-            status = e.response.status_code if e.response is not None else 0
+        except (httpx.HTTPStatusError, UpstreamError) as e:
+            if isinstance(e, UpstreamError):
+                status, response = e.status, None
+            else:
+                status = e.response.status_code if e.response is not None else 0
+                response = e.response
             if status in RETRYABLE_STATUS and attempt < len(delays):
-                wait = _retry_delay(e.response, delays[attempt])
-                logger.warning(f"{model} → HTTP {status}, retrying in {wait}s")
+                wait = _retry_delay(response, delays[attempt])
+                logger.warning(f"{model} → {status}, retrying in {wait}s")
                 time.sleep(wait)
                 continue
             raise

@@ -230,6 +230,109 @@ not installing — the page is a ~40 KB file inside the package either way.
 
 Swagger for the same API is at `/docs`.
 
+## How a model gets chosen
+
+Four ways to say what you want, checked in this order. The first one that
+applies wins.
+
+```
+  your call
+      │
+      ├─ model="ollama/qwen2.5:32b" ─────────────────► that model. Full stop.
+      │     an explicit id, always obeyed, never rotated away from
+      │
+      ├─ tier="fast" and that tier is PINNED ────────► the pinned model
+      │     pinned in config, env, or by clicking F/B/P in the dashboard
+      │
+      ├─ tier + budget ──────────────► resolve, cache for 15 min, reuse
+      │     "fast|balanced|powerful" × "free|cheap|best"
+      │
+      └─ nothing at all ─────────────► default tier + default budget
+            balanced × free, unless you changed them
+```
+
+**Resolving** is the interesting case:
+
+```
+  budget=free
+      │
+      ├─ API key set?  yes ─► free OpenRouter models first, Ollama as backup
+      │                no  ─► Ollama only  (cloud models can't work anyway)
+      │
+      ▼
+  candidate list, best first
+      │
+      ├─ probe 3 at once ── all fail ──► probe the next 3 ──► … 
+      │       │
+      │       └─ one answers "OK" ──► that's your model, cached 15 min
+      │             highest-priority success wins, not whichever
+      │             happened to reply first
+      ▼
+  every candidate failed ─► NoWorkingModel, listing what was tried
+```
+
+Two things this buys you. A model in the catalogue is not a working model —
+free tiers throttle and checkpoints get retired — so nothing is returned
+without a live probe proving it answers *now*. And if a model passes the probe
+but then fails the real call, it's marked dead for the process and the next
+request routes elsewhere.
+
+### Tier vs budget
+
+They answer different questions and are often confused:
+
+| | question | values |
+|---|---|---|
+| **tier** | how capable does this need to be? | `fast` `balanced` `powerful` |
+| **budget** | what is it allowed to cost? | `free` `cheap` `best` |
+
+A tier is a *role*, not a model. `fast` is whatever currently fills the fast
+slot — which on a laptop with no key is a local 3B, and with a key might be a
+free 31B in the cloud. The resolution cache is keyed on **both**, so asking
+for `best` never gets served the model a previous `free` request settled on.
+
+### `auto`, and the daemon's `model` field
+
+Over HTTP the `model` field is a *request*, not an instruction:
+
+```
+"model": "fast" | "balanced" | "powerful"  ─► route by that tier
+"model": "free" | "cheap" | "best"         ─► route by that budget
+"model": "anything/with-a-slash"           ─► used verbatim
+"model": "auto" | "gpt-4o" | anything else ─► ignored; use the defaults
+```
+
+That last line is the point of the daemon. A tool that hardcodes `gpt-4o` gets
+a verified working model and never finds out.
+
+### What answered, and what it cost
+
+Every path reports back, so you never have to guess:
+
+| where | how |
+|---|---|
+| library | `completion.model`, `.usage.cost_usd`, `.cached`, `.latency_s` |
+| HTTP | `model` in the response, plus an `x_sidecar` block |
+| streaming | a final frame carrying usage and cost |
+| dashboard chat | under each reply: `ollama/llama3.2:3b · 0.3s · 37 tok · free` |
+| MCP `delegate` | `model`, `cost_usd`, `local` in the result |
+| CLI | a receipt line on stderr |
+| all of it | appended to the ledger — `llm-sidecar usage` |
+
+### It is the same everywhere
+
+Verification, summarising, classification, extraction and answering all route
+through the same picker. They differ only in which tier they ask for:
+
+```
+  verify / summarise / classify / extract   ─► tier "fast"    (bulk, cheap)
+  answer / chat / anything unspecified      ─► tier "balanced"
+  you, explicitly                           ─► whatever you pass
+```
+
+So setting a key, pinning a tier, or changing the budget changes every
+capability at once — not just chat.
+
 ## Configuration
 
 Precedence: defaults < `~/.config/llm-sidecar/config.json` < environment <
@@ -262,17 +365,34 @@ neither grows without bound in your home directory.
 `config.save()` deliberately **does not write the API key** to disk. Pass
 `include_api_key=True` if you really want it in a plaintext file in `$HOME`.
 
-### Tiers and budgets
+### Retrieval: who does the searching
 
-A **tier** (`fast`/`balanced`/`powerful`) is what the caller asks for. A
-**budget** (`free`/`cheap`/`best`) is what it's allowed to cost. Pin a tier to
-a model and it's used verbatim; leave it unset and the picker resolves it live
-against the budget.
+| mode | cost | when |
+|---|---|---|
+| DuckDuckGo | free, no setup | the default |
+| SearXNG | free, one command to start | more engines, no shared rate limit |
+| OpenRouter | **billed per result** | when the free ones are being blocked |
 
-`Sidecar.pool()` returns three *distinct* verified models mapped onto the
-tiers. That's for parallel workloads: spreading concurrent calls across
-providers is the difference between a free tier that works and one that 429s
-halfway through.
+The first two are ordinary web search: results come back, we read the pages,
+then a model answers. OpenRouter is different in kind — it is not a search
+API. Its web plugin retrieves *inside* a chat completion, so you cannot ask it
+for results without also paying for a completion. That is why it appears as
+`answer(via="openrouter")` and `complete(web=True)` rather than as a third
+search provider.
+
+It costs roughly $4 per 1000 results on top of tokens, so it is never a
+default and never reachable implicitly. What you get for that: retrieval that
+doesn't care whether DuckDuckGo is serving you CAPTCHAs, and noticeably better
+sources — World Bank and WHO where local search was returning forum threads.
+
+```python
+sc.answer("What is Iran's population?")                      # free
+sc.answer("What is Iran's population?", via="openrouter")    # billed
+sc.complete("What shipped in Python 3.14?", web=True)        # billed
+```
+
+Web-retrieving calls are never cached: the reason to pay for retrieval is that
+the answer might have changed.
 
 ### Better search with SearXNG
 
@@ -348,7 +468,7 @@ one directly and never touches the config file.
 ## Tests
 
 ```bash
-pytest                                    # 128 passing, fully offline
+pytest                                    # 138 passing, fully offline
 ```
 
 Fully offline — every network path is stubbed. Live-provider behaviour is

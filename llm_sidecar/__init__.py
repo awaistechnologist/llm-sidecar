@@ -163,6 +163,8 @@ class Sidecar:
         max_tokens: int = 1000,
         temperature: float = 0.7,
         operation: str = "complete",
+        web: bool = False,
+        web_results: int = 5,
     ) -> Completion:
         """A completion. Pass `messages` for a real conversation, or
         `prompt`/`system` for the one-shot case. Give a `model` to pin one, or
@@ -174,7 +176,10 @@ class Sidecar:
         msgs = client.build_messages(prompt, system, messages)
 
         chosen = model or self.model_for(tier, budget)
-        hit = cache.get_completion(self.config, msgs, chosen, max_tokens, temperature)
+        # Web-retrieving calls are never cached: the whole reason to pay for
+        # retrieval is that the answer might have changed since last time.
+        hit = (None if web else
+               cache.get_completion(self.config, msgs, chosen, max_tokens, temperature))
         if hit is not None:
             done = Completion(
                 text=hit["text"], model=hit["model"],
@@ -184,15 +189,19 @@ class Sidecar:
             return done
 
         try:
-            done = client.complete(msgs, chosen, self.config,
-                                   max_tokens=max_tokens, temperature=temperature)
+            done = client.complete(msgs, chosen, self.config, max_tokens=max_tokens,
+                                   temperature=temperature, web=web, web_results=web_results)
         except Exception:
             if model:  # explicitly pinned — the caller meant that model
                 raise
             self._rotate(chosen)
             fallback = self.model_for(tier, budget)
-            done = client.complete(msgs, fallback, self.config,
-                                   max_tokens=max_tokens, temperature=temperature)
+            done = client.complete(msgs, fallback, self.config, max_tokens=max_tokens,
+                                   temperature=temperature, web=web, web_results=web_results)
+
+        if web:
+            self._record(done, operation)
+            return done
 
         cache.put_completion(self.config, msgs, done.model, max_tokens, temperature, {
             "text": done.text, "model": done.model, "usage": done.usage.__dict__,
@@ -307,14 +316,21 @@ class Sidecar:
         tier: str = "balanced",
         max_sources: int = 4,
         read_pages: int = 3,
+        via: str = "local",
     ) -> Answer:
         """Answer a question from live sources, with citations.
+
+        `via` chooses who does the retrieving:
+          "local"      search + read pages ourselves, then answer. Free.
+          "openrouter" one call, OpenRouter searches and answers. Costs money
+                       (~$4 per 1000 results on top of tokens) but sails past
+                       the CAPTCHAs and rate limits that block local search.
 
         Check `.grounded` before trusting `.text` — False means the sources
         didn't contain the answer and the text says what was missing."""
         return answer_mod.answer_question(
             question, self.config, sidecar=self, query=query, model=model,
-            tier=tier, max_sources=max_sources, read_pages=read_pages,
+            tier=tier, max_sources=max_sources, read_pages=read_pages, via=via,
         )
 
     def verify(self, claims: list[str], model: str | None = None) -> list[ClaimVerdict]:

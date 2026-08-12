@@ -1667,3 +1667,159 @@ def test_dashboard_has_a_settings_panel():
     assert "/config/api-key" in html
     assert 'id="cfg-key"' in html and 'type="password"' in html
     assert "/v1/answer" in html
+
+
+# ── OpenRouter web retrieval ──────────────────────────────────────────────────
+
+def test_web_plugin_is_only_sent_to_cloud_models(cfg, monkeypatch):
+    """Ollama has no such facility; sending the plugin would be a 400."""
+    import httpx
+
+    from llm_sidecar import client
+
+    sent = {}
+
+    def capture(url, json=None, **k):
+        sent.update(json or {})
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]},
+                              request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx, "post", capture)
+    client.complete([{"role": "user", "content": "q"}], "openai/gpt-4o", cfg, web=True)
+    assert sent["plugins"] == [{"id": "web", "max_results": 5}]
+
+    sent.clear()
+    client.complete([{"role": "user", "content": "q"}], "ollama/x", cfg, web=True)
+    assert "plugins" not in sent
+
+
+def test_web_result_count_reaches_the_plugin(cfg, monkeypatch):
+    """Each result is billed, so an ignored count costs real money."""
+    import httpx
+
+    from llm_sidecar import client
+
+    sent = {}
+    monkeypatch.setattr(httpx, "post", lambda url, json=None, **k: (
+        sent.update(json or {}),
+        httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]},
+                       request=httpx.Request("POST", url)),
+    )[1])
+    client.complete([{"role": "user", "content": "q"}], "openai/gpt-4o", cfg,
+                    web=True, web_results=2)
+    assert sent["plugins"][0]["max_results"] == 2
+
+
+def test_citations_are_extracted(cfg, monkeypatch):
+    import httpx
+
+    from llm_sidecar import client
+
+    body = {"choices": [{"message": {
+        "content": "answer",
+        "annotations": [
+            {"type": "url_citation", "url_citation": {"url": "http://a", "title": "A", "content": "x"}},
+            {"type": "something_else", "other": {}},
+            {"type": "url_citation", "url_citation": {"title": "no url"}},
+        ],
+    }}]}
+    monkeypatch.setattr(httpx, "post", lambda url, **k: httpx.Response(
+        200, json=body, request=httpx.Request("POST", url)))
+    c = client.complete([{"role": "user", "content": "q"}], "openai/gpt-4o", cfg, web=True)
+    assert [x["url"] for x in c.citations] == ["http://a"]
+
+
+def test_provider_error_inside_a_200_raises(cfg, monkeypatch):
+    """Regression: OpenRouter returns HTTP 200 with an error object and no
+    choices when an upstream provider fails. Checking only the status code
+    turned that into an empty completion recorded as a success, and no
+    rotation happened because nothing raised."""
+    import httpx
+
+    from llm_sidecar import client
+
+    monkeypatch.setattr(httpx, "post", lambda url, **k: httpx.Response(
+        200, json={"error": {"message": "rate-limited upstream", "code": 429}},
+        request=httpx.Request("POST", url)))
+    cfg.retry_delays = ()
+    with pytest.raises(client.UpstreamError) as e:
+        client.complete([{"role": "user", "content": "q"}], "m/1", cfg)
+    assert e.value.status == 429
+
+
+def test_response_with_no_choices_raises(cfg, monkeypatch):
+    import httpx
+
+    from llm_sidecar import client
+
+    monkeypatch.setattr(httpx, "post", lambda url, **k: httpx.Response(
+        200, json={"choices": []}, request=httpx.Request("POST", url)))
+    cfg.retry_delays = ()
+    with pytest.raises(client.UpstreamError):
+        client.complete([{"role": "user", "content": "q"}], "m/1", cfg)
+
+
+def test_upstream_429_rotates_to_another_model(cfg, monkeypatch):
+    """The point of catching it: a throttled model must be swapped, not
+    returned as an empty answer."""
+    from llm_sidecar import client, picker
+    from llm_sidecar.types import Completion, Pick
+
+    handed = iter(["bad/model", "good/model"])
+    monkeypatch.setattr(picker, "pick", lambda *a, **k: Pick(next(handed), "m"))
+
+    def flaky(messages, model, config, **k):
+        if model == "bad/model":
+            raise client.UpstreamError("throttled", status=429)
+        return Completion(text="ok", model=model)
+
+    monkeypatch.setattr(client, "complete", flaky)
+    assert Sidecar(cfg).complete("hi").model == "good/model"
+
+
+def test_openrouter_answer_needs_a_key(cfg):
+    from llm_sidecar import answer as answer_mod
+
+    cfg.openrouter_api_key = None
+    with pytest.raises(SidecarError) as e:
+        answer_mod.answer_question("q", cfg, sidecar=Sidecar(cfg), via="openrouter")
+    assert "via='local'" in str(e.value)      # names the free way out
+
+
+def test_unknown_retrieval_mode_rejected(cfg):
+    from llm_sidecar import answer as answer_mod
+
+    with pytest.raises(SidecarError):
+        answer_mod.answer_question("q", cfg, sidecar=Sidecar(cfg), via="telepathy")
+
+
+def test_openrouter_answer_needs_citations_to_be_grounded(cfg, monkeypatch):
+    """A model claiming "answered": true having retrieved nothing is not
+    grounded, whatever it says about itself."""
+    from llm_sidecar import answer as answer_mod
+    from llm_sidecar.types import Completion
+
+    class Stub:
+        config = cfg
+        def complete(self, *a, **k):
+            return Completion(text='{"answered": true, "answer": "yes"}', model="m", citations=[])
+
+    a = answer_mod._answer_via_openrouter("q", Stub(), None, "fast", 3)
+    assert a.grounded is False
+
+
+def test_web_calls_are_not_cached(cfg, monkeypatch):
+    """Paying for retrieval and then serving a stored answer defeats the
+    point of paying for retrieval."""
+    from llm_sidecar import cache, client, picker
+    from llm_sidecar.types import Completion, Pick
+
+    monkeypatch.setattr(picker, "pick", lambda *a, **k: Pick("m/1", "m"))
+    calls = []
+    monkeypatch.setattr(client, "complete", lambda *a, **k: (
+        calls.append(1), Completion(text="answer", model="m/1"))[1])
+
+    sc = Sidecar(cfg)
+    sc.complete("q", temperature=0.0, web=True)
+    sc.complete("q", temperature=0.0, web=True)
+    assert len(calls) == 2

@@ -166,7 +166,8 @@ def _answer(args) -> int:
     from . import Sidecar
 
     try:
-        a = Sidecar().answer(" ".join(args.question), max_sources=args.sources)
+        a = Sidecar().answer(" ".join(args.question),
+                             max_sources=args.sources, via=args.via)
     except Exception as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
@@ -259,6 +260,8 @@ def main(argv: list[str] | None = None) -> int:
     ans = sub.add_parser("answer", help="answer a question from live sources, with citations")
     ans.add_argument("question", nargs="+")
     ans.add_argument("--sources", type=int, default=4)
+    ans.add_argument("--via", default="local", choices=["local", "openrouter"],
+                     help="openrouter retrieves on their side — better sources, but billed")
     ans.add_argument("--json", action="store_true")
 
     ver = sub.add_parser("verify", help="fact-check claims against live web evidence")

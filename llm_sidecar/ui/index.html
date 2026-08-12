@@ -308,6 +308,10 @@
         <div class="row">
           <input id="t-ask-n" class="short" type="number" value="4" min="1" max="8"
                  title="How many search results to consider">
+          <select id="t-ask-via" title="Who does the retrieving">
+            <option value="local">local search — free</option>
+            <option value="openrouter">OpenRouter — billed per result</option>
+          </select>
           <button class="btn primary" data-run="ask">Ask</button>
           <span class="muted" data-status="ask"></span>
         </div>
@@ -754,6 +758,7 @@ const TOOLS = {
     if (!question) throw new Error("Ask something.");
     const a = await post("/v1/answer", {
       question, max_sources: Number($("t-ask-n").value) || 4,
+      via: $("t-ask-via").value,
     });
     const badge = a.grounded
       ? '<span class="pill ok">from sources</span>'

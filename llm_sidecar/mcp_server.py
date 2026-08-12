@@ -85,7 +85,8 @@ def search_web(query: str, max_results: int = 5, news: bool = False) -> dict:
 
 
 @mcp.tool()
-def answer_question(question: str, query: str = "", max_sources: int = 4) -> dict:
+def answer_question(question: str, query: str = "", max_sources: int = 4,
+                    via: str = "local") -> dict:
     """
     Answer a question from live web sources, with citations.
 
@@ -99,13 +100,20 @@ def answer_question(question: str, query: str = "", max_sources: int = 4) -> dic
         question:    The question, in full.
         query:       Optional search query, when the question phrases badly.
         max_sources: How many results to consider (default 4).
+        via:         "local" searches with DuckDuckGo/SearXNG and reads the
+                     pages — free, but degrades when those are rate-limited.
+                     "openrouter" has OpenRouter retrieve and answer in one
+                     call: better sources and no CAPTCHAs, but it is BILLED
+                     per result and needs an API key. Only choose it when
+                     local retrieval has already returned something useless.
 
     Returns {"answered", "answer", "sources", "caveat"}. Check "answered":
     false means the sources did not settle it and "answer" says what was
     missing — do not present that as a fact.
     """
     try:
-        a = sidecar().answer(question, query=query or None, max_sources=max_sources)
+        a = sidecar().answer(question, query=query or None,
+                             max_sources=max_sources, via=via)
     except SidecarError as e:
         return {"error": str(e)}
     except Exception as e:

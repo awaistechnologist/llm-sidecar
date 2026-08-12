@@ -21,6 +21,9 @@ class Completion:
     usage: Usage = field(default_factory=Usage)
     latency_s: float = 0.0
     cached: bool = False
+    # Populated when OpenRouter's web plugin retrieved alongside the
+    # completion: [{title, url, content}].
+    citations: list[dict] = field(default_factory=list)
 
     @property
     def is_local(self) -> bool:

@@ -110,6 +110,7 @@ def answer_question(
     tier: str = "balanced",
     max_sources: int = 4,
     read_pages: int = 3,
+    via: str = "local",
 ) -> Answer:
     """Answer a question from live sources. See module docstring."""
     question = (question or "").strip()
@@ -121,6 +122,11 @@ def answer_question(
     if sidecar is None:
         from . import Sidecar
         sidecar = Sidecar(config)
+
+    if via == "openrouter":
+        return _answer_via_openrouter(question, sidecar, model, tier, max_sources)
+    if via != "local":
+        raise SidecarError(f"Unknown retrieval mode {via!r}. Expected 'local' or 'openrouter'.")
 
     docs = gather(question, config, query=query,
                   max_sources=max_sources, read_pages=read_pages)
@@ -179,4 +185,81 @@ def answer_question(
         sources=used or [d["url"] for d in docs],
         caveat=str(parsed.get("caveat") or "").strip(),
         model=completion.model,
+    )
+
+
+OPENROUTER_SYSTEM = """You answer questions using the web results available to you.
+
+- Answer the SPECIFIC question asked. If the results do not settle it, set
+  "answered" to false and say what is missing rather than guessing.
+- Include figures, dates and units exactly as the sources give them.
+
+Respond ONLY with valid JSON, no markdown fences, no commentary."""
+
+OPENROUTER_TEMPLATE = """QUESTION: {question}
+
+Respond with exactly this shape:
+{{"answered": true|false,
+  "answer": "a direct answer in one to three sentences, or what is missing",
+  "caveat": "optional: a conflict between sources, or how dated the figure is"}}"""
+
+
+def _answer_via_openrouter(question: str, sidecar, model, tier, max_sources) -> Answer:
+    """Let OpenRouter search and answer in a single call.
+
+    Worth having because it does not care that DuckDuckGo is serving CAPTCHAs
+    — retrieval happens on their side, against better sources. It is billed
+    per result, so it is never the default and never reachable implicitly.
+
+    Uses the same JSON contract as the local route rather than taking prose.
+    That is not fussiness: several capable free models are reasoning models
+    that always narrate their scratchpad into the content, and no wording of
+    "answer only" reliably stops them. Asking for a JSON object gives us a
+    field to read instead of a preamble to strip, and yields a real "answered"
+    flag rather than one inferred from whether citations came back."""
+    if not sidecar.config.has_cloud:
+        raise SidecarError(
+            "OpenRouter retrieval needs an API key. Set one in the dashboard, or use "
+            "via='local' to search with DuckDuckGo/SearXNG for free."
+        )
+
+    completion = sidecar.complete(
+        OPENROUTER_TEMPLATE.format(question=question),
+        system=OPENROUTER_SYSTEM,
+        model=model,
+        tier=tier,
+        temperature=0.0,
+        # Generous on purpose. Several capable free models are reasoning
+        # models that narrate a long scratchpad before producing anything
+        # structured; at 900 tokens they were being cut off mid-thought and
+        # never reached the JSON at all.
+        max_tokens=2500,
+        web=True,
+        # Each result is billed, so the caller's number has to actually reach
+        # the plugin rather than silently falling back to the default.
+        web_results=max_sources,
+        operation="answer-web",
+    )
+
+    from .ops import parse_json_response
+
+    sources = [c["url"] for c in completion.citations]
+    try:
+        parsed = parse_json_response(completion.text)
+    except SidecarError:
+        return Answer(
+            question=question, text=completion.text.strip(), grounded=False,
+            sources=sources, model=completion.model,
+            caveat="The model did not return the expected format; treat this as unchecked.",
+        )
+
+    caveat = str(parsed.get("caveat") or "").strip()
+    billed = "Retrieved by OpenRouter, billed per result."
+    return Answer(
+        question=question,
+        text=str(parsed.get("answer") or "").strip(),
+        grounded=bool(parsed.get("answered")) and bool(sources),
+        sources=sources,
+        model=completion.model,
+        caveat=f"{caveat} {billed}".strip(),
     )

@@ -75,6 +75,9 @@ class AskRequest(BaseModel):
     query: str = ""
     max_sources: int = 4
     read_pages: int = 3
+    # "local" searches and reads pages ourselves (free). "openrouter" has
+    # OpenRouter retrieve and answer in one call — better sources, but billed.
+    via: str = "local"
 
 
 class ClassifyRequest(BaseModel):
@@ -207,7 +210,7 @@ def create_app(config: Config | None = None) -> FastAPI:
         Sits under /v1 alongside verify rather than in /ops: it is a headline
         capability, not a utility."""
         a = _op(sidecar.answer, req.question, query=req.query or None,
-                max_sources=req.max_sources, read_pages=req.read_pages)
+                max_sources=req.max_sources, read_pages=req.read_pages, via=req.via)
         return a.__dict__
 
     @app.post("/ops/classify")
