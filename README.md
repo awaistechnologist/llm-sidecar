@@ -259,13 +259,40 @@ Four checks, first match wins. Same path for every capability above.
 ```
   ① model="ollama/qwen2.5:32b" given?  ──yes──►  use it. never rotated.
                     │ no
-  ② is this tier pinned?               ──yes──►  use the pin.
-     (config, env, or the F·B·P buttons)
+  ② is this tier LOCKED to a model?    ──yes──►  use it.
+     see "Locking a tier" below
                     │ no
   ③ resolved this tier+budget < 15 min ago? ─yes──►  reuse it.
                     │ no
   ④ resolve ▼
 ```
+
+### Locking a tier
+
+Normally a tier chooses its own model on first use and re-checks every 15
+minutes. **Locking** overrides that: the tier always uses the model you named,
+with no candidate search, no probe, and no budget — a locked tier stays put
+even if you ask for `best`.
+
+Four ways to lock, all equivalent:
+
+```bash
+LLM_SIDECAR_MODEL_FAST=ollama/gemma3:27b       # env
+```
+```json
+{"models": {"fast": "ollama/gemma3:27b"}}      // ~/.config/llm-sidecar/config.json
+```
+```
+dashboard → Local models → click "fast" on a row
+POST /config/tier {"tier": "fast", "model": "ollama/gemma3:27b"}
+```
+
+Worth doing when you want the same model every time — reproducible output, no
+probe latency, a model you know works. Worth avoiding otherwise: a locked tier
+never rotates away, so if that model starts failing, the calls fail with it.
+
+Clicking the same slot again unlocks it. Locks set from the dashboard or the
+API apply to the running daemon only and are not written to disk.
 
 ### When is a free OpenRouter model used?
 

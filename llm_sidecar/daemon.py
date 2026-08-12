@@ -291,7 +291,7 @@ def create_app(config: Config | None = None) -> FastAPI:
             "cloud_configured": cfg.has_cloud,
             "would_try": candidates[:6],
             "note": (
-                "Pinned — budget is ignored." if pinned else
+"Locked to this model, so the budget is ignored." if pinned else
                 "No API key, so free means local models only." if budget == "free" and not cfg.has_cloud
                 else "Needs an API key; nothing is eligible without one."
                 if budget in ("cheap", "best") and not cfg.has_cloud else ""

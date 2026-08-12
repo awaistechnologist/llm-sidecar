@@ -232,10 +232,16 @@
 
       <section class="panel wide">
         <h2>Local models &mdash; will they fit?</h2>
+        <p class="hint">
+          Normally a tier picks its own model each time, testing candidates until one
+          answers. Clicking a slot below <strong>locks</strong> that tier to one model
+          instead: no searching, no budget, no swapping if it breaks. Click the same
+          slot again to unlock it.
+        </p>
         <div class="scroll"><table>
           <thead><tr>
             <th>Model</th><th class="num">Size</th><th class="num">Needs</th>
-            <th>Params</th><th>Quant</th><th>Verdict</th><th>Pin to tier</th>
+            <th>Params</th><th>Quant</th><th>Verdict</th><th>Always use for…</th>
           </tr></thead>
           <tbody id="models-body"><tr><td colspan="7" class="muted">Loading…</td></tr></tbody>
         </table></div>
@@ -577,7 +583,8 @@ async function loadModels() {
     const tiers = ["fast", "balanced", "powerful"].map((t) => {
       const on = currentPins[t] === m.id;
       return `<button class="btn tiny${on ? " pinned" : ""}" data-tier="${t}" data-model="${esc(m.id)}"
-               title="${on ? "Unpin" : "Pin " + t + " to this model"}">${t[0].toUpperCase()}</button>`;
+               title="${on ? `Unlock ${t} — go back to choosing automatically`
+                          : `Lock the ${t} slot to this model, always`}">${t}</button>`;
     }).join(" ");
     return `<tr>
       <td class="mono">${esc(m.name)}</td>
@@ -653,7 +660,7 @@ async function showResolved() {
   if (exact) { el.textContent = "→ " + exact + " (exact)"; el.title = ""; return; }
   try {
     const r = await api(`/resolve-preview?tier=${$("chat-tier").value}&budget=${$("chat-budget").value}`);
-    const label = { pinned: "pinned", cached: "cached", unresolved: "" }[r.state];
+    const label = { pinned: "locked", cached: "reusing", unresolved: "" }[r.state];
     el.textContent = r.model
       ? `→ ${r.model}${label ? " (" + label + ")" : ""}`
       : (r.would_try.length ? `→ will try ${r.would_try[0]}` : "→ nothing eligible");

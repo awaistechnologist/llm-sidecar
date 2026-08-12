@@ -1916,7 +1916,7 @@ def test_preview_reports_a_pin_and_says_budget_is_moot(cfg):
     r = c.get("/resolve-preview?tier=fast&budget=best").json()
     assert r["state"] == "pinned"
     assert r["model"] == "ollama/pinned"
-    assert "budget is ignored" in r["note"].lower()
+    assert "budget is ignored" in r["note"].lower()   # and says so in plain words
 
 
 def test_preview_flags_a_paid_budget_with_no_key(cfg):
