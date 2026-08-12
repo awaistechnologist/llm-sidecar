@@ -166,6 +166,7 @@ def complete(
     temperature: float = 0.7,
     web: bool = False,
     web_results: int = DEFAULT_WEB_RESULTS,
+    retry_on_throttle: bool = True,
 ) -> Completion:
     """One blocking completion, retrying transient throttling with backoff.
 
@@ -186,7 +187,10 @@ def complete(
     elif web and is_local:
         logger.info(f"web=True ignored for local model {model}")
 
-    delays = config.retry_delays
+    # When the caller can rotate to a different verified model, waiting out a
+    # throttle is the wrong trade: 25s of backoff to reuse a rate-limited
+    # endpoint, versus one probe to reach a working one.
+    delays = config.retry_delays if retry_on_throttle else ()
     started = time.time()
     for attempt in range(len(delays) + 1):
         try:

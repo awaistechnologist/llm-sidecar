@@ -141,30 +141,23 @@ def answer_question(
         f"[{i}] {d['title']} — {d['url']}\n{d['text']}"
         for i, d in enumerate(docs, 1)
     )
-    completion = sidecar.complete(
-        ANSWER_TEMPLATE.format(sources=blocks, question=question),
-        system=ANSWER_SYSTEM,
-        model=model,
-        tier=tier,
-        temperature=0.0,
-        max_tokens=900,
-        operation="answer",
-    )
-
-    from .ops import parse_json_response
-
     try:
-        parsed = parse_json_response(completion.text)
-    except SidecarError:
-        # A model that ignored the schema still produced prose worth showing,
-        # but we can't claim it was grounded or say which sources it used.
+        parsed, completion = sidecar.complete_json(
+            ANSWER_TEMPLATE.format(sources=blocks, question=question),
+            system=ANSWER_SYSTEM,
+            model=model,
+            tier=tier,
+            max_tokens=2500,
+            operation="answer",
+        )
+    except SidecarError as e:
+        # Better an honest failure than a page of someone's reasoning.
         return Answer(
             question=question,
-            text=completion.text.strip(),
+            text="Could not produce an answer: no available model returned a usable result.",
             grounded=False,
             sources=[d["url"] for d in docs],
-            model=completion.model,
-            caveat="The model did not return the expected format; treat this as unchecked.",
+            caveat=str(e),
         )
 
     used = []

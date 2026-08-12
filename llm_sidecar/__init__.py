@@ -189,8 +189,12 @@ class Sidecar:
             return done
 
         try:
-            done = client.complete(msgs, chosen, self.config, max_tokens=max_tokens,
-                                   temperature=temperature, web=web, web_results=web_results)
+            done = client.complete(
+                msgs, chosen, self.config, max_tokens=max_tokens,
+                temperature=temperature, web=web, web_results=web_results,
+                # An explicitly named model is the only one we can't replace.
+                retry_on_throttle=bool(model),
+            )
         except Exception:
             if model:  # explicitly pinned — the caller meant that model
                 raise
@@ -253,6 +257,53 @@ class Sidecar:
                            latency_s=round(time.time() - started, 3)),
                 operation,
             )
+
+    def complete_json(
+        self,
+        prompt: str,
+        *,
+        system: str | None = None,
+        tier: str | None = None,
+        budget: str | None = None,
+        model: str | None = None,
+        max_tokens: int = 2000,
+        operation: str = "complete",
+        attempts: int = 2,
+    ) -> tuple[dict, Completion]:
+        """A completion that must parse as a JSON object.
+
+        Structured output is a capability, and not every model has it. Several
+        capable free models are reasoning models that narrate a scratchpad and
+        never reach the object — raising the token ceiling only buys them more
+        room to ramble. So an unparseable response is treated exactly like a
+        rate limit: mark the model unusable for this process and try the next
+        verified one.
+
+        Returns (parsed, completion). Raises SidecarError if no model managed
+        it, rather than handing back a plausible-looking empty answer."""
+        from .ops import parse_json_response
+
+        last = None
+        for attempt in range(max(1, attempts)):
+            done = self.complete(
+                prompt, system=system, tier=tier, budget=budget, model=model,
+                temperature=0.0, max_tokens=max_tokens, operation=operation,
+            )
+            try:
+                return parse_json_response(done.text), done
+            except SidecarError as e:
+                last = e
+                logger.warning(
+                    f"{done.model} did not return JSON for {operation!r}"
+                    + ("" if model else "; rotating to another model")
+                )
+                if model:
+                    break          # pinned by the caller — nothing to rotate to
+                self._rotate(done.model)
+        raise SidecarError(
+            f"No available model produced valid JSON for {operation!r} after "
+            f"{attempts} attempt(s). Last error: {last}"
+        )
 
     async def acomplete(self, prompt: str | None = None, **kwargs) -> Completion:
         """`complete` off the event loop.

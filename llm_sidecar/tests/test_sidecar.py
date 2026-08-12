@@ -1521,9 +1521,17 @@ def _stub_answer(monkeypatch, payload, docs=None):
         {"title": "t2", "url": "http://two", "text": "page two"},
     ])
 
+    from llm_sidecar.ops import parse_json_response
+
     class Stub:
+        config = None
+
         def complete(self, *a, **k):
             return Completion(text=payload, model="m/1")
+
+        def complete_json(self, *a, **k):
+            done = Completion(text=payload, model="m/1")
+            return parse_json_response(done.text), done   # raises like the real one
 
     return Stub()
 
@@ -1558,14 +1566,19 @@ def test_answer_prompt_forbids_topical_matches():
     assert "share a topic" in lowered
 
 
-def test_answer_survives_a_model_that_ignores_the_schema(cfg, monkeypatch):
+def test_answer_fails_honestly_when_no_model_can_do_the_schema(cfg, monkeypatch):
+    """Regression: a reasoning model narrated its scratchpad instead of
+    emitting JSON, and the whole 2500-token deliberation was printed as the
+    "answer". Rotating is handled by complete_json; when nothing works, say so
+    rather than surfacing someone's reasoning as a result."""
     from llm_sidecar import answer as answer_mod
 
-    stub = _stub_answer(monkeypatch, "Sorry, here is some prose instead.")
+    stub = _stub_answer(monkeypatch, "Here's a thinking process: 1. Analyze the user input…")
     a = answer_mod.answer_question("q", cfg, sidecar=stub)
-    assert a.grounded is False                # can't claim grounding we didn't verify
-    assert "prose" in a.text
-    assert a.caveat
+    assert a.grounded is False
+    assert "thinking process" not in a.text          # scratchpad not surfaced
+    assert "could not produce an answer" in a.text.lower()
+    assert a.sources                                  # still shows what was read
 
 
 def test_answer_with_no_results_is_honest(cfg, monkeypatch):
@@ -1956,3 +1969,61 @@ def test_dashboard_shows_key_state_as_a_badge():
     assert 'id="cfg-key-state"' in html
     assert "no API key — local only" in html
     assert "API key set" in html
+
+
+def test_complete_json_rotates_past_a_model_that_cannot_do_schema(cfg, monkeypatch):
+    """Structured output is a capability. A model that narrates instead of
+    emitting JSON is as unusable as a throttled one, and gets the same
+    treatment — marked dead, next candidate tried."""
+    from llm_sidecar import client, picker
+    from llm_sidecar.types import Completion, Pick
+
+    handed = iter(["rambler/1", "obedient/1"])
+    monkeypatch.setattr(picker, "pick", lambda *a, **k: Pick(next(handed), "m"))
+    monkeypatch.setattr(client, "complete", lambda msgs, model, config, **k: Completion(
+        text="Here's a thinking process: 1." if model == "rambler/1" else '{"ok": true}',
+        model=model))
+
+    sc = Sidecar(cfg)
+    parsed, done = sc.complete_json("q")
+    assert parsed == {"ok": True}
+    assert done.model == "obedient/1"
+    assert "rambler/1" in sc._failed
+
+
+def test_complete_json_does_not_rotate_a_pinned_model(cfg, monkeypatch):
+    from llm_sidecar import client, picker
+    from llm_sidecar.types import Completion, Pick
+
+    monkeypatch.setattr(picker, "pick", lambda *a, **k: Pick("other/1", "m"))
+    monkeypatch.setattr(client, "complete",
+                        lambda msgs, model, config, **k: Completion(text="not json", model=model))
+
+    sc = Sidecar(cfg)
+    with pytest.raises(SidecarError):
+        sc.complete_json("q", model="mine/1")
+    assert sc._failed == set()          # the caller's choice is left alone
+
+
+def test_throttled_auto_picked_model_is_not_waited_out(cfg, monkeypatch):
+    """25 seconds of backoff to reuse a rate-limited endpoint, when another
+    verified model is one probe away, is the wrong trade."""
+    import httpx
+
+    from llm_sidecar import client
+
+    slept = []
+    monkeypatch.setattr(client.time, "sleep", lambda s: slept.append(s))
+    monkeypatch.setattr(httpx, "post", lambda url, **k: httpx.Response(
+        429, json={"error": "slow down"}, request=httpx.Request("POST", url)))
+
+    with pytest.raises(Exception):
+        client.complete([{"role": "user", "content": "q"}], "m/1", cfg,
+                        retry_on_throttle=False)
+    assert slept == []                  # rotate instead
+
+    slept.clear()
+    with pytest.raises(Exception):
+        client.complete([{"role": "user", "content": "q"}], "m/1", cfg,
+                        retry_on_throttle=True)
+    assert slept                        # pinned model: waiting is all we can do
