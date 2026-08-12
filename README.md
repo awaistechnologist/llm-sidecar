@@ -267,6 +267,33 @@ Four checks, first match wins. Same path for every capability above.
   ④ resolve ▼
 ```
 
+### When is a free OpenRouter model used?
+
+Only one combination reaches them. **Budget decides; tier is irrelevant to
+free-vs-paid.**
+
+| budget | API key | picks from |
+|---|---|---|
+| `free` | **yes** | **free OpenRouter models first**, Ollama as backup |
+| `free` | no | Ollama only |
+| `cheap` | yes | paid under $1/M — never free, never Ollama |
+| `cheap` | no | nothing eligible |
+| `best` | yes | paid over $5/M |
+| `best` | no | nothing eligible |
+
+All three tiers draw from the same pool. With a key and `budget=free`, the
+three tiers get three *different* free models — running parallel work through
+one free endpoint is how you collect 429s.
+
+Two things skip the table entirely: an explicit `model=` id, and a pinned
+tier. **A pin beats the budget**, so a tier pinned to an Ollama model stays
+local no matter what budget you ask for. If the dashboard says `fast + free →
+ollama/...` when you expected cloud, check for a pin first.
+
+`GET /resolve-preview?tier=fast&budget=free` answers all of this for your
+current configuration without probing anything, and the chat panel shows it
+inline.
+
 ### 3 · Resolving
 
 ```
@@ -289,6 +316,13 @@ Four checks, first match wins. Same path for every capability above.
                                  │
                           nothing left ──► NoWorkingModel
 ```
+
+**Which free model, specifically?** The order is a curated list first
+(`PREFERRED` in `picker.py`), then everything else in the budget sorted by
+context length. Curated entries missing from the live catalogue are skipped
+silently, which happens constantly — of nine curated free picks, one survived
+to today. So in practice the order is "the curated ones still alive, then the
+roomiest".
 
 A catalogue entry is not a working model — free tiers throttle, checkpoints
 get retired — so nothing is handed back without a live probe. If a model
@@ -475,7 +509,7 @@ one directly and never touches the config file.
 ## Tests
 
 ```bash
-pytest                                    # 143 passing, fully offline
+pytest                                    # 148 passing, fully offline
 ```
 
 Fully offline — every network path is stubbed. Live-provider behaviour is

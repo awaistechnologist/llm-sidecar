@@ -1877,3 +1877,68 @@ def test_chat_panel_separates_the_axes():
     assert 'id="chat-tier"' in html
     assert 'id="chat-budget"' in html
     assert 'id="chat-resolved"' in html        # shows what it landed on
+
+
+# ── making the decision visible ───────────────────────────────────────────────
+
+def test_preview_explains_a_keyless_free_budget(cfg, monkeypatch):
+    """The chat readout showed only a cached resolution, so "free" looked like
+    it meant Ollama when it actually meant "Ollama, because there's no key"."""
+    from fastapi.testclient import TestClient
+
+    from llm_sidecar import daemon
+
+    cfg.openrouter_api_key = None
+    c = TestClient(daemon.create_app(cfg))
+    r = c.get("/resolve-preview?tier=fast&budget=free").json()
+
+    assert r["state"] == "unresolved"
+    assert r["cloud_configured"] is False
+    assert "no api key" in r["note"].lower()
+    assert all(m.startswith("ollama/") for m in r["would_try"])
+
+
+def test_preview_shows_cloud_first_with_a_key(api):
+    r = api.get("/resolve-preview?tier=fast&budget=free").json()
+    assert r["cloud_configured"] is True
+    assert not r["would_try"][0].startswith("ollama/")
+
+
+def test_preview_reports_a_pin_and_says_budget_is_moot(cfg):
+    """A pin beats the budget entirely, which is exactly the case that made
+    "fast + free says Ollama" look like a contradiction."""
+    from fastapi.testclient import TestClient
+
+    from llm_sidecar import daemon
+
+    cfg.models = {"fast": "ollama/pinned"}
+    c = TestClient(daemon.create_app(cfg))
+    r = c.get("/resolve-preview?tier=fast&budget=best").json()
+    assert r["state"] == "pinned"
+    assert r["model"] == "ollama/pinned"
+    assert "budget is ignored" in r["note"].lower()
+
+
+def test_preview_flags_a_paid_budget_with_no_key(cfg):
+    from fastapi.testclient import TestClient
+
+    from llm_sidecar import daemon
+
+    cfg.openrouter_api_key = None
+    c = TestClient(daemon.create_app(cfg))
+    r = c.get("/resolve-preview?tier=fast&budget=best").json()
+    assert r["would_try"] == []
+    assert "api key" in r["note"].lower()
+
+
+def test_preview_does_not_probe(cfg, monkeypatch):
+    """It has to be cheap enough to run on every dropdown change."""
+    from llm_sidecar import picker
+
+    monkeypatch.setattr(picker, "pretest",
+                        lambda *a, **k: pytest.fail("preview must not probe"))
+    from fastapi.testclient import TestClient
+
+    from llm_sidecar import daemon
+
+    TestClient(daemon.create_app(cfg)).get("/resolve-preview?tier=fast&budget=free")

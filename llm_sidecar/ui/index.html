@@ -649,13 +649,21 @@ let history = [];   // client-side only; the daemon keeps no session
 
 async function showResolved() {
   const exact = $("chat-model").value;
-  if (exact) { $("chat-resolved").textContent = "→ " + exact; return; }
+  const el = $("chat-resolved");
+  if (exact) { el.textContent = "→ " + exact + " (exact)"; el.title = ""; return; }
   try {
-    const s = await api("/status");
-    const key = `${$("chat-tier").value}:${$("chat-budget").value}`;
-    const hit = (s.pinned_tiers || {})[$("chat-tier").value] || (s.resolved_tiers || {})[key];
-    $("chat-resolved").textContent = hit ? "→ " + hit : "→ resolved on first message";
-  } catch (_) { $("chat-resolved").textContent = ""; }
+    const r = await api(`/resolve-preview?tier=${$("chat-tier").value}&budget=${$("chat-budget").value}`);
+    const label = { pinned: "pinned", cached: "cached", unresolved: "" }[r.state];
+    el.textContent = r.model
+      ? `→ ${r.model}${label ? " (" + label + ")" : ""}`
+      : (r.would_try.length ? `→ will try ${r.would_try[0]}` : "→ nothing eligible");
+    // The full order and the reason go in the tooltip rather than the line,
+    // which has to stay short enough to sit in the toolbar.
+    el.title = [
+      r.note,
+      r.would_try.length ? "Order:\n" + r.would_try.map((m, i) => `${i + 1}. ${m}`).join("\n") : "",
+    ].filter(Boolean).join("\n\n");
+  } catch (_) { el.textContent = ""; }
 }
 
 async function loadChatModels() {

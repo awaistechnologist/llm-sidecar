@@ -252,6 +252,52 @@ def create_app(config: Config | None = None) -> FastAPI:
         from . import ledger
         return {"days": ledger.daily(days)}
 
+    @app.get("/resolve-preview")
+    def resolve_preview(tier: str = "balanced", budget: str = "free",
+                        _: None = Depends(require_token)) -> dict:
+        """What this tier+budget would use, and why — without probing anything.
+
+        The chat readout used to show only the cached resolution, which is
+        both stale-looking and unhelpful: it tells you what was picked once,
+        under conditions that may no longer hold, and says nothing about what
+        would happen now. This returns the state *and* the candidate order, so
+        the decision stops being a black box."""
+        from . import picker
+
+        pinned = cfg.tier_model(tier)
+        cached = sidecar.resolved.get(f"{tier}:{budget}")
+
+        try:
+            candidates = picker.candidates(cfg, budget)
+        except Exception:
+            candidates = []
+        if not cfg.has_cloud:
+            # pick() drops cloud candidates without a key, so showing them
+            # here would promise something that cannot happen.
+            candidates = [c for c in candidates if c.startswith("ollama/")]
+
+        if pinned:
+            state, model = "pinned", pinned
+        elif cached:
+            state, model = "cached", cached
+        else:
+            state, model = "unresolved", None
+
+        return {
+            "tier": tier,
+            "budget": budget,
+            "state": state,
+            "model": model,
+            "cloud_configured": cfg.has_cloud,
+            "would_try": candidates[:6],
+            "note": (
+                "Pinned — budget is ignored." if pinned else
+                "No API key, so free means local models only." if budget == "free" and not cfg.has_cloud
+                else "Needs an API key; nothing is eligible without one."
+                if budget in ("cheap", "best") and not cfg.has_cloud else ""
+            ),
+        }
+
     @app.get("/local-models")
     def local_models(context: int = 8000, _: None = Depends(require_token)) -> dict:
         return {"models": sidecar.local_models(context_tokens=context)}
