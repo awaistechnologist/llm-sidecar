@@ -380,6 +380,8 @@ point.
 
 `llm-sidecar serve` also serves a dashboard at **http://localhost:4001**.
 
+![The llm-sidecar dashboard](docs/dashboard.png)
+
 **Dashboard** — API key and budget, status, which local models fit, spend over
 30 days, cache size, whether SearXNG is really being used.
 **Chat** — multi-turn, streaming, with the model and cost under every reply.

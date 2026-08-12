@@ -2049,3 +2049,78 @@ def test_every_text_read_declares_utf8():
             if re.search(r"\.read_text\(\)|\.open\(\)|\.open\(['\"][wa]['\"]\)", line):
                 offenders.append(f"{path.relative_to(root)}:{n}: {line.strip()}")
     assert not offenders, "text IO without an explicit encoding:\n" + "\n".join(offenders)
+
+
+# ── model families rather than exact ids ──────────────────────────────────────
+
+def test_family_rank_survives_version_bumps():
+    """Regression on rot, not on a crash. The previous curated list held exact
+    ids, so claude-haiku-4-5 -> 4-6 silently dropped an entry; of nine free
+    picks, one still existed a few months later."""
+    from llm_sidecar import picker
+
+    for old, new in [
+        ("anthropic/claude-haiku-4-5", "anthropic/claude-haiku-9.9"),
+        ("google/gemma-3-27b-it:free", "google/gemma-7-99b-it:free"),
+        ("anthropic/claude-opus-4-7", "anthropic/claude-opus-12"),
+    ]:
+        budget = "free" if ":free" in old else ("cheap" if "haiku" in old else "best")
+        assert picker.family_rank(old, budget) == picker.family_rank(new, budget)
+
+
+def test_unknown_models_are_ranked_not_excluded():
+    """A good model nobody has heard of should sort last among known families,
+    not vanish."""
+    from llm_sidecar import picker
+
+    rank = picker.family_rank("newvendor/brand-new-thing", "free")
+    assert rank == len(picker.PREFERRED_FAMILIES["free"])
+    assert rank > picker.family_rank("deepseek/anything", "free")
+
+
+def test_batch_and_online_variants_are_excluded(cfg, monkeypatch):
+    """Neither can be caught by probing: both answer "OK" happily. :batch has
+    asynchronous semantics, and :online silently attaches billed retrieval to
+    every call when web search here is meant to be an explicit choice."""
+    from llm_sidecar import catalogue, picker
+
+    monkeypatch.setattr(catalogue, "openrouter_models", lambda config, force_refresh=False: [
+        ModelInfo("vendor/good:free", "good", context_length=8000),
+        ModelInfo("vendor/good:batch", "batch", context_length=8000),
+        ModelInfo("vendor/good:online", "online", context_length=8000),
+    ])
+    monkeypatch.setattr(catalogue, "ollama_models", lambda config: [])
+
+    got = picker.candidates(cfg, "free")
+    assert "vendor/good:free" in got
+    assert not any(":batch" in c or ":online" in c for c in got)
+
+
+def test_every_budget_still_matches_something_real():
+    """The families must actually fire against ids of the shape providers use.
+    Offline: a handful of representative ids, not a live catalogue."""
+    from llm_sidecar import picker
+
+    samples = {
+        "free": ["deepseek/deepseek-v9:free", "qwen/qwen4-80b:free", "google/gemma-5-9b:free"],
+        "cheap": ["anthropic/claude-haiku-9", "google/gemini-9-flash", "openai/gpt-9-mini"],
+        "best": ["anthropic/claude-opus-9", "openai/gpt-5.9", "google/gemini-9-pro"],
+    }
+    for budget, ids in samples.items():
+        for mid in ids:
+            assert picker.family_rank(mid, budget) < len(picker.PREFERRED_FAMILIES[budget]), \
+                f"{mid} matches no family for {budget}"
+
+
+def test_dashboard_does_not_still_say_pin():
+    """The rename from "pinned" to "locked" missed a footnote, which a
+    screenshot caught: the heading said locks and the note beneath it said
+    pins. Mixed vocabulary for one concept is worse than either word."""
+    from pathlib import Path
+
+    import llm_sidecar
+
+    html = (Path(llm_sidecar.__file__).parent / "ui" / "index.html").read_text(encoding="utf-8")
+    visible = html[html.index("<body>"):]
+    assert "Pins apply" not in visible
+    assert "Pin to tier" not in visible

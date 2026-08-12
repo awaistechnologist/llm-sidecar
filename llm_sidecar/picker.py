@@ -37,40 +37,46 @@ BUDGETS = ("free", "cheap", "best")
 # ten tokens each) in exchange for bounding that to one timeout.
 PROBE_WAVE = 3
 
-# Curated first choices per budget. Order is preference. Anything not in the
-# live catalogue is skipped silently — the model landscape churns constantly,
-# so this list is a hint, not a contract.
-PREFERRED = {
-    "free": [
-        "z-ai/glm-4.5-air:free",
-        "meta-llama/llama-3.3-70b-instruct:free",
-        "nousresearch/hermes-3-llama-3.1-405b:free",
-        "qwen/qwen3-next-80b-a3b-instruct:free",
-        "google/gemma-4-31b-it:free",
-        "google/gemma-3-27b-it:free",
-        "deepseek/deepseek-chat-v3:free",
-        "deepseek/deepseek-r1:free",
-        "meta-llama/llama-3.1-70b-instruct:free",
-    ],
-    "cheap": [
-        "anthropic/claude-haiku-4-5",
-        "google/gemini-2.5-flash",
-        "openai/gpt-5-nano",
-        "openai/gpt-5-mini",
-        "anthropic/claude-3-5-haiku",
-        "google/gemini-flash-1.5",
-        "mistralai/mistral-small-3.2",
-    ],
-    "best": [
-        "anthropic/claude-opus-4-7",
-        "anthropic/claude-sonnet-4-6",
-        "openai/gpt-5",
-        "openai/gpt-5.2",
-        "google/gemini-3-pro",
-        "anthropic/claude-3-5-sonnet",
-        "openai/gpt-4o",
-    ],
+# Preference is expressed as model *families*, not exact ids.
+#
+# An earlier version listed exact ids and rotted fast: of nine curated free
+# picks, one still existed a few months later — every version bump
+# (claude-haiku-4-5 -> 4-6, gemma-3 -> gemma-4) silently dropped an entry, and
+# the "curated" list quietly stopped curating anything.
+#
+# A family survives those bumps. Order is preference, best first; anything
+# unmatched still competes on the tie-breaker below, so a good model we have
+# never heard of is ranked, not excluded.
+PREFERRED_FAMILIES = {
+    # Free: the open-weight families that reason well enough for real work.
+    "free": (
+        "deepseek", "qwen", "llama", "gemma", "mistral", "nemotron",
+        "glm", "hermes", "command", "phi", "olmo",
+    ),
+    # Cheap: every vendor's small/fast line, whatever they call it this year.
+    "cheap": (
+        "haiku", "flash", "mini", "nano", "small", "lite", "turbo",
+        "gemma", "llama", "qwen",
+    ),
+    # Best: the frontier lines.
+    "best": (
+        "opus", "sonnet", "gpt-5", "gpt-4", "pro", "ultra", "grok",
+        "deepseek-r", "large",
+    ),
 }
+
+
+def family_rank(model_id: str, budget: str) -> int:
+    """Index of the first matching family, or a value past the end.
+
+    Lower is better. Unmatched models are not excluded — they sort after the
+    known families and then compete on price or context like everyone else."""
+    lower = model_id.lower()
+    families = PREFERRED_FAMILIES.get(budget, ())
+    for i, family in enumerate(families):
+        if family in lower:
+            return i
+    return len(families)
 
 
 def _matches_budget(m: ModelInfo, budget: str) -> bool:
@@ -85,29 +91,31 @@ def _matches_budget(m: ModelInfo, budget: str) -> bool:
 
 
 def candidates(config: Config, budget: str) -> list[str]:
-    """Ordered candidate model ids for a budget: curated picks first, then the
-    rest of the tier sorted by the property that matters for that tier.
+    """Ordered candidate model ids for a budget.
+
+    Sorted by model family first (see PREFERRED_FAMILIES), then by whatever
+    matters for that budget — context length when everything is free, price
+    when it isn't.
 
     For `free`, local Ollama models join the list. Their position depends on
     whether a cloud key exists: with a key, cloud free models go first (they
-    are faster and stronger than most laptop models) and Ollama is the safety
-    net; without one, Ollama is the only thing that can actually work."""
+    are usually stronger than what fits on a laptop) and Ollama is the safety
+    net; without one, Ollama is the only thing that can work."""
     cloud = catalogue.openrouter_models(config)
-    by_id = {m.id: m for m in cloud}
-    in_budget = [m for m in cloud if _matches_budget(m, budget) and not catalogue.is_specialised(m.id)]
-
-    preferred_ids = [pid for pid in PREFERRED.get(budget, []) if pid in by_id]
-    fallback_ids = [m.id for m in in_budget if m.id not in preferred_ids]
+    in_budget = [
+        m for m in cloud
+        if _matches_budget(m, budget) and not catalogue.is_specialised(m.id)
+    ]
 
     if budget == "free":
-        # Nothing to price-sort on; prefer the roomiest context.
-        fallback_ids.sort(key=lambda i: -by_id[i].context_length)
+        # Nothing to price-sort on; roomier context breaks the tie.
+        in_budget.sort(key=lambda m: (family_rank(m.id, budget), -m.context_length))
     elif budget == "cheap":
-        fallback_ids.sort(key=lambda i: by_id[i].prompt_price_per_million)
-    elif budget == "best":
-        fallback_ids.sort(key=lambda i: by_id[i].prompt_price_per_million, reverse=True)
+        in_budget.sort(key=lambda m: (family_rank(m.id, budget), m.prompt_price_per_million))
+    else:
+        in_budget.sort(key=lambda m: (family_rank(m.id, budget), -m.prompt_price_per_million))
 
-    cloud_candidates = preferred_ids + fallback_ids
+    cloud_candidates = [m.id for m in in_budget]
     if budget != "free":
         return cloud_candidates
 

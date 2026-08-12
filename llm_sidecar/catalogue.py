@@ -41,8 +41,20 @@ SPECIALISED_KEYWORDS = (
 )
 
 
+# Variant suffixes that are wrong for general routing, even though the model
+# behind them is fine. A pretest cannot catch these: they answer "OK" happily
+# and then misbehave in ways a probe never sees.
+#
+#   :batch   asynchronous queue semantics — may not return for hours
+#   :online  silently attaches billed web retrieval to every call, when web
+#            search here is an explicit, opt-in decision
+UNSUITABLE_VARIANTS = (":batch", ":online")
+
+
 def is_specialised(model_id: str) -> bool:
     lower = model_id.lower()
+    if any(lower.endswith(v) for v in UNSUITABLE_VARIANTS):
+        return True
     return any(k in lower for k in SPECIALISED_KEYWORDS)
 
 

@@ -1,0 +1,10 @@
+version: 2
+updates:
+  # Actions pinned to a major tag still drift; this keeps them current without
+  # anyone remembering to look.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule: {interval: monthly}
+  - package-ecosystem: pip
+    directory: "/"
+    schedule: {interval: monthly}

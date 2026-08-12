@@ -25,3 +25,50 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: pip install --quiet -e ".[all]" pytest
       - run: pytest -q
+
+  # The setup scripts are the first thing a new user runs, and until now they
+  # were the only part of the project never executed by anything. Written on a
+  # Mac, shipped for Windows, verified by nobody.
+  scripts:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: install.sh
+        if: runner.os != 'Windows'
+        run: ./install.sh
+
+      - name: install.bat
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: install.bat
+
+      # Start the daemon, wait for it to answer, then stop it. Proves the
+      # script wires up a serving process, not just that it exits 0.
+      - name: run.sh serves
+        if: runner.os != 'Windows'
+        run: |
+          ./run.sh --no-ui &
+          for _ in $(seq 1 30); do
+            curl -sf http://localhost:4001/health && break || sleep 2
+          done
+          curl -sf http://localhost:4001/health || (echo "daemon never answered" && exit 1)
+
+      - name: run.bat serves
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Start-Process -FilePath "cmd.exe" -ArgumentList "/c run.bat --no-ui" -WindowStyle Hidden
+          $ok = $false
+          foreach ($i in 1..30) {
+            try { Invoke-WebRequest -Uri http://localhost:4001/health -UseBasicParsing | Out-Null; $ok = $true; break }
+            catch { Start-Sleep -Seconds 2 }
+          }
+          if (-not $ok) { throw "daemon never answered" }
