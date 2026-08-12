@@ -1100,3 +1100,90 @@ def test_runtime_installed_but_stopped_says_so(monkeypatch):
     with pytest.raises(SidecarError) as e:
         services._runtime()
     assert "not running" in str(e.value)
+
+
+# ── dashboard ─────────────────────────────────────────────────────────────────
+
+def test_dashboard_is_served_at_root(api):
+    r = api.get("/")
+    assert r.status_code == 200
+    assert "text/html" in r.headers["content-type"]
+    assert "<title>llm-sidecar</title>" in r.text
+
+
+def test_dashboard_needs_no_token(cfg):
+    """The page must load so it can prompt for the token; every endpoint it
+    then calls is still gated."""
+    from fastapi.testclient import TestClient
+
+    from llm_sidecar import daemon
+
+    cfg.daemon_token = "s3cret"
+    c = TestClient(daemon.create_app(cfg))
+    assert c.get("/").status_code == 200
+    assert c.get("/local-models").status_code == 401
+    assert c.post("/config/tier", json={"tier": "fast", "model": "x"}).status_code == 401
+
+
+def test_dashboard_ships_in_the_package():
+    from pathlib import Path
+
+    import llm_sidecar
+
+    assert (Path(llm_sidecar.__file__).parent / "ui" / "index.html").exists()
+
+
+def test_dashboard_has_no_external_requests():
+    """No CDN, no font host, no analytics. A loopback dashboard that phones
+    out is both a privacy problem and broken offline."""
+    from pathlib import Path
+
+    import llm_sidecar
+
+    html = (Path(llm_sidecar.__file__).parent / "ui" / "index.html").read_text()
+    for marker in ("src=\"http", "href=\"http://cdn", "cdn.", "googleapis", "unpkg", "jsdelivr"):
+        assert marker not in html, f"dashboard reaches out to {marker}"
+
+
+def test_tier_pin_and_clear(api):
+    r = api.post("/config/tier", json={"tier": "fast", "model": "ollama/x"}).json()
+    assert r["models"]["fast"] == "ollama/x"
+    assert r["persisted"] is False        # runtime only, never rewrites config
+    assert api.post("/config/tier", json={"tier": "fast", "model": ""}).json()["models"] == {}
+
+
+def test_tier_pin_rejects_unknown_tier(api):
+    assert api.post("/config/tier", json={"tier": "turbo", "model": "x"}).status_code == 400
+
+
+def test_local_models_endpoint(api, monkeypatch):
+    from llm_sidecar import hardware
+
+    monkeypatch.setattr(hardware, "advise", lambda config, ctx=8000: [
+        {"id": "ollama/m", "name": "m", "size_gib": 4.0, "needs_gib": 5.0,
+         "verdict": "fits", "parameter_size": "7B", "quantization": "Q4"}
+    ])
+    body = api.get("/local-models").json()
+    assert body["models"][0]["verdict"] == "fits"
+
+
+def test_usage_daily_fills_gaps(cfg):
+    """A chart that omits quiet days compresses the timeline and turns a
+    single busy day into an apparent trend."""
+    from llm_sidecar import ledger
+
+    ledger.record("m/a", 1, 1, 0.0)
+    days = ledger.daily(7)
+    assert len(days) == 7
+    assert [d["date"] for d in days] == sorted(d["date"] for d in days)
+    assert days[-1]["calls"] == 1          # today
+    assert days[0]["calls"] == 0           # a week ago, filled not dropped
+
+
+def test_status_reports_pins_separately_from_resolution(cfg):
+    """The dashboard needs to distinguish "you pinned this" from "auto-resolve
+    landed here", so it can show the right pin button as active."""
+    cfg.models = {"fast": "ollama/pinned"}
+    s = Sidecar(cfg).status()
+    assert s["pinned_tiers"] == {"fast": "ollama/pinned"}
+    assert s["resolved_tiers"] == {}

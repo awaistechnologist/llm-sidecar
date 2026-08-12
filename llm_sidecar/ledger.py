@@ -138,6 +138,33 @@ def summary(days: int | None = None) -> dict:
     }
 
 
+def daily(days: int = 30) -> list[dict]:
+    """Per-day totals, oldest first, including days with no activity.
+
+    Gaps are filled deliberately: a chart that silently omits quiet days
+    compresses the timeline and makes a spike look like a trend."""
+    import datetime as _dt
+
+    today = _dt.date.today()
+    buckets = {
+        (today - _dt.timedelta(days=n)).isoformat(): {"calls": 0, "cost_usd": 0.0, "tokens": 0}
+        for n in range(days)
+    }
+    for e in read(time.time() - days * 86400):
+        day = _dt.date.fromtimestamp(e.get("ts", 0)).isoformat()
+        b = buckets.get(day)
+        if b is None:
+            continue
+        b["calls"] += 1
+        b["cost_usd"] += e.get("cost_usd", 0.0)
+        b["tokens"] += e.get("prompt_tokens", 0) + e.get("completion_tokens", 0)
+
+    return [
+        {"date": d, **{k: (round(v, 6) if k == "cost_usd" else v) for k, v in vals.items()}}
+        for d, vals in sorted(buckets.items())
+    ]
+
+
 def clear() -> bool:
     try:
         LEDGER_FILE.unlink(missing_ok=True)

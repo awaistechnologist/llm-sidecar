@@ -32,6 +32,7 @@ interface:
 | Python library | programs that can import it | `from llm_sidecar import Sidecar` |
 | HTTP daemon | any tool in any language | `llm-sidecar serve` |
 | MCP server | agents | `llm-sidecar mcp` |
+| Dashboard | you | `llm-sidecar serve`, then open the URL |
 
 ## Install
 
@@ -183,6 +184,22 @@ llm-sidecar searxng up                    # better search, one command
 `verify` exits non-zero if any claim came back contradicted, so it drops into
 a pipeline or a pre-commit hook.
 
+## Dashboard
+
+`llm-sidecar serve` also serves a dashboard at **http://localhost:4001** —
+status, which local models fit your machine, spend over time, cache size, and
+boxes to try verification and summarising.
+
+One HTML file with no build step and no external requests: no CDN, no fonts,
+no analytics. A loopback dashboard that phones out would be both a privacy
+problem and broken offline. It only talks to endpoints the daemon already has.
+
+Tier pins made from the dashboard apply to the running daemon and are
+**not written to your config** — a click that silently rewrites a file on disk
+is a worse surprise than one that doesn't survive a restart.
+
+Swagger for the same API is at `/docs`.
+
 ## Configuration
 
 Precedence: defaults < `~/.config/llm-sidecar/config.json` < environment <
@@ -288,6 +305,7 @@ of the above; `status` reports any reachable instance, not just ours.
 | `mcp_server.py` | MCP tools |
 | `services.py` | Container lifecycle (Docker or Podman) |
 | `deploy/searxng/` | Compose file and settings shipped with the package |
+| `ui/index.html` | The dashboard — one file, no build |
 | `cli.py` | `serve` / `mcp` / `status` / `models` / `usage` / `ask` / `verify` / `sum` / `cache` / `searxng` |
 
 The core imports nothing but `httpx`. FastAPI and `mcp` are optional extras,
@@ -299,7 +317,7 @@ one directly and never touches the config file.
 ## Tests
 
 ```bash
-pytest                                    # 88 passing, fully offline
+pytest                                    # 97 passing, fully offline
 ```
 
 Fully offline — every network path is stubbed. Live-provider behaviour is

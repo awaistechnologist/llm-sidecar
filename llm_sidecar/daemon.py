@@ -23,8 +23,10 @@ import logging
 import time
 import uuid
 
+from pathlib import Path
+
 from fastapi import Depends, FastAPI, Header, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from . import Sidecar, __version__
@@ -41,6 +43,18 @@ BUDGET_ALIASES = ("free", "cheap", "best")
 class Message(BaseModel):
     role: str
     content: str = ""
+
+
+class TierRequest(BaseModel):
+    tier: str
+    # Empty string clears the pin and returns the tier to auto-resolution.
+    model: str = ""
+
+
+class SummariseRequest(BaseModel):
+    text: str
+    style: str = "brief"
+    focus: str = ""
 
 
 class VerifyRequest(BaseModel):
@@ -102,6 +116,63 @@ def create_app(config: Config | None = None) -> FastAPI:
     def health() -> dict:
         return {"ok": True, "version": __version__, "has_cloud": cfg.has_cloud,
                 "budget": cfg.default_budget, "resolved": sidecar.resolved}
+
+    @app.get("/", include_in_schema=False)
+    def dashboard():
+        """The single-page dashboard.
+
+        Served from the package rather than a separate static host: this is a
+        loopback process the user already runs, and a UI that needs its own
+        deployment step is a UI nobody opens."""
+        page = Path(__file__).parent / "ui" / "index.html"
+        if not page.exists():
+            return HTMLResponse("<h1>llm-sidecar</h1><p>Dashboard asset missing.</p>",
+                                status_code=500)
+        return HTMLResponse(page.read_text())
+
+    @app.get("/usage/daily")
+    def usage_daily(days: int = 30, _: None = Depends(require_token)) -> dict:
+        from . import ledger
+        return {"days": ledger.daily(days)}
+
+    @app.get("/local-models")
+    def local_models(context: int = 8000, _: None = Depends(require_token)) -> dict:
+        return {"models": sidecar.local_models(context_tokens=context)}
+
+    @app.post("/config/tier")
+    def set_tier(req: TierRequest, _: None = Depends(require_token)) -> dict:
+        """Pin a tier to a model, or clear the pin with an empty model.
+
+        Runtime only — deliberately not written to disk. The dashboard is for
+        trying things; a click that silently rewrites the user's config file
+        is a worse surprise than one that doesn't survive a restart."""
+        if req.tier not in TIER_ALIASES:
+            raise HTTPException(status_code=400,
+                                detail=f"Unknown tier {req.tier!r}. Expected one of {TIER_ALIASES}.")
+        models = dict(cfg.models)
+        if req.model:
+            models[req.tier] = req.model
+        else:
+            models.pop(req.tier, None)
+        cfg.models = models
+        return {"ok": True, "models": cfg.models, "persisted": False}
+
+    @app.post("/ops/summarise")
+    def summarise(req: SummariseRequest, _: None = Depends(require_token)) -> dict:
+        try:
+            return {"summary": sidecar.summarise(req.text, style=req.style, focus=req.focus)}
+        except SidecarError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=str(e)) from e
+
+    @app.get("/searxng/status")
+    def searxng_status(_: None = Depends(require_token)) -> dict:
+        from . import services
+        try:
+            return services.status(cfg)
+        except Exception as e:
+            return {"error": str(e)}
 
     @app.get("/status")
     def status(_: None = Depends(require_token)) -> dict:

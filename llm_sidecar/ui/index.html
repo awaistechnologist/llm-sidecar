@@ -1,0 +1,494 @@
+<!doctype html>
+<!--
+  llm-sidecar dashboard.
+
+  One file, no build step, no dependencies. That is a deliberate constraint,
+  not a shortcut: the selling point of this package is `pip install` and one
+  runtime dependency, and a dashboard that drags in a node toolchain would
+  cost more than it returns. Everything here talks to endpoints the daemon
+  already serves.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>llm-sidecar</title>
+<style>
+  :root {
+    --bg: #f7f7f8;        --panel: #fff;      --ink: #16181d;
+    --muted: #6b7280;     --line: #e4e4e7;    --accent: #4f46e5;
+    --ok: #15803d;        --warn: #b45309;    --bad: #b91c1c;
+    --ok-bg: #dcfce7;     --warn-bg: #fef3c7; --bad-bg: #fee2e2;
+    --radius: 10px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115;      --panel: #171a21;   --ink: #e8e9ed;
+      --muted: #9096a2;   --line: #262a33;    --accent: #8b85f7;
+      --ok: #4ade80;      --warn: #fbbf24;    --bad: #f87171;
+      --ok-bg: #14321f;   --warn-bg: #3a2c0c; --bad-bg: #3b1618;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 14px/1.5 ui-sans-serif, -apple-system, "Segoe UI", system-ui, sans-serif;
+  }
+  code, .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12.5px; }
+
+  header {
+    display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+    padding: 20px 24px; border-bottom: 1px solid var(--line); background: var(--panel);
+  }
+  header h1 { margin: 0; font-size: 17px; letter-spacing: -0.2px; }
+  header .ver { color: var(--muted); font-size: 12px; }
+  header .spacer { flex: 1; }
+
+  main { max-width: 1180px; margin: 0 auto; padding: 22px 24px 60px; }
+  .grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); }
+  .panel {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 16px 18px; min-width: 0;
+  }
+  .panel h2 {
+    margin: 0 0 12px; font-size: 12px; font-weight: 600; letter-spacing: .07em;
+    text-transform: uppercase; color: var(--muted);
+  }
+  .panel.wide { grid-column: 1 / -1; }
+
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; align-items: baseline; }
+  .kv dt { color: var(--muted); white-space: nowrap; }
+  .kv dd { margin: 0; overflow-wrap: anywhere; }
+
+  .pill {
+    display: inline-block; padding: 1px 8px; border-radius: 999px;
+    font-size: 11px; font-weight: 600; white-space: nowrap;
+  }
+  .pill.ok   { color: var(--ok);   background: var(--ok-bg); }
+  .pill.warn { color: var(--warn); background: var(--warn-bg); }
+  .pill.bad  { color: var(--bad);  background: var(--bad-bg); }
+
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 500; font-size: 11px;
+       text-transform: uppercase; letter-spacing: .05em; }
+  tbody tr:last-child td { border-bottom: 0; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .scroll { overflow-x: auto; }
+
+  button {
+    font: inherit; font-size: 12px; padding: 4px 11px; cursor: pointer;
+    color: var(--ink); background: var(--panel);
+    border: 1px solid var(--line); border-radius: 7px;
+  }
+  button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  button:disabled { opacity: .45; cursor: default; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.primary:hover:not(:disabled) { opacity: .9; color: #fff; }
+  button.tiny { padding: 1px 7px; font-size: 11px; }
+  .pinned { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+
+  textarea, select, input {
+    font: inherit; width: 100%; padding: 8px 10px; color: var(--ink);
+    background: var(--bg); border: 1px solid var(--line); border-radius: 7px;
+  }
+  textarea { min-height: 78px; resize: vertical; font-size: 13px; }
+  .row { display: flex; gap: 8px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
+  .row > select { width: auto; }
+
+  /* Bar chart: plain divs. A charting library for thirty bars would be the
+     single heaviest thing in the project. */
+  .chart { display: flex; align-items: flex-end; gap: 2px; height: 90px; margin-top: 4px; }
+  .bar { flex: 1; min-width: 3px; background: var(--accent); opacity: .8; border-radius: 2px 2px 0 0; }
+  .bar:hover { opacity: 1; }
+  .bar.empty { background: var(--line); }
+  .axis { display: flex; justify-content: space-between; color: var(--muted);
+          font-size: 11px; margin-top: 5px; }
+
+  .muted { color: var(--muted); }
+  .out {
+    margin-top: 10px; padding: 10px 12px; background: var(--bg);
+    border: 1px solid var(--line); border-radius: 7px;
+    white-space: pre-wrap; overflow-wrap: anywhere; max-height: 300px; overflow-y: auto;
+  }
+  .verdict { display: flex; gap: 8px; align-items: baseline; padding: 5px 0;
+             border-bottom: 1px solid var(--line); }
+  /* Without this the pill is a flex item and gets squeezed by the claim text
+     beside it, wrapping "contradicted" into a vertical blob. */
+  .verdict > .pill { flex: 0 0 auto; align-self: flex-start; }
+  .verdict > span:last-child { min-width: 0; }
+  .verdict:last-child { border-bottom: 0; }
+  .banner {
+    margin-bottom: 16px; padding: 10px 14px; border-radius: var(--radius);
+    background: var(--bad-bg); color: var(--bad);
+  }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>llm-sidecar</h1>
+  <span class="ver" id="version"></span>
+  <span class="spacer"></span>
+  <span class="muted mono" id="clock"></span>
+  <button id="refresh">Refresh</button>
+</header>
+
+<main>
+  <div id="banner"></div>
+
+  <div class="grid">
+
+    <section class="panel">
+      <h2>Status</h2>
+      <dl class="kv" id="status-kv"><dd class="muted">Loading…</dd></dl>
+    </section>
+
+    <section class="panel">
+      <h2>Search</h2>
+      <dl class="kv" id="search-kv"><dd class="muted">Loading…</dd></dl>
+      <div class="row" id="searxng-hint"></div>
+    </section>
+
+    <section class="panel">
+      <h2>Cache</h2>
+      <dl class="kv" id="cache-kv"><dd class="muted">Loading…</dd></dl>
+      <div class="row"><button id="clear-cache">Clear cache</button></div>
+    </section>
+
+    <section class="panel wide">
+      <h2>Local models &mdash; will they fit?</h2>
+      <div class="scroll"><table>
+        <thead><tr>
+          <th>Model</th><th class="num">Size</th><th class="num">Needs</th>
+          <th>Params</th><th>Quant</th><th>Verdict</th><th>Pin to tier</th>
+        </tr></thead>
+        <tbody id="models-body"><tr><td colspan="7" class="muted">Loading…</td></tr></tbody>
+      </table></div>
+      <p class="muted" style="margin:10px 0 0">
+        Sized for an 8k context, with 3&nbsp;GiB left for the rest of the machine.
+        Pins apply to this running daemon only &mdash; they are not written to your config.
+      </p>
+    </section>
+
+    <section class="panel wide">
+      <h2>Usage &mdash; last 30 days</h2>
+      <dl class="kv" id="usage-kv"><dd class="muted">Loading…</dd></dl>
+      <div class="chart" id="chart"></div>
+      <div class="axis"><span id="axis-from"></span><span id="axis-max"></span><span>today</span></div>
+      <div class="scroll" style="margin-top:14px"><table>
+        <thead><tr>
+          <th>Model</th><th class="num">Calls</th><th class="num">Cost</th>
+          <th class="num">Tokens</th><th class="num">Cached</th><th class="num">Avg</th>
+        </tr></thead>
+        <tbody id="usage-body"></tbody>
+      </table></div>
+    </section>
+
+    <section class="panel">
+      <h2>Try verification</h2>
+      <textarea id="verify-in" placeholder="One claim per line.&#10;The Eiffel Tower is in Berlin"></textarea>
+      <div class="row">
+        <button class="primary" id="verify-go">Verify</button>
+        <span class="muted" id="verify-status"></span>
+      </div>
+      <div class="out" id="verify-out" hidden></div>
+    </section>
+
+    <section class="panel">
+      <h2>Try summarising</h2>
+      <textarea id="sum-in" placeholder="Paste text to condense…"></textarea>
+      <div class="row">
+        <select id="sum-style">
+          <option value="brief">brief</option>
+          <option value="bullets">bullets</option>
+          <option value="tldr">tldr</option>
+          <option value="detailed">detailed</option>
+        </select>
+        <button class="primary" id="sum-go">Summarise</button>
+        <span class="muted" id="sum-status"></span>
+      </div>
+      <div class="out" id="sum-out" hidden></div>
+    </section>
+
+  </div>
+</main>
+
+<script>
+"use strict";
+
+// A token is only needed when the daemon was started with one. Kept in
+// sessionStorage so a reload doesn't re-prompt, and never in localStorage —
+// this is a credential, not a preference.
+let token = sessionStorage.getItem("llm_sidecar_token") || "";
+
+async function api(path, options = {}) {
+  const headers = Object.assign({ "Content-Type": "application/json" }, options.headers || {});
+  if (token) headers["Authorization"] = "Bearer " + token;
+  const res = await fetch(path, Object.assign({}, options, { headers }));
+
+  if (res.status === 401) {
+    const entered = prompt("This daemon requires a token (LLM_SIDECAR_TOKEN):");
+    if (entered) {
+      token = entered;
+      sessionStorage.setItem("llm_sidecar_token", token);
+      return api(path, options);
+    }
+    throw new Error("Authentication required.");
+  }
+  if (!res.ok) {
+    let detail = res.statusText;
+    try { detail = (await res.json()).detail || detail; } catch (_) {}
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g,
+  (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+function kv(el, pairs) {
+  el.innerHTML = pairs
+    .map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`)
+    .join("");
+}
+
+function banner(message) {
+  $("banner").innerHTML = message ? `<div class="banner">${esc(message)}</div>` : "";
+}
+
+const VERDICT_CLASS = { fits: "ok", tight: "warn", too_big: "bad", unknown: "warn" };
+const CLAIM_CLASS = { supported: "ok", contradicted: "bad", unverified: "warn", not_a_claim: "" };
+
+// ── panels ───────────────────────────────────────────────────────────────────
+
+let currentPins = {};
+
+async function loadStatus() {
+  const s = await api("/status");
+  $("version").textContent = "v" + s.version;
+
+  const hw = s.hardware || {};
+  const machine = [hw.chip || hw.system, hw.total_ram_gib ? hw.total_ram_gib + " GiB" : null]
+    .filter(Boolean).join(" · ");
+
+  const tiers = Object.entries(s.resolved_tiers || {});
+  kv($("status-kv"), [
+    ["cloud key", s.cloud_configured
+      ? '<span class="pill ok">set</span>'
+      : '<span class="pill warn">not set</span> <span class="muted">local only</span>'],
+    ["budget", `<span class="mono">${esc(s.default_budget)}</span>`],
+    ["machine", esc(machine || "unknown")],
+    ["resolved", tiers.length
+      ? tiers.map(([k, v]) => `<div class="mono">${esc(k)} → ${esc(v)}</div>`).join("")
+      : '<span class="muted">nothing resolved yet</span>'],
+  ]);
+
+  kv($("cache-kv"), [
+    ["completions", s.cache.completions],
+    ["searches", s.cache.searches],
+    ["pages", s.cache.pages ?? 0],
+    ["size", (s.cache.bytes / 1024).toFixed(0) + " KiB"],
+  ]);
+  return s;
+}
+
+async function loadSearch() {
+  const s = await api("/searxng/status").catch(() => null);
+  if (!s || s.error) {
+    kv($("search-kv"), [["provider", '<span class="muted">unknown</span>']]);
+    return;
+  }
+  const live = s.answering_json;
+  kv($("search-kv"), [
+    ["provider", live
+      ? '<span class="pill ok">SearXNG</span>'
+      : '<span class="pill warn">DuckDuckGo</span>'],
+    ["searxng url", `<span class="mono">${esc(s.url)}</span>`],
+    ["container", s.container
+      ? esc(s.container.state + " — " + s.container.status)
+      : '<span class="muted">not created</span>'],
+    ["runtime", esc(s.docker || "unknown")],
+  ]);
+  $("searxng-hint").innerHTML = live
+    ? `<span class="muted">Aggregated search is active. <a href="${esc(s.url)}" target="_blank" rel="noopener">Open</a></span>`
+    : `<span class="muted">Better search: run <code>llm-sidecar searxng up</code></span>`;
+}
+
+async function loadModels() {
+  const { models } = await api("/local-models");
+  const body = $("models-body");
+  if (!models.length) {
+    body.innerHTML = '<tr><td colspan="7" class="muted">No local models. Is Ollama running?</td></tr>';
+    return;
+  }
+  body.innerHTML = models.map((m) => {
+    const tiers = ["fast", "balanced", "powerful"].map((t) => {
+      const on = currentPins[t] === m.id;
+      return `<button class="tiny${on ? " pinned" : ""}" data-tier="${t}" data-model="${esc(m.id)}"
+               title="${on ? "Unpin" : "Pin " + t + " to this model"}">${t[0].toUpperCase()}</button>`;
+    }).join(" ");
+    return `<tr>
+      <td class="mono">${esc(m.name)}</td>
+      <td class="num">${m.size_gib.toFixed(1)}G</td>
+      <td class="num">${m.needs_gib.toFixed(1)}G</td>
+      <td>${esc(m.parameter_size)}</td>
+      <td>${esc(m.quantization)}</td>
+      <td><span class="pill ${VERDICT_CLASS[m.verdict] || ""}">${esc(m.verdict)}</span></td>
+      <td>${tiers}</td>
+    </tr>`;
+  }).join("");
+
+  body.querySelectorAll("button[data-tier]").forEach((btn) => {
+    btn.onclick = async () => {
+      const { tier, model } = btn.dataset;
+      // Clicking the active pin clears it, returning the tier to auto-resolution.
+      const next = currentPins[tier] === model ? "" : model;
+      btn.disabled = true;
+      try {
+        const r = await api("/config/tier", {
+          method: "POST", body: JSON.stringify({ tier, model: next }),
+        });
+        currentPins = r.models || {};
+        await Promise.all([loadModels(), loadStatus()]);
+      } catch (e) {
+        banner("Could not pin tier: " + e.message);
+      } finally {
+        btn.disabled = false;
+      }
+    };
+  });
+}
+
+async function loadUsage() {
+  const [u, d] = await Promise.all([api("/usage?days=30"), api("/usage/daily?days=30")]);
+
+  kv($("usage-kv"), [
+    ["calls", u.calls],
+    ["spend", "$" + (u.cost_usd || 0).toFixed(4)],
+    ["tokens", (u.total_tokens || 0).toLocaleString()],
+    ["from cache", u.cached + (u.calls ? ` <span class="muted">(${Math.round(u.cached / u.calls * 100)}%)</span>` : "")],
+  ]);
+
+  const days = d.days || [];
+  // Scale on calls rather than cost: with everything local the cost axis is
+  // flat zero, and a chart of nothing is worse than no chart.
+  const peak = Math.max(1, ...days.map((x) => x.calls));
+  $("chart").innerHTML = days.map((x) => {
+    const h = x.calls ? Math.max(3, (x.calls / peak) * 100) : 2;
+    return `<div class="bar${x.calls ? "" : " empty"}" style="height:${h}%"
+             title="${x.date}: ${x.calls} calls, $${x.cost_usd.toFixed(4)}"></div>`;
+  }).join("");
+  $("axis-from").textContent = days.length ? days[0].date : "";
+  $("axis-max").textContent = `peak ${peak} calls/day`;
+
+  $("usage-body").innerHTML = (u.by_model || []).length
+    ? u.by_model.map((m) => `<tr>
+        <td class="mono">${esc(m.model)}</td>
+        <td class="num">${m.calls}</td>
+        <td class="num">${m.cost_usd ? "$" + m.cost_usd.toFixed(4) : "free"}</td>
+        <td class="num">${m.total_tokens.toLocaleString()}</td>
+        <td class="num">${m.cached}</td>
+        <td class="num">${m.avg_latency_s}s</td>
+      </tr>`).join("")
+    : '<tr><td colspan="6" class="muted">No calls recorded yet.</td></tr>';
+}
+
+async function refresh() {
+  banner("");
+  try {
+    const s = await loadStatus();
+    currentPins = s.pinned_tiers || currentPins;
+    await Promise.all([loadSearch(), loadModels(), loadUsage()]);
+    $("clock").textContent = "updated " + new Date().toLocaleTimeString();
+  } catch (e) {
+    banner("Could not reach the daemon: " + e.message);
+  }
+}
+
+// ── try-it panels ────────────────────────────────────────────────────────────
+
+$("verify-go").onclick = async () => {
+  const claims = $("verify-in").value.split("\n").map((s) => s.trim()).filter(Boolean);
+  if (!claims.length) return;
+
+  const btn = $("verify-go");
+  btn.disabled = true;
+  $("verify-status").textContent = `checking ${claims.length}…`;
+  $("verify-out").hidden = true;
+
+  try {
+    const { results } = await api("/v1/verify", {
+      method: "POST", body: JSON.stringify({ claims }),
+    });
+    $("verify-out").innerHTML = results.map((r) => `
+      <div class="verdict">
+        <span class="pill ${CLAIM_CLASS[r.verdict] || ""}">${esc(r.verdict)}</span>
+        <span>
+          ${esc(r.claim)}
+          <div class="muted">${esc(r.note)}</div>
+          ${(r.sources || []).slice(0, 3).map((u) =>
+            `<div><a href="${esc(u)}" target="_blank" rel="noopener noreferrer" class="mono">${esc(u.slice(0, 70))}</a></div>`
+          ).join("")}
+        </span>
+      </div>`).join("");
+    $("verify-out").hidden = false;
+    $("verify-status").textContent = "";
+    loadUsage();
+  } catch (e) {
+    $("verify-status").textContent = "failed: " + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+};
+
+$("sum-go").onclick = async () => {
+  const text = $("sum-in").value.trim();
+  if (!text) return;
+
+  const btn = $("sum-go");
+  btn.disabled = true;
+  $("sum-status").textContent = "working…";
+  $("sum-out").hidden = true;
+
+  try {
+    const { summary } = await api("/ops/summarise", {
+      method: "POST",
+      body: JSON.stringify({ text, style: $("sum-style").value }),
+    });
+    $("sum-out").textContent = summary;
+    $("sum-out").hidden = false;
+    $("sum-status").textContent = "";
+    loadUsage();
+  } catch (e) {
+    $("sum-status").textContent = "failed: " + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+};
+
+$("clear-cache").onclick = async () => {
+  const btn = $("clear-cache");
+  btn.disabled = true;
+  try {
+    const r = await api("/cache/clear", { method: "POST" });
+    btn.textContent = `Cleared ${r.removed}`;
+    setTimeout(() => { btn.textContent = "Clear cache"; }, 2000);
+    loadStatus();
+  } catch (e) {
+    banner("Could not clear cache: " + e.message);
+  } finally {
+    btn.disabled = false;
+  }
+};
+
+$("refresh").onclick = refresh;
+refresh();
+// Slow poll. The interesting numbers move when *you* do something, and a
+// dashboard that hammers its own daemon would be measuring itself.
+setInterval(refresh, 30000);
+</script>
+</body>
+</html>

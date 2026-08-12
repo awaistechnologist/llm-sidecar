@@ -330,6 +330,8 @@ class Sidecar:
                 for m in local
             ],
             "resolved_tiers": self.resolved,
+            # Explicit pins, as distinct from what auto-resolution landed on.
+            "pinned_tiers": dict(self.config.models),
             "cache": cache.stats(),
             "usage_30d": ledger.summary(30),
         }
