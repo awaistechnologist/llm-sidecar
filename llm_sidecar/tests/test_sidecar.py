@@ -597,7 +597,7 @@ def test_ledger_skips_corrupt_lines(cfg):
     from llm_sidecar import ledger
 
     ledger.record("m/a", 1, 1, 0.1)
-    with ledger.LEDGER_FILE.open("a") as f:
+    with ledger.LEDGER_FILE.open("a", encoding="utf-8") as f:
         f.write("{not json\n\n")
     ledger.record("m/b", 1, 1, 0.2)
     assert ledger.summary()["calls"] == 2
