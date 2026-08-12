@@ -187,8 +187,12 @@
           when one throttles.
         </p>
         <div class="row" style="margin-top:0">
+          <!-- A real badge, not a placeholder. Signalling "key is set" through
+               greyed hint text inside an empty field is invisible as status —
+               it reads as a prompt to type something. -->
+          <span class="pill warn" id="cfg-key-state">checking…</span>
           <input id="cfg-key" type="password" autocomplete="off" spellcheck="false"
-                 placeholder="OpenRouter API key (sk-or-…)" style="flex:1;min-width:260px">
+                 placeholder="paste key to change" style="flex:1;min-width:220px">
           <label class="muted" style="display:flex;align-items:center;gap:5px;font-size:12px"
                  title="Writes the key to ~/.config/llm-sidecar/config.json in plaintext">
             <input type="checkbox" id="cfg-persist" style="width:auto"> remember on this machine
@@ -527,10 +531,15 @@ async function loadStatus() {
   const s = await api("/status");
   $("version").textContent = "v" + s.version;
   currentPins = s.pinned_tiers || {};
-  // Don't clobber a key the user is mid-way through typing.
-  if (document.activeElement !== $("cfg-key")) {
-    $("cfg-key").placeholder = s.key_preview
-      ? `key set (${s.key_preview})` : "OpenRouter API key (sk-or-…)";
+  const state = $("cfg-key-state");
+  if (s.cloud_configured) {
+    state.className = "pill ok";
+    state.textContent = `API key set ${s.key_preview}`;
+    state.title = "Cloud models are available. Budget free prefers free OpenRouter models.";
+  } else {
+    state.className = "pill warn";
+    state.textContent = "no API key — local only";
+    state.title = "Only Ollama models can be used. cheap and best budgets cannot work at all.";
   }
   $("cfg-budget").value = s.default_budget;
 
@@ -541,8 +550,8 @@ async function loadStatus() {
 
   kv($("status-kv"), [
     ["cloud key", s.cloud_configured
-      ? '<span class="pill ok">set</span>'
-      : '<span class="pill warn">not set</span> <span class="muted">local only</span>'],
+      ? `<span class="pill ok">set</span> <span class="muted mono">${esc(s.key_preview)}</span>`
+      : '<span class="pill warn">not set</span> <span class="muted">Ollama only</span>'],
     ["budget", `<span class="mono">${esc(s.default_budget)}</span>`],
     ["machine", esc(machine || "unknown")],
     ["resolved", tiers.length

@@ -1942,3 +1942,17 @@ def test_preview_does_not_probe(cfg, monkeypatch):
     from llm_sidecar import daemon
 
     TestClient(daemon.create_app(cfg)).get("/resolve-preview?tier=fast&budget=free")
+
+
+def test_dashboard_shows_key_state_as_a_badge():
+    """Regression: the only signal that a key was set was the placeholder text
+    of an empty password field — which reads as a prompt, not a status, so
+    "is my key set?" was unanswerable from the UI."""
+    from pathlib import Path
+
+    import llm_sidecar
+
+    html = (Path(llm_sidecar.__file__).parent / "ui" / "index.html").read_text()
+    assert 'id="cfg-key-state"' in html
+    assert "no API key — local only" in html
+    assert "API key set" in html
