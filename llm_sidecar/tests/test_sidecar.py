@@ -86,11 +86,11 @@ def test_save_omits_api_key_by_default(monkeypatch, tmp_path):
     monkeypatch.setattr(config_mod, "CONFIG_FILE", tmp_path / "config.json")
 
     config_mod.save(Config(openrouter_api_key="sk-secret"))
-    written = json.loads((tmp_path / "config.json").read_text())
+    written = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
     assert "openrouter_api_key" not in written
 
     config_mod.save(Config(openrouter_api_key="sk-secret"), include_api_key=True)
-    assert json.loads((tmp_path / "config.json").read_text())["openrouter_api_key"] == "sk-secret"
+    assert json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))["openrouter_api_key"] == "sk-secret"
 
 
 def test_broken_config_file_does_not_crash(monkeypatch, tmp_path):
@@ -815,7 +815,7 @@ def test_install_writes_a_runnable_instance(instance):
     services.install(port=9999)
     assert (instance / "docker-compose.yml").exists()
     assert (instance / "settings.yml").exists()
-    assert (instance / ".env").read_text().strip() == "SEARXNG_PORT=9999"
+    assert (instance / ".env").read_text(encoding="utf-8").strip() == "SEARXNG_PORT=9999"
 
 
 def test_install_enables_json_output(instance):
@@ -824,7 +824,7 @@ def test_install_enables_json_output(instance):
     from llm_sidecar import services
 
     services.install()
-    settings = (instance / "settings.yml").read_text()
+    settings = (instance / "settings.yml").read_text(encoding="utf-8")
     assert "formats:" in settings
     assert "json" in settings
     assert "limiter: false" in settings
@@ -834,13 +834,13 @@ def test_secret_key_is_generated_and_unique(instance, tmp_path, monkeypatch):
     from llm_sidecar import services
 
     services.install()
-    first = (instance / "settings.yml").read_text()
+    first = (instance / "settings.yml").read_text(encoding="utf-8")
     assert "GENERATED_ON_FIRST_START" not in first
 
     other = tmp_path / "second"
     monkeypatch.setattr(services, "INSTANCE_DIR", other)
     services.install()
-    assert (other / "settings.yml").read_text() != first
+    assert (other / "settings.yml").read_text(encoding="utf-8") != first
 
 
 def test_install_does_not_clobber_user_edits(instance):
@@ -849,16 +849,16 @@ def test_install_does_not_clobber_user_edits(instance):
     services.install()
     (instance / "settings.yml").write_text("# mine\n")
     services.install()
-    assert (instance / "settings.yml").read_text() == "# mine\n"
+    assert (instance / "settings.yml").read_text(encoding="utf-8") == "# mine\n"
     services.install(force=True)
-    assert (instance / "settings.yml").read_text() != "# mine\n"
+    assert (instance / "settings.yml").read_text(encoding="utf-8") != "# mine\n"
 
 
 def test_compose_binds_loopback_only():
     """An instance with the bot limiter off must not be reachable off-box."""
     from llm_sidecar import services
 
-    compose = (services.ASSETS / "docker-compose.yml").read_text()
+    compose = (services.ASSETS / "docker-compose.yml").read_text(encoding="utf-8")
     assert "127.0.0.1:" in compose
     assert '"${SEARXNG_PORT:-8888}:8080"' not in compose
 
@@ -1140,7 +1140,7 @@ def test_dashboard_has_no_external_requests():
 
     import llm_sidecar
 
-    html = (Path(llm_sidecar.__file__).parent / "ui" / "index.html").read_text()
+    html = (Path(llm_sidecar.__file__).parent / "ui" / "index.html").read_text(encoding="utf-8")
     for marker in ("src=\"http", "href=\"http://cdn", "cdn.", "googleapis", "unpkg", "jsdelivr"):
         assert marker not in html, f"dashboard reaches out to {marker}"
 
@@ -1301,7 +1301,7 @@ def test_dashboard_exposes_every_tool():
 
     import llm_sidecar
 
-    html = (Path(llm_sidecar.__file__).parent / "ui" / "index.html").read_text()
+    html = (Path(llm_sidecar.__file__).parent / "ui" / "index.html").read_text(encoding="utf-8")
     for endpoint in ("/v1/chat/completions", "/v1/verify", "/ops/summarise", "/ops/classify",
                      "/ops/extract", "/ops/extract-claims", "/ops/fact-check",
                      "/ops/search", "/ops/read-url"):
@@ -1402,7 +1402,7 @@ def test_dashboard_renders_a_receipt_for_streams():
 
     import llm_sidecar
 
-    html = (Path(llm_sidecar.__file__).parent / "ui" / "index.html").read_text()
+    html = (Path(llm_sidecar.__file__).parent / "ui" / "index.html").read_text(encoding="utf-8")
     assert "chunk.usage" in html, "UI never reads the usage frame"
     assert "receiptFor(Object.assign({ model: used }, tally))" in html
 
@@ -1663,7 +1663,7 @@ def test_persist_writes_the_key_only_when_asked(cfg, tmp_path, monkeypatch):
 
     r = c.post("/config/api-key", json={"key": "sk-or-abcd1234", "persist": True}).json()
     assert r["persisted"] is True
-    assert json.loads((tmp_path / "config.json").read_text())["openrouter_api_key"] == "sk-or-abcd1234"
+    assert json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))["openrouter_api_key"] == "sk-or-abcd1234"
 
 
 def test_budget_can_be_set_and_is_validated(api):
@@ -1676,7 +1676,7 @@ def test_dashboard_has_a_settings_panel():
 
     import llm_sidecar
 
-    html = (Path(llm_sidecar.__file__).parent / "ui" / "index.html").read_text()
+    html = (Path(llm_sidecar.__file__).parent / "ui" / "index.html").read_text(encoding="utf-8")
     assert "/config/api-key" in html
     assert 'id="cfg-key"' in html and 'type="password"' in html
     assert "/v1/answer" in html
@@ -1886,7 +1886,7 @@ def test_chat_panel_separates_the_axes():
 
     import llm_sidecar
 
-    html = (Path(llm_sidecar.__file__).parent / "ui" / "index.html").read_text()
+    html = (Path(llm_sidecar.__file__).parent / "ui" / "index.html").read_text(encoding="utf-8")
     assert 'id="chat-tier"' in html
     assert 'id="chat-budget"' in html
     assert 'id="chat-resolved"' in html        # shows what it landed on
@@ -1965,7 +1965,7 @@ def test_dashboard_shows_key_state_as_a_badge():
 
     import llm_sidecar
 
-    html = (Path(llm_sidecar.__file__).parent / "ui" / "index.html").read_text()
+    html = (Path(llm_sidecar.__file__).parent / "ui" / "index.html").read_text(encoding="utf-8")
     assert 'id="cfg-key-state"' in html
     assert "no API key — local only" in html
     assert "API key set" in html
@@ -2027,3 +2027,25 @@ def test_throttled_auto_picked_model_is_not_waited_out(cfg, monkeypatch):
         client.complete([{"role": "user", "content": "q"}], "m/1", cfg,
                         retry_on_throttle=True)
     assert slept                        # pinned model: waiting is all we can do
+
+
+def test_every_text_read_declares_utf8():
+    """Regression, caught by CI on windows-latest before any user hit it.
+
+    Python's text mode defaults to the *locale* encoding, which is cp1252 on
+    Windows. The dashboard HTML is full of em-dashes and box-drawing
+    characters, so the daemon served a mangled page — or crashed — on Windows
+    while being perfectly fine on macOS and Linux. Same hazard for the SearXNG
+    settings, the JSON caches and the ledger."""
+    import re
+    from pathlib import Path
+
+    import llm_sidecar
+
+    root = Path(llm_sidecar.__file__).parent
+    offenders = []
+    for path in root.rglob("*.py"):
+        for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if re.search(r"\.read_text\(\)|\.open\(\)|\.open\(['\"][wa]['\"]\)", line):
+                offenders.append(f"{path.relative_to(root)}:{n}: {line.strip()}")
+    assert not offenders, "text IO without an explicit encoding:\n" + "\n".join(offenders)

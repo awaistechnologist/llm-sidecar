@@ -190,7 +190,10 @@ def create_app(config: Config | None = None) -> FastAPI:
         if not page.exists():
             return HTMLResponse("<h1>llm-sidecar</h1><p>Dashboard asset missing.</p>",
                                 status_code=500)
-        return HTMLResponse(page.read_text())
+        # Explicit encoding: the default is locale-dependent, and on
+        # Windows that is cp1252, which mangles every em-dash and box
+        # character in the page. CI on windows-latest caught this.
+        return HTMLResponse(page.read_text(encoding="utf-8"))
 
     def _op(fn, *args, **kwargs):
         """Run a capability and translate its failures into HTTP.

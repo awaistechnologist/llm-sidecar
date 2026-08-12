@@ -44,7 +44,7 @@ def _read(path: Path, ttl: float) -> dict | None:
     if not path.exists():
         return None
     try:
-        with path.open() as f:
+        with path.open(encoding="utf-8") as f:
             entry = json.load(f)
     except (json.JSONDecodeError, OSError):
         return None
@@ -60,7 +60,7 @@ def _write(path: Path, value) -> None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".tmp")
-        with tmp.open("w") as f:
+        with tmp.open("w", encoding="utf-8") as f:
             json.dump({"stored_at": time.time(), "value": value}, f)
         tmp.replace(path)
     except (OSError, TypeError) as e:

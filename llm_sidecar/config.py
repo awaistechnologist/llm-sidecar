@@ -114,7 +114,7 @@ def _from_file(path: Path) -> dict:
     if not path.exists():
         return {}
     try:
-        with path.open() as f:
+        with path.open(encoding="utf-8") as f:
             data = json.load(f)
         return data if isinstance(data, dict) else {}
     except (json.JSONDecodeError, OSError):
@@ -193,7 +193,7 @@ def save(config: Config, include_api_key: bool = False) -> Path:
     if not include_api_key:
         data.pop("openrouter_api_key", None)
     tmp = CONFIG_FILE.with_suffix(".json.tmp")
-    with tmp.open("w") as f:
+    with tmp.open("w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
     tmp.replace(CONFIG_FILE)
     return CONFIG_FILE

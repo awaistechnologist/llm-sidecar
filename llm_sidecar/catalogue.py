@@ -84,7 +84,7 @@ def _read_cache() -> tuple[list[ModelInfo], float] | None:
     if not _CACHE_FILE.exists():
         return None
     try:
-        with _CACHE_FILE.open() as f:
+        with _CACHE_FILE.open(encoding="utf-8") as f:
             blob = json.load(f)
         return _parse(blob.get("models") or []), float(blob.get("fetched_at") or 0)
     except (json.JSONDecodeError, OSError, TypeError, ValueError):
@@ -95,7 +95,7 @@ def _write_cache(raw: list[dict]) -> None:
     try:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         tmp = _CACHE_FILE.with_suffix(".json.tmp")
-        with tmp.open("w") as f:
+        with tmp.open("w", encoding="utf-8") as f:
             json.dump({"fetched_at": time.time(), "models": raw}, f)
         tmp.replace(_CACHE_FILE)
     except OSError as e:

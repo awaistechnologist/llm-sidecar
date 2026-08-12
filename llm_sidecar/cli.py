@@ -134,7 +134,8 @@ def _summarise(args) -> int:
     from . import Sidecar
 
     try:
-        text = sys.stdin.read() if args.file == "-" else open(args.file).read()
+        text = (sys.stdin.read() if args.file == "-"
+                else open(args.file, encoding="utf-8").read())
     except OSError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1

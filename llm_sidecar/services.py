@@ -94,14 +94,14 @@ def install(port: int = 8888, force: bool = False) -> Path:
 
     settings_dst = INSTANCE_DIR / "settings.yml"
     if force or not settings_dst.exists():
-        text = (ASSETS / "settings.yml").read_text()
+        text = (ASSETS / "settings.yml").read_text(encoding="utf-8")
         # A shared secret key across every install would be worse than no key.
         text = text.replace("GENERATED_ON_FIRST_START", secrets.token_hex(32))
-        settings_dst.write_text(text)
+        settings_dst.write_text(text, encoding="utf-8")
 
     env_dst = INSTANCE_DIR / ".env"
     if force or not env_dst.exists():
-        env_dst.write_text(f"SEARXNG_PORT={port}\n")
+        env_dst.write_text(f"SEARXNG_PORT={port}\n", encoding="utf-8")
 
     return INSTANCE_DIR
 

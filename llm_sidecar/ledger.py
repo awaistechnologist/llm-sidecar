@@ -61,7 +61,7 @@ def record(
             "latency_s": round(latency_s, 3),
         }
         _rotate_if_large()
-        with LEDGER_FILE.open("a") as f:
+        with LEDGER_FILE.open("a", encoding="utf-8") as f:
             f.write(json.dumps(entry) + "\n")
     except OSError as e:
         logger.debug(f"ledger write failed: {e}")
@@ -73,7 +73,7 @@ def read(since: float | None = None) -> list[dict]:
         return []
     out = []
     try:
-        with LEDGER_FILE.open() as f:
+        with LEDGER_FILE.open(encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line:
