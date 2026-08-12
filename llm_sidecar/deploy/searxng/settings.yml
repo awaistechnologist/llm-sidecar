@@ -1,0 +1,39 @@
+# SearXNG configuration for llm-sidecar.
+#
+# `use_default_settings` merges this on top of the image's own settings, so
+# only the differences that matter to us are listed here. Everything else —
+# the engine list, timeouts, locales — stays at upstream defaults.
+#
+# This file is copied to ~/.config/llm-sidecar/searxng/settings.yml on first
+# `llm-sidecar searxng up`, and the secret key is generated there. Edit that
+# copy, not this one; it will not be overwritten.
+
+use_default_settings: true
+
+server:
+  # Replaced with a generated value on first start.
+  secret_key: "GENERATED_ON_FIRST_START"
+
+  # The limiter is bot protection for a public instance. This one listens on
+  # loopback and serves a single process on the same machine, so the only
+  # thing it would rate-limit is us.
+  limiter: false
+  public_instance: false
+  image_proxy: false
+
+search:
+  # The reason this file exists. JSON is off in the stock configuration, and
+  # without it the API returns 403 and llm-sidecar falls back to DuckDuckGo.
+  formats:
+    - html
+    - json
+
+  # No filtering — a fact-check has to be able to retrieve the unpleasant
+  # page that debunks the claim.
+  safe_search: 0
+  autocomplete: ""
+  default_lang: "en"
+
+ui:
+  infinite_scroll: false
+  static_use_hash: true

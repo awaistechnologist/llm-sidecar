@@ -1,0 +1,37 @@
+# SearXNG for llm-sidecar.
+#
+# Copied to ~/.config/llm-sidecar/searxng/ on first `llm-sidecar searxng up`.
+# Managed through that command, but it is an ordinary compose file — you can
+# run `docker compose up -d` in that directory and get the same result.
+
+services:
+  searxng:
+    image: docker.io/searxng/searxng:latest
+    container_name: llm-sidecar-searxng
+    restart: unless-stopped
+
+    ports:
+      # Loopback only. This instance has its bot limiter disabled and no
+      # authentication, so exposing it on the network would hand anyone a
+      # free search proxy running on your address.
+      - "127.0.0.1:${SEARXNG_PORT:-8888}:8080"
+
+    volumes:
+      - ./settings.yml:/etc/searxng/settings.yml:ro
+
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:${SEARXNG_PORT:-8888}/
+
+    cap_drop:
+      - ALL
+    cap_add:
+      # SearXNG's entrypoint drops to an unprivileged user, which needs these.
+      - CHOWN
+      - SETGID
+      - SETUID
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "1m"
+        max-file: "1"

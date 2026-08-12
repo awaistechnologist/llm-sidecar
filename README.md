@@ -173,6 +173,7 @@ llm-sidecar ask "explain CRDTs" --budget free
 llm-sidecar verify "The Eiffel Tower is in Berlin"
 llm-sidecar sum README.md --style bullets
 llm-sidecar cache stats                   # or: cache clear
+llm-sidecar searxng up                    # better search, one command
 ```
 
 `verify` exits non-zero if any claim came back contradicted, so it drops into
@@ -217,25 +218,48 @@ tiers. That's for parallel workloads: spreading concurrent calls across
 providers is the difference between a free tier that works and one that 429s
 halfway through.
 
-### SearXNG (optional)
+### Better search with SearXNG
 
-DuckDuckGo is the default because it needs no setup. It also rate-limits hard
-and returns short snippets. If you run several searches in parallel — which
-`verify()` does — a local SearXNG is a real upgrade:
+DuckDuckGo is the default because it needs no setup. It also rate-limits, and
+its snippets are short. SearXNG aggregates many engines, is self-hosted so the
+only rate limit is your own, and pairs well with `read_url` for full text.
+
+One command:
 
 ```bash
-docker run -d -p 8888:8080 --name searxng searxng/searxng
+llm-sidecar searxng up
 ```
 
-Then enable JSON output in its `settings.yml`:
+That writes a compose file and settings to `~/.config/llm-sidecar/searxng/`,
+generates a secret key, starts the container, and waits until it actually
+answers a JSON query before reporting success. First run pulls the image, so
+give it a few minutes.
 
-```yaml
-search:
-  formats: [html, json]
+```bash
+llm-sidecar searxng status      # is it up, and is search actually using it?
+llm-sidecar searxng logs
+llm-sidecar searxng down
+llm-sidecar searxng up --port 9999
 ```
 
-With `search_provider: auto` (the default), it's detected and used
-automatically; if it stops answering, searches fall back to DuckDuckGo.
+Nothing needs configuring afterwards — with `search_provider: auto` (the
+default) it is detected and used, and searches fall back to DuckDuckGo the
+moment it stops answering.
+
+**Why this needs its own command.** SearXNG ships with the JSON API disabled.
+Start the stock image and every request returns 403, which llm-sidecar treats
+as "unavailable" and quietly falls back — so the failure looks like nothing
+happening at all. The shipped `settings.yml` enables `formats: [html, json]`
+and turns off the bot limiter, which is protection for a public instance and
+would otherwise only be throttling you.
+
+The instance is bound to `127.0.0.1` deliberately: it has no authentication
+and no limiter, so exposing it would hand anyone a free search proxy on your
+address. The config directory is yours once created — `up` never overwrites
+files that already exist.
+
+Already running SearXNG some other way? Point `SEARXNG_URL` at it and skip all
+of the above; `status` reports any reachable instance, not just ours.
 
 ## Layout
 
@@ -254,7 +278,9 @@ automatically; if it stops answering, searches fall back to DuckDuckGo.
 | `ops.py` | `summarise` / `classify` / `extract` with pinned schemas |
 | `daemon.py` | HTTP server, chat-completions format |
 | `mcp_server.py` | MCP tools |
-| `cli.py` | `serve` / `mcp` / `status` / `models` / `usage` / `ask` / `verify` / `sum` / `cache` |
+| `services.py` | SearXNG container lifecycle |
+| `deploy/searxng/` | Compose file and settings shipped with the package |
+| `cli.py` | `serve` / `mcp` / `status` / `models` / `usage` / `ask` / `verify` / `sum` / `cache` / `searxng` |
 
 The core imports nothing but `httpx`. FastAPI and `mcp` are optional extras,
 pulled in only by the doors that need them — a program that wants
@@ -265,7 +291,7 @@ one directly and never touches the config file.
 ## Tests
 
 ```bash
-pytest                                    # 63 passing, fully offline
+pytest                                    # 72 passing, fully offline
 ```
 
 Fully offline — every network path is stubbed. Live-provider behaviour is
@@ -296,8 +322,11 @@ Both are opt-out via `LLM_SIDECAR_NO_CACHE` / `LLM_SIDECAR_NO_LEDGER`.
   chrome. Fine for feeding a model, not for display.
 - **Verification quality is bounded by search quality.** The judge can only
   grade what the search returned. Ambiguous evidence — a namesake, a replica,
-  a stale page — produces a wrong verdict, and a local SearXNG with full-text
-  `read_url` is a meaningful upgrade over DuckDuckGo snippets here.
+  a stale page — produces a wrong verdict. SearXNG helps by covering more
+  engines, but it is not a fix.
+- `llm-sidecar searxng` shells out to `docker compose`. There is no rootless
+  or Podman path yet; if you use those, run the compose file yourself and set
+  `SEARXNG_URL`.
 - The `PREFERRED` model lists in `picker.py` go stale as the catalogue churns.
   Missing entries are skipped silently, so staleness degrades ranking rather
   than breaking anything.

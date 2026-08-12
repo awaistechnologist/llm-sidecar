@@ -761,3 +761,119 @@ def test_judge_prompt_covers_namesakes():
     lowered = JUDGE_SYSTEM.lower()
     assert "replica" in lowered
     assert "namesake" in lowered
+
+
+# ── searxng service management ────────────────────────────────────────────────
+
+@pytest.fixture
+def instance(tmp_path, monkeypatch):
+    from llm_sidecar import services
+
+    monkeypatch.setattr(services, "INSTANCE_DIR", tmp_path / "searxng")
+    return tmp_path / "searxng"
+
+
+def test_install_writes_a_runnable_instance(instance):
+    from llm_sidecar import services
+
+    services.install(port=9999)
+    assert (instance / "docker-compose.yml").exists()
+    assert (instance / "settings.yml").exists()
+    assert (instance / ".env").read_text().strip() == "SEARXNG_PORT=9999"
+
+
+def test_install_enables_json_output(instance):
+    """Without this the API 403s and search silently falls back to DDG —
+    the single reason shipping our own settings.yml is worth it."""
+    from llm_sidecar import services
+
+    services.install()
+    settings = (instance / "settings.yml").read_text()
+    assert "formats:" in settings
+    assert "json" in settings
+    assert "limiter: false" in settings
+
+
+def test_secret_key_is_generated_and_unique(instance, tmp_path, monkeypatch):
+    from llm_sidecar import services
+
+    services.install()
+    first = (instance / "settings.yml").read_text()
+    assert "GENERATED_ON_FIRST_START" not in first
+
+    other = tmp_path / "second"
+    monkeypatch.setattr(services, "INSTANCE_DIR", other)
+    services.install()
+    assert (other / "settings.yml").read_text() != first
+
+
+def test_install_does_not_clobber_user_edits(instance):
+    from llm_sidecar import services
+
+    services.install()
+    (instance / "settings.yml").write_text("# mine\n")
+    services.install()
+    assert (instance / "settings.yml").read_text() == "# mine\n"
+    services.install(force=True)
+    assert (instance / "settings.yml").read_text() != "# mine\n"
+
+
+def test_compose_binds_loopback_only():
+    """An instance with the bot limiter off must not be reachable off-box."""
+    from llm_sidecar import services
+
+    compose = (services.ASSETS / "docker-compose.yml").read_text()
+    assert "127.0.0.1:" in compose
+    assert '"${SEARXNG_PORT:-8888}:8080"' not in compose
+
+
+def test_port_is_read_from_configured_url():
+    from llm_sidecar import services
+
+    assert services._port_from(Config(searxng_url="http://localhost:7777")) == 7777
+    assert services._port_from(Config(searxng_url="http://localhost:7777/")) == 7777
+    assert services._port_from(Config(searxng_url="http://searx.example.com")) == 8888
+
+
+def test_status_reports_a_reachable_instance_we_did_not_start(cfg, instance, monkeypatch):
+    """Someone running SearXNG their own way is just as good as our container;
+    reporting 'not installed' at something plainly answering would be wrong."""
+    from llm_sidecar import services
+    from llm_sidecar.search import searxng
+
+    monkeypatch.setattr(searxng, "available", lambda config: True)
+    monkeypatch.setattr(services.shutil, "which", lambda n: None)
+    s = services.status(cfg)
+    assert s["answering_json"] is True
+    assert s["installed"] is False
+    assert s["docker"] == "not installed"
+
+
+def test_status_ignores_the_probe_cache(cfg, monkeypatch):
+    """A stale 'unavailable' from earlier in the process must not make a
+    running instance look dead."""
+    from llm_sidecar import services
+    from llm_sidecar.search import searxng
+
+    searxng._probe_cache[cfg.searxng_url] = False
+    monkeypatch.setattr(services.shutil, "which", lambda n: None)
+    monkeypatch.setattr(
+        services.httpx, "get",
+        lambda *a, **k: httpx_ok(),
+    )
+    assert services.status(cfg)["answering_json"] is True
+
+
+def httpx_ok():
+    import httpx
+    return httpx.Response(200, json={"results": [{"title": "t"}]},
+                          request=httpx.Request("GET", "http://x"))
+
+
+def test_missing_docker_gives_an_actionable_error(monkeypatch):
+    from llm_sidecar import services
+
+    monkeypatch.setattr(services.shutil, "which", lambda n: None)
+    with pytest.raises(SidecarError) as e:
+        services._docker()
+    assert "SEARXNG_URL" in str(e.value)   # tells you the no-Docker way out

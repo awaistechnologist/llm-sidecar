@@ -8,6 +8,7 @@
     llm-sidecar models           # local models scored against this machine
     llm-sidecar usage            # what you have spent
     llm-sidecar sum FILE         # summarise a file
+    llm-sidecar searxng up       # start a local SearXNG for better search
 """
 
 from __future__ import annotations
@@ -30,7 +31,8 @@ def _status() -> int:
     print(f"version        : {s['version']}")
     print(f"cloud key      : {'set' if s['cloud_configured'] else 'not set (local only)'}")
     print(f"budget         : {s['default_budget']}")
-    print(f"search         : {s['search_provider']}")
+    hint = "" if s["search_provider"] == "searxng" else "   (`llm-sidecar searxng up` for better search)"
+    print(f"search         : {s['search_provider']}{hint}")
     print(f"machine        : {hw.get('chip') or hw['system']} · {hw.get('total_ram_gib', '?')} GiB")
     print(f"local (fits)   : {usable or 'none'}")
     tight = [m['id'] for m in s['local_models'] if m['verdict'] != 'fits']
@@ -79,6 +81,51 @@ def _usage(args) -> int:
     for m in s["by_model"]:
         print(f"{m['model'][:40]:<40} {m['calls']:>6} {m['cost_usd']:>10.4f} "
               f"{m['total_tokens']:>10,} {m['avg_latency_s']:>6.1f}s")
+    return 0
+
+
+def _searxng(args) -> int:
+    from . import config as config_mod, services
+    from .types import SidecarError
+
+    cfg = config_mod.load()
+
+    if args.action == "status":
+        s = services.status(cfg)
+        answering = "yes" if s["answering_json"] else "no"
+        print(f"url            : {s['url']}")
+        print(f"answering JSON : {answering}")
+        print(f"docker         : {s['docker']}")
+        print(f"config written : {'yes' if s['installed'] else 'no'} ({s['instance_dir']})")
+        if s["container"]:
+            print(f"container      : {s['container']['state']} — {s['container']['status']}")
+        else:
+            print("container      : not created")
+        if s["answering_json"]:
+            print("\nSearXNG is being used for search automatically.")
+        else:
+            print("\nSearch is falling back to DuckDuckGo. Run `llm-sidecar searxng up`.")
+        return 0
+
+    try:
+        if args.action == "up":
+            print("Starting SearXNG (first run pulls the image, this can take a minute)...")
+            r = services.up(cfg, port=args.port)
+            print(f"\nReady at {r['url']}")
+            print(f"Config:  {r['dir']}")
+            print("\nNothing else to do — search auto-detects it. Verify with "
+                  "`llm-sidecar searxng status`.")
+            if cfg.searxng_url.rstrip("/") != r["url"]:
+                print(f"\nNote: your configured searxng_url is {cfg.searxng_url}, but the "
+                      f"instance is on {r['url']}. Set SEARXNG_URL={r['url']} so it's found.")
+        elif args.action == "down":
+            services.down(remove=args.volumes)
+            print("Stopped. Search falls back to DuckDuckGo.")
+        elif args.action == "logs":
+            print(services.logs(args.lines) or "(no output)")
+    except SidecarError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -164,6 +211,13 @@ def main(argv: list[str] | None = None) -> int:
     ca = sub.add_parser("cache", help="inspect or clear the response cache")
     ca.add_argument("action", nargs="?", default="stats", choices=["stats", "clear"])
 
+    sx = sub.add_parser("searxng", help="run a local SearXNG for better search")
+    sx.add_argument("action", nargs="?", default="status",
+                    choices=["up", "down", "status", "logs"])
+    sx.add_argument("--port", type=int, default=None, help="host port (default 8888)")
+    sx.add_argument("--volumes", action="store_true", help="with down: also remove volumes")
+    sx.add_argument("--lines", type=int, default=50, help="with logs: how many lines")
+
     ask = sub.add_parser("ask", help="one-shot completion")
     ask.add_argument("prompt")
     ask.add_argument("--tier", default=None, choices=["fast", "balanced", "powerful"])
@@ -194,6 +248,8 @@ def main(argv: list[str] | None = None) -> int:
         return _usage(args)
     if args.cmd == "sum":
         return _summarise(args)
+    if args.cmd == "searxng":
+        return _searxng(args)
     if args.cmd == "cache":
         from . import cache
         if args.action == "clear":
