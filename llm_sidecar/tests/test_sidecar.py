@@ -1187,3 +1187,122 @@ def test_status_reports_pins_separately_from_resolution(cfg):
     s = Sidecar(cfg).status()
     assert s["pinned_tiers"] == {"fast": "ollama/pinned"}
     assert s["resolved_tiers"] == {}
+
+
+# ── searxng probe caching ─────────────────────────────────────────────────────
+
+def test_slow_probe_does_not_permanently_disable_searxng(cfg, monkeypatch):
+    """Regression: a healthy SearXNG that took longer than the 2s probe was
+    classified as dead, and the false negative was cached for the life of the
+    process — so one slow moment silently downgraded every later search."""
+    import httpx
+
+    from llm_sidecar.search import searxng
+
+    searxng._probe_cache.clear()
+
+    calls = []
+
+    def flaky(*a, **k):
+        calls.append(1)
+        if len(calls) == 1:
+            raise httpx.ReadTimeout("too slow")
+        return httpx.Response(200, json={"results": [{"title": "t"}]},
+                              request=httpx.Request("GET", "http://x"))
+
+    monkeypatch.setattr(httpx, "get", flaky)
+    assert searxng.available(cfg) is False       # timed out
+
+    # A negative is short-lived, so the next check re-probes rather than
+    # inheriting the earlier failure.
+    searxng._probe_cache[cfg.searxng_url] = (False, time.time() - searxng._NEGATIVE_TTL - 1)
+    assert searxng.available(cfg) is True
+    searxng._probe_cache.clear()
+
+
+def test_positive_probe_is_cached(cfg, monkeypatch):
+    import httpx
+
+    from llm_sidecar.search import searxng
+
+    searxng._probe_cache.clear()
+    calls = []
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: (
+        calls.append(1),
+        httpx.Response(200, json={"results": []}, request=httpx.Request("GET", "http://x")),
+    )[1])
+    searxng.available(cfg)
+    searxng.available(cfg)
+    assert len(calls) == 1
+    searxng._probe_cache.clear()
+
+
+def test_probe_timeout_allows_for_engine_fanout():
+    """SearXNG waits on a dozen upstream engines; the timeout has to reflect
+    that or a healthy instance reads as dead."""
+    from llm_sidecar.search import searxng
+
+    assert searxng.PROBE_TIMEOUT >= 5.0
+
+
+# ── ui opt-out and capability endpoints ───────────────────────────────────────
+
+def test_ui_can_be_disabled_without_touching_the_api(cfg):
+    from fastapi.testclient import TestClient
+
+    from llm_sidecar import daemon
+
+    cfg.ui_enabled = False
+    c = TestClient(daemon.create_app(cfg))
+    r = c.get("/")
+    assert r.status_code == 404
+    assert "disabled" in r.json()["detail"]
+    assert c.get("/v1/models").status_code == 200      # API unaffected
+
+
+def test_every_capability_has_an_endpoint(api):
+    """The dashboard is meant to be one place to try everything, so each
+    library capability needs a route behind it."""
+    from llm_sidecar import daemon
+    from llm_sidecar.config import Config
+
+    paths = {r.path for r in daemon.create_app(Config()).routes if hasattr(r, "path")}
+    for expected in ("/v1/chat/completions", "/v1/verify", "/ops/summarise", "/ops/classify",
+                     "/ops/extract", "/ops/extract-claims", "/ops/fact-check",
+                     "/ops/search", "/ops/read-url"):
+        assert expected in paths, expected
+
+
+def test_ops_endpoints_translate_errors(api, monkeypatch):
+    from llm_sidecar import Sidecar
+
+    monkeypatch.setattr(Sidecar, "classify",
+                        lambda self, *a, **k: (_ for _ in ()).throw(SidecarError("only one label")))
+    r = api.post("/ops/classify", json={"items": ["a"], "labels": ["x"]})
+    assert r.status_code == 400
+    assert "only one label" in r.json()["detail"]
+
+
+def test_ops_search_and_read(api, monkeypatch):
+    from llm_sidecar import Sidecar
+    from llm_sidecar.types import SearchResult
+
+    monkeypatch.setattr(Sidecar, "search",
+                        lambda self, q, **k: [SearchResult("t", "http://u", "s")])
+    monkeypatch.setattr(Sidecar, "read_url", lambda self, u, **k: "page text")
+    assert api.post("/ops/search", json={"query": "x"}).json()["results"][0]["url"] == "http://u"
+    assert api.post("/ops/read-url", json={"url": "http://u"}).json()["text"] == "page text"
+
+
+def test_dashboard_exposes_every_tool():
+    """Each capability endpoint should have a matching panel, or the 'one shop
+    to try it' claim quietly stops being true as capabilities are added."""
+    from pathlib import Path
+
+    import llm_sidecar
+
+    html = (Path(llm_sidecar.__file__).parent / "ui" / "index.html").read_text()
+    for endpoint in ("/v1/chat/completions", "/v1/verify", "/ops/summarise", "/ops/classify",
+                     "/ops/extract", "/ops/extract-claims", "/ops/fact-check",
+                     "/ops/search", "/ops/read-url"):
+        assert endpoint in html, f"dashboard has no panel calling {endpoint}"

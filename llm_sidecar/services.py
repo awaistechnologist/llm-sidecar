@@ -190,7 +190,8 @@ def status(config: Config) -> dict:
     url = config.searxng_url
     from .search import searxng as provider
 
-    # Bypass the module-level probe cache so this always reflects reality.
+    # Bypass the probe cache entirely: status is the one place that must
+    # report what is true now, not what was true a few minutes ago.
     provider._probe_cache.pop(url, None)
     answering = provider.available(config)
 

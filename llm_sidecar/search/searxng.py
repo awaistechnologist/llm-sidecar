@@ -15,6 +15,7 @@ Requires a running instance — see README for the docker one-liner.
 from __future__ import annotations
 
 import logging
+import time
 
 import httpx
 
@@ -22,9 +23,21 @@ from ..types import SearchResult
 
 logger = logging.getLogger("llm_sidecar.search.searxng")
 
-# Cached probe results per base URL. Checking liveness on every search would
-# double the request count for a fact that changes ~never within a process.
-_probe_cache: dict[str, bool] = {}
+# Cached probe results per base URL, with expiry. Checking liveness on every
+# search would double the request count, but caching forever is worse: a
+# single slow probe would disable SearXNG for the life of the process.
+#
+# Negatives expire quickly and positives slowly, deliberately. Being wrong
+# about "it's down" costs you the better search engine silently; being wrong
+# about "it's up" costs one failed request that already falls back.
+_probe_cache: dict[str, tuple[bool, float]] = {}
+_POSITIVE_TTL = 300.0
+_NEGATIVE_TTL = 30.0
+
+# SearXNG fans a query out to a dozen upstream engines and waits on them, so a
+# healthy instance can take several seconds. Two seconds classified a working
+# instance as dead and fell back to DuckDuckGo without saying anything.
+PROBE_TIMEOUT = 8.0
 
 
 def available(config) -> bool:
@@ -34,15 +47,19 @@ def available(config) -> bool:
     instance can still be unusable to us. Probing with `format=json` tests
     the thing we actually need rather than mere reachability."""
     url = config.searxng_url
-    if url in _probe_cache:
-        return _probe_cache[url]
+    cached = _probe_cache.get(url)
+    if cached is not None:
+        ok, checked_at = cached
+        ttl = _POSITIVE_TTL if ok else _NEGATIVE_TTL
+        if time.time() - checked_at < ttl:
+            return ok
 
     ok = False
     try:
         r = httpx.get(
             f"{url.rstrip('/')}/search",
             params={"q": "test", "format": "json"},
-            timeout=2.0,
+            timeout=PROBE_TIMEOUT,
         )
         ok = r.status_code == 200 and isinstance(r.json().get("results"), list)
         if r.status_code == 403:
@@ -50,10 +67,15 @@ def available(config) -> bool:
                 f"SearXNG at {url} rejected format=json — add 'json' to "
                 "search.formats in settings.yml to enable it."
             )
+    except httpx.TimeoutException:
+        logger.warning(
+            f"SearXNG at {url} did not answer within {PROBE_TIMEOUT}s — treating as "
+            "unavailable for now and falling back to DuckDuckGo."
+        )
     except Exception:
         ok = False
 
-    _probe_cache[url] = ok
+    _probe_cache[url] = (ok, time.time())
     return ok
 
 

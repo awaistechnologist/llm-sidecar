@@ -83,6 +83,10 @@ class Config:
     # Off by default — on a loopback socket the OS is already the boundary —
     # but worth setting on a shared machine.
     daemon_token: str | None = None
+    # The dashboard is served by the daemon. Turn it off for a headless
+    # deployment, or if you'd rather not have an unauthenticated page on the
+    # port at all.
+    ui_enabled: bool = True
 
     # ── network ───────────────────────────────────────────────────────────
     request_timeout: float = 300.0
@@ -140,6 +144,8 @@ def _from_env() -> dict:
             pass
     if os.getenv("LLM_SIDECAR_TOKEN"):
         out["daemon_token"] = os.environ["LLM_SIDECAR_TOKEN"]
+    if os.getenv("LLM_SIDECAR_NO_UI"):
+        out["ui_enabled"] = False
     if os.getenv("LLM_SIDECAR_NO_CACHE"):
         out["cache_enabled"] = False
     if os.getenv("LLM_SIDECAR_NO_LEDGER"):

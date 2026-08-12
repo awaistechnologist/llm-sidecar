@@ -57,6 +57,32 @@ class SummariseRequest(BaseModel):
     focus: str = ""
 
 
+class ClassifyRequest(BaseModel):
+    items: list[str]
+    labels: list[str]
+    multi: bool = False
+
+
+class ExtractRequest(BaseModel):
+    text: str
+    fields: dict[str, str]
+
+
+class TextRequest(BaseModel):
+    text: str
+
+
+class SearchRequest(BaseModel):
+    query: str
+    max_results: int = 5
+    news: bool = False
+
+
+class ReadRequest(BaseModel):
+    url: str
+    max_chars: int = 20000
+
+
 class VerifyRequest(BaseModel):
     claims: list[str]
     model: str = ""
@@ -119,6 +145,15 @@ def create_app(config: Config | None = None) -> FastAPI:
 
     @app.get("/", include_in_schema=False)
     def dashboard():
+        if not cfg.ui_enabled:
+            raise HTTPException(
+                status_code=404,
+                detail="The dashboard is disabled. Start without --no-ui (or unset "
+                       "LLM_SIDECAR_NO_UI) to enable it. The API is unaffected.",
+            )
+        return _page()
+
+    def _page():
         """The single-page dashboard.
 
         Served from the package rather than a separate static host: this is a
@@ -129,6 +164,51 @@ def create_app(config: Config | None = None) -> FastAPI:
             return HTMLResponse("<h1>llm-sidecar</h1><p>Dashboard asset missing.</p>",
                                 status_code=500)
         return HTMLResponse(page.read_text())
+
+    def _op(fn, *args, **kwargs):
+        """Run a capability and translate its failures into HTTP.
+
+        Every tool panel in the dashboard funnels through here so the error
+        contract is identical no matter which capability misbehaves."""
+        try:
+            return fn(*args, **kwargs)
+        except SidecarError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        except NoWorkingModel as e:
+            raise HTTPException(status_code=503, detail=str(e)) from e
+        except Exception as e:
+            logger.exception("operation failed")
+            raise HTTPException(status_code=502, detail=str(e)) from e
+
+    @app.post("/ops/classify")
+    def op_classify(req: ClassifyRequest, _: None = Depends(require_token)) -> dict:
+        return {"results": _op(sidecar.classify, req.items, req.labels, multi=req.multi)}
+
+    @app.post("/ops/extract")
+    def op_extract(req: ExtractRequest, _: None = Depends(require_token)) -> dict:
+        return {"fields": _op(sidecar.extract, req.text, req.fields)}
+
+    @app.post("/ops/extract-claims")
+    def op_extract_claims(req: TextRequest, _: None = Depends(require_token)) -> dict:
+        return {"claims": _op(sidecar.extract_claims, req.text)}
+
+    @app.post("/ops/fact-check")
+    def op_fact_check(req: TextRequest, _: None = Depends(require_token)) -> dict:
+        verdicts = _op(sidecar.fact_check, req.text)
+        return {
+            "checked": len(verdicts),
+            "contradicted": sum(1 for v in verdicts if v.verdict == "contradicted"),
+            "results": [v.__dict__ for v in verdicts],
+        }
+
+    @app.post("/ops/search")
+    def op_search(req: SearchRequest, _: None = Depends(require_token)) -> dict:
+        results = _op(sidecar.search, req.query, max_results=req.max_results, news=req.news)
+        return {"results": [r.__dict__ for r in results]}
+
+    @app.post("/ops/read-url")
+    def op_read_url(req: ReadRequest, _: None = Depends(require_token)) -> dict:
+        return {"url": req.url, "text": _op(sidecar.read_url, req.url, max_chars=req.max_chars)}
 
     @app.get("/usage/daily")
     def usage_daily(days: int = 30, _: None = Depends(require_token)) -> dict:
@@ -323,17 +403,24 @@ async def _stream_body(sidecar, rid, created, msgs, target, req):
 app = create_app()
 
 
-def main() -> None:
+def main(no_ui: bool = False, port: int | None = None) -> None:
     import uvicorn
 
     from . import config as config_mod
 
     cfg = config_mod.load()
+    if no_ui:
+        cfg.ui_enabled = False
+    if port:
+        cfg.daemon_port = port
+
     logging.basicConfig(level=logging.INFO)
+    base = f"http://{cfg.daemon_host}:{cfg.daemon_port}"
     logger.info(
-        f"llm-sidecar on http://{cfg.daemon_host}:{cfg.daemon_port}/v1 "
+        f"llm-sidecar API on {base}/v1 "
         f"(cloud={'yes' if cfg.has_cloud else 'no'}, budget={cfg.default_budget})"
     )
+    logger.info(f"dashboard on {base}" if cfg.ui_enabled else "dashboard disabled")
     uvicorn.run(create_app(cfg), host=cfg.daemon_host, port=cfg.daemon_port, log_level="info")
 
 

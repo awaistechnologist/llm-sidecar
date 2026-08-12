@@ -186,17 +186,41 @@ a pipeline or a pre-commit hook.
 
 ## Dashboard
 
-`llm-sidecar serve` also serves a dashboard at **http://localhost:4001** —
-status, which local models fit your machine, spend over time, cache size, and
-boxes to try verification and summarising.
+`llm-sidecar serve` also serves a dashboard at **http://localhost:4001**. Three
+tabs, because there are three reasons to open it:
 
-One HTML file with no build step and no external requests: no CDN, no fonts,
-no analytics. A loopback dashboard that phones out would be both a privacy
-problem and broken offline. It only talks to endpoints the daemon already has.
+**Dashboard** — status, which local models actually fit this machine (with
+one-click tier pinning), spend over 30 days, cache size, whether SearXNG is
+really being used.
 
-Tier pins made from the dashboard apply to the running daemon and are
-**not written to your config** — a click that silently rewrites a file on disk
-is a worse surprise than one that doesn't survive a restart.
+**Chat** — multi-turn, streaming, against whatever the sidecar routes you to.
+This is not trying to be a chat client; point LibreChat or Open WebUI at the
+`/v1` endpoint if that's what you want. It exists because every reply carries
+**the model that answered, what it cost, and whether it came from cache** —
+which is the routing made visible, and no general chat client can show it.
+
+**Tools** — every capability, in one place: verify, fact-check a document,
+summarise, classify, extract fields, extract claims, search, read a URL. The
+point is to try something before wiring it into anything.
+
+One HTML file, no build step, no dependencies, no external requests — no CDN,
+no fonts, no analytics. A loopback page that phoned out would be both a privacy
+problem and broken offline; there's a test asserting it doesn't.
+
+Tier pins made here apply to the running daemon and are **not written to your
+config** — a click that silently rewrites a file on disk is a worse surprise
+than one that doesn't survive a restart.
+
+### Turning it off
+
+The dashboard is opt-out, not mandatory:
+
+```bash
+llm-sidecar serve --no-ui          # or: LLM_SIDECAR_NO_UI=1
+```
+
+`/` then returns 404 and the API is untouched. Note this controls *serving*,
+not installing — the page is a ~40 KB file inside the package either way.
 
 Swagger for the same API is at `/docs`.
 
@@ -216,6 +240,7 @@ keyword arguments to `Sidecar(...)`.
 | `LLM_SIDECAR_HOST` | `127.0.0.1` | Daemon bind address |
 | `LLM_SIDECAR_PORT` | `4001` | Daemon port |
 | `LLM_SIDECAR_TOKEN` | — | Require `Authorization: Bearer <token>` |
+| `LLM_SIDECAR_NO_UI` | — | Set to serve the API without the dashboard |
 | `LLM_SIDECAR_NO_CACHE` | — | Set to disable the response cache |
 | `LLM_SIDECAR_NO_LEDGER` | — | Set to stop recording usage |
 
@@ -317,7 +342,7 @@ one directly and never touches the config file.
 ## Tests
 
 ```bash
-pytest                                    # 97 passing, fully offline
+pytest                                    # 105 passing, fully offline
 ```
 
 Fully offline — every network path is stubbed. Live-provider behaviour is

@@ -193,7 +193,10 @@ def main(argv: list[str] | None = None) -> int:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    sub.add_parser("serve", help="run the OpenAI-compatible HTTP daemon")
+    srv = sub.add_parser("serve", help="run the OpenAI-compatible HTTP daemon")
+    srv.add_argument("--no-ui", action="store_true",
+                     help="serve the API only, without the dashboard")
+    srv.add_argument("--port", type=int, default=None)
     sub.add_parser("mcp", help="run the MCP server on stdio")
     sub.add_parser("status", help="show what is configured and reachable")
 
@@ -233,7 +236,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "serve":
         from .daemon import main as serve
-        serve()
+        serve(no_ui=args.no_ui, port=args.port)
         return 0
     if args.cmd == "mcp":
         from .mcp_server import main as mcp_main

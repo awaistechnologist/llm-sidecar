@@ -2,11 +2,17 @@
 <!--
   llm-sidecar dashboard.
 
-  One file, no build step, no dependencies. That is a deliberate constraint,
-  not a shortcut: the selling point of this package is `pip install` and one
+  One file, no build step, no dependencies, no external requests. That is a
+  deliberate constraint: the pitch for this package is `pip install` and one
   runtime dependency, and a dashboard that drags in a node toolchain would
-  cost more than it returns. Everything here talks to endpoints the daemon
-  already serves.
+  cost more than it returns. A loopback page that phoned out to a CDN would
+  also be a privacy problem and broken offline.
+
+  Three tabs, because there are three reasons to open this: see how the
+  sidecar is doing, talk to it, or try a capability before wiring it into
+  something. The chat panel is not competing with a chat client — it exists to
+  show the routing, which is why every message carries the model that answered
+  it, what it cost, and whether it came from cache.
 -->
 <html lang="en">
 <head>
@@ -19,7 +25,7 @@
     --muted: #6b7280;     --line: #e4e4e7;    --accent: #4f46e5;
     --ok: #15803d;        --warn: #b45309;    --bad: #b91c1c;
     --ok-bg: #dcfce7;     --warn-bg: #fef3c7; --bad-bg: #fee2e2;
-    --radius: 10px;
+    --bubble: #eef2ff;    --radius: 10px;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -27,33 +33,44 @@
       --muted: #9096a2;   --line: #262a33;    --accent: #8b85f7;
       --ok: #4ade80;      --warn: #fbbf24;    --bad: #f87171;
       --ok-bg: #14321f;   --warn-bg: #3a2c0c; --bad-bg: #3b1618;
+      --bubble: #1f2333;
     }
   }
   * { box-sizing: border-box; }
   body {
     margin: 0; background: var(--bg); color: var(--ink);
-    font: 14px/1.5 ui-sans-serif, -apple-system, "Segoe UI", system-ui, sans-serif;
+    font: 14px/1.55 ui-sans-serif, -apple-system, "Segoe UI", system-ui, sans-serif;
   }
   code, .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12.5px; }
 
   header {
-    display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
-    padding: 20px 24px; border-bottom: 1px solid var(--line); background: var(--panel);
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    padding: 14px 24px; border-bottom: 1px solid var(--line); background: var(--panel);
+    position: sticky; top: 0; z-index: 10;
   }
-  header h1 { margin: 0; font-size: 17px; letter-spacing: -0.2px; }
+  header h1 { margin: 0; font-size: 16px; letter-spacing: -0.2px; }
   header .ver { color: var(--muted); font-size: 12px; }
   header .spacer { flex: 1; }
+  nav { display: flex; gap: 4px; }
+  nav button {
+    background: none; border: 0; padding: 5px 13px; border-radius: 7px;
+    color: var(--muted); font: inherit; font-size: 13px; cursor: pointer;
+  }
+  nav button:hover { color: var(--ink); }
+  nav button[aria-selected="true"] { background: var(--bubble); color: var(--accent); font-weight: 600; }
 
-  main { max-width: 1180px; margin: 0 auto; padding: 22px 24px 60px; }
+  main { max-width: 1180px; margin: 0 auto; padding: 20px 24px 60px; }
+  .tab[hidden] { display: none; }
   .grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); }
   .panel {
     background: var(--panel); border: 1px solid var(--line);
     border-radius: var(--radius); padding: 16px 18px; min-width: 0;
   }
   .panel h2 {
-    margin: 0 0 12px; font-size: 12px; font-weight: 600; letter-spacing: .07em;
+    margin: 0 0 4px; font-size: 12px; font-weight: 600; letter-spacing: .07em;
     text-transform: uppercase; color: var(--muted);
   }
+  .panel .hint { margin: 0 0 12px; color: var(--muted); font-size: 12.5px; }
   .panel.wide { grid-column: 1 / -1; }
 
   .kv { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; align-items: baseline; }
@@ -76,12 +93,12 @@
   td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
   .scroll { overflow-x: auto; }
 
-  button {
-    font: inherit; font-size: 12px; padding: 4px 11px; cursor: pointer;
+  button.btn, button#refresh, button#clear-cache {
+    font: inherit; font-size: 12px; padding: 5px 12px; cursor: pointer;
     color: var(--ink); background: var(--panel);
     border: 1px solid var(--line); border-radius: 7px;
   }
-  button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  button.btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
   button:disabled { opacity: .45; cursor: default; }
   button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
   button.primary:hover:not(:disabled) { opacity: .9; color: #fff; }
@@ -92,13 +109,12 @@
     font: inherit; width: 100%; padding: 8px 10px; color: var(--ink);
     background: var(--bg); border: 1px solid var(--line); border-radius: 7px;
   }
-  textarea { min-height: 78px; resize: vertical; font-size: 13px; }
-  .row { display: flex; gap: 8px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
-  .row > select { width: auto; }
+  textarea { min-height: 76px; resize: vertical; font-size: 13px; }
+  .row { display: flex; gap: 8px; align-items: center; margin-top: 9px; flex-wrap: wrap; }
+  .row > select, .row > input.short { width: auto; min-width: 130px; }
+  label.f { display: block; margin-top: 9px; font-size: 12px; color: var(--muted); }
 
-  /* Bar chart: plain divs. A charting library for thirty bars would be the
-     single heaviest thing in the project. */
-  .chart { display: flex; align-items: flex-end; gap: 2px; height: 90px; margin-top: 4px; }
+  .chart { display: flex; align-items: flex-end; gap: 2px; height: 88px; margin-top: 4px; }
   .bar { flex: 1; min-width: 3px; background: var(--accent); opacity: .8; border-radius: 2px 2px 0 0; }
   .bar:hover { opacity: 1; }
   .bar.empty { background: var(--line); }
@@ -109,20 +125,37 @@
   .out {
     margin-top: 10px; padding: 10px 12px; background: var(--bg);
     border: 1px solid var(--line); border-radius: 7px;
-    white-space: pre-wrap; overflow-wrap: anywhere; max-height: 300px; overflow-y: auto;
+    white-space: pre-wrap; overflow-wrap: anywhere; max-height: 340px; overflow-y: auto;
   }
-  .verdict { display: flex; gap: 8px; align-items: baseline; padding: 5px 0;
+  /* align-items matters here. The default is `stretch`, which makes the pill
+     fill the row's full height — a tall coloured blob with the label stranded
+     at the top. flex-start keeps it the size of its own text. */
+  .verdict { display: flex; gap: 8px; align-items: flex-start; padding: 6px 0;
              border-bottom: 1px solid var(--line); }
-  /* Without this the pill is a flex item and gets squeezed by the claim text
-     beside it, wrapping "contradicted" into a vertical blob. */
-  .verdict > .pill { flex: 0 0 auto; align-self: flex-start; }
-  .verdict > span:last-child { min-width: 0; }
+  .verdict > .pill { flex: 0 0 auto; }
+  .verdict > div { min-width: 0; }
   .verdict:last-child { border-bottom: 0; }
-  .banner {
-    margin-bottom: 16px; padding: 10px 14px; border-radius: var(--radius);
-    background: var(--bad-bg); color: var(--bad);
-  }
+  .banner { margin-bottom: 16px; padding: 10px 14px; border-radius: var(--radius);
+            background: var(--bad-bg); color: var(--bad); }
   a { color: var(--accent); }
+
+  /* ── chat ── */
+  #chat-log {
+    display: flex; flex-direction: column; gap: 12px;
+    min-height: 260px; max-height: 54vh; overflow-y: auto; padding: 4px 2px 8px;
+  }
+  .msg { max-width: 84%; }
+  .msg.user { align-self: flex-end; }
+  .msg .body {
+    padding: 9px 13px; border-radius: 13px; white-space: pre-wrap; overflow-wrap: anywhere;
+    background: var(--bg); border: 1px solid var(--line);
+  }
+  .msg.user .body { background: var(--bubble); border-color: transparent; }
+  .msg .receipt { margin-top: 3px; font-size: 11px; color: var(--muted); }
+  .msg.user .receipt { text-align: right; }
+  .composer { display: flex; gap: 8px; align-items: flex-end; margin-top: 12px; }
+  .composer textarea { min-height: 46px; }
+  .empty-chat { color: var(--muted); text-align: center; padding: 44px 10px; }
 </style>
 </head>
 <body>
@@ -130,6 +163,11 @@
 <header>
   <h1>llm-sidecar</h1>
   <span class="ver" id="version"></span>
+  <nav role="tablist">
+    <button role="tab" aria-selected="true" data-tab="dash">Dashboard</button>
+    <button role="tab" aria-selected="false" data-tab="chat">Chat</button>
+    <button role="tab" aria-selected="false" data-tab="tools">Tools</button>
+  </nav>
   <span class="spacer"></span>
   <span class="muted mono" id="clock"></span>
   <button id="refresh">Refresh</button>
@@ -138,123 +176,232 @@
 <main>
   <div id="banner"></div>
 
-  <div class="grid">
+  <!-- ── Dashboard ─────────────────────────────────────────────────────── -->
+  <div class="tab" id="tab-dash">
+    <div class="grid">
+      <section class="panel">
+        <h2>Status</h2>
+        <dl class="kv" id="status-kv"><dd class="muted">Loading…</dd></dl>
+      </section>
 
+      <section class="panel">
+        <h2>Search</h2>
+        <dl class="kv" id="search-kv"><dd class="muted">Loading…</dd></dl>
+        <div class="row" id="searxng-hint"></div>
+      </section>
+
+      <section class="panel">
+        <h2>Cache</h2>
+        <dl class="kv" id="cache-kv"><dd class="muted">Loading…</dd></dl>
+        <div class="row"><button id="clear-cache">Clear cache</button></div>
+      </section>
+
+      <section class="panel wide">
+        <h2>Local models &mdash; will they fit?</h2>
+        <div class="scroll"><table>
+          <thead><tr>
+            <th>Model</th><th class="num">Size</th><th class="num">Needs</th>
+            <th>Params</th><th>Quant</th><th>Verdict</th><th>Pin to tier</th>
+          </tr></thead>
+          <tbody id="models-body"><tr><td colspan="7" class="muted">Loading…</td></tr></tbody>
+        </table></div>
+        <p class="muted" style="margin:10px 0 0">
+          Sized for an 8k context, with 3&nbsp;GiB left for the rest of the machine.
+          Pins apply to this running daemon only &mdash; they are not written to your config.
+        </p>
+      </section>
+
+      <section class="panel wide">
+        <h2>Usage &mdash; last 30 days</h2>
+        <dl class="kv" id="usage-kv"><dd class="muted">Loading…</dd></dl>
+        <div class="chart" id="chart"></div>
+        <div class="axis"><span id="axis-from"></span><span id="axis-max"></span><span>today</span></div>
+        <div class="scroll" style="margin-top:14px"><table>
+          <thead><tr>
+            <th>Model</th><th class="num">Calls</th><th class="num">Cost</th>
+            <th class="num">Tokens</th><th class="num">Cached</th><th class="num">Avg</th>
+          </tr></thead>
+          <tbody id="usage-body"></tbody>
+        </table></div>
+      </section>
+    </div>
+  </div>
+
+  <!-- ── Chat ──────────────────────────────────────────────────────────── -->
+  <div class="tab" id="tab-chat" hidden>
     <section class="panel">
-      <h2>Status</h2>
-      <dl class="kv" id="status-kv"><dd class="muted">Loading…</dd></dl>
-    </section>
+      <div class="row" style="margin:0 0 12px">
+        <select id="chat-model" title="What to route this conversation to"></select>
+        <input id="chat-system" class="short" style="flex:1;min-width:220px"
+               placeholder="System prompt (optional)">
+        <label class="muted" style="display:flex;align-items:center;gap:5px;font-size:12px">
+          <input type="checkbox" id="chat-stream" checked style="width:auto"> stream
+        </label>
+        <button class="btn" id="chat-clear">New conversation</button>
+      </div>
 
-    <section class="panel">
-      <h2>Search</h2>
-      <dl class="kv" id="search-kv"><dd class="muted">Loading…</dd></dl>
-      <div class="row" id="searxng-hint"></div>
-    </section>
+      <div id="chat-log">
+        <div class="empty-chat">
+          Talk to whatever the sidecar routes you to.<br>
+          <span style="font-size:12.5px">Every reply shows the model that answered, what it cost,
+          and whether it came from cache.</span>
+        </div>
+      </div>
 
-    <section class="panel">
-      <h2>Cache</h2>
-      <dl class="kv" id="cache-kv"><dd class="muted">Loading…</dd></dl>
-      <div class="row"><button id="clear-cache">Clear cache</button></div>
-    </section>
-
-    <section class="panel wide">
-      <h2>Local models &mdash; will they fit?</h2>
-      <div class="scroll"><table>
-        <thead><tr>
-          <th>Model</th><th class="num">Size</th><th class="num">Needs</th>
-          <th>Params</th><th>Quant</th><th>Verdict</th><th>Pin to tier</th>
-        </tr></thead>
-        <tbody id="models-body"><tr><td colspan="7" class="muted">Loading…</td></tr></tbody>
-      </table></div>
-      <p class="muted" style="margin:10px 0 0">
-        Sized for an 8k context, with 3&nbsp;GiB left for the rest of the machine.
-        Pins apply to this running daemon only &mdash; they are not written to your config.
+      <div class="composer">
+        <textarea id="chat-in" placeholder="Message…  (Enter to send, Shift+Enter for a new line)"></textarea>
+        <button class="btn primary" id="chat-send">Send</button>
+      </div>
+      <p class="hint" style="margin-top:8px">
+        The whole conversation is sent each turn, so context carries. Nothing is stored
+        server-side &mdash; reloading this page starts over.
       </p>
     </section>
+  </div>
 
-    <section class="panel wide">
-      <h2>Usage &mdash; last 30 days</h2>
-      <dl class="kv" id="usage-kv"><dd class="muted">Loading…</dd></dl>
-      <div class="chart" id="chart"></div>
-      <div class="axis"><span id="axis-from"></span><span id="axis-max"></span><span>today</span></div>
-      <div class="scroll" style="margin-top:14px"><table>
-        <thead><tr>
-          <th>Model</th><th class="num">Calls</th><th class="num">Cost</th>
-          <th class="num">Tokens</th><th class="num">Cached</th><th class="num">Avg</th>
-        </tr></thead>
-        <tbody id="usage-body"></tbody>
-      </table></div>
-    </section>
+  <!-- ── Tools ─────────────────────────────────────────────────────────── -->
+  <div class="tab" id="tab-tools" hidden>
+    <div class="grid">
 
-    <section class="panel">
-      <h2>Try verification</h2>
-      <textarea id="verify-in" placeholder="One claim per line.&#10;The Eiffel Tower is in Berlin"></textarea>
-      <div class="row">
-        <button class="primary" id="verify-go">Verify</button>
-        <span class="muted" id="verify-status"></span>
-      </div>
-      <div class="out" id="verify-out" hidden></div>
-    </section>
+      <section class="panel">
+        <h2>Verify claims</h2>
+        <p class="hint">Each claim is searched, then graded against what came back. Cited.</p>
+        <textarea id="t-verify-in" placeholder="One claim per line.&#10;The Eiffel Tower is in Berlin"></textarea>
+        <div class="row"><button class="btn primary" data-run="verify">Verify</button>
+          <span class="muted" data-status="verify"></span></div>
+        <div class="out" data-out="verify" hidden></div>
+      </section>
 
-    <section class="panel">
-      <h2>Try summarising</h2>
-      <textarea id="sum-in" placeholder="Paste text to condense…"></textarea>
-      <div class="row">
-        <select id="sum-style">
-          <option value="brief">brief</option>
-          <option value="bullets">bullets</option>
-          <option value="tldr">tldr</option>
-          <option value="detailed">detailed</option>
-        </select>
-        <button class="primary" id="sum-go">Summarise</button>
-        <span class="muted" id="sum-status"></span>
-      </div>
-      <div class="out" id="sum-out" hidden></div>
-    </section>
+      <section class="panel">
+        <h2>Fact-check a document</h2>
+        <p class="hint">Pulls the claims out of prose first, then verifies each one.</p>
+        <textarea id="t-fact-in" placeholder="Paste an article, a draft, or AI-generated text…"></textarea>
+        <div class="row"><button class="btn primary" data-run="fact">Fact-check</button>
+          <span class="muted" data-status="fact"></span></div>
+        <div class="out" data-out="fact" hidden></div>
+      </section>
 
+      <section class="panel">
+        <h2>Summarise</h2>
+        <p class="hint">Runs on the fast tier at temperature 0, so it's repeatable and cached.</p>
+        <textarea id="t-sum-in" placeholder="Paste text to condense…"></textarea>
+        <div class="row">
+          <select id="t-sum-style">
+            <option value="brief">brief</option><option value="bullets">bullets</option>
+            <option value="tldr">tldr</option><option value="detailed">detailed</option>
+          </select>
+          <input id="t-sum-focus" class="short" placeholder="focus (optional)">
+          <button class="btn primary" data-run="sum">Summarise</button>
+          <span class="muted" data-status="sum"></span>
+        </div>
+        <div class="out" data-out="sum" hidden></div>
+      </section>
+
+      <section class="panel">
+        <h2>Classify</h2>
+        <p class="hint">Labels are enforced &mdash; anything invented comes back as "unknown".</p>
+        <textarea id="t-cls-in" placeholder="One item per line.&#10;app crashes on save&#10;add a dark mode"></textarea>
+        <label class="f">Labels, comma separated</label>
+        <input id="t-cls-labels" value="bug, feature, question">
+        <div class="row">
+          <label class="muted" style="display:flex;align-items:center;gap:5px;font-size:12px">
+            <input type="checkbox" id="t-cls-multi" style="width:auto"> multi-label
+          </label>
+          <button class="btn primary" data-run="cls">Classify</button>
+          <span class="muted" data-status="cls"></span>
+        </div>
+        <div class="out" data-out="cls" hidden></div>
+      </section>
+
+      <section class="panel">
+        <h2>Extract fields</h2>
+        <p class="hint">Anything not stated comes back null, never a plausible guess.</p>
+        <textarea id="t-ext-in" placeholder="Invoice #A-42 from Acme Ltd, total 1,250 GBP, due 2026-09-01."></textarea>
+        <label class="f">Fields &mdash; one <code>name: description</code> per line</label>
+        <textarea id="t-ext-fields" style="min-height:58px"
+          placeholder="invoice_number: the invoice id&#10;total: amount with currency&#10;due_date: ISO date"></textarea>
+        <div class="row"><button class="btn primary" data-run="ext">Extract</button>
+          <span class="muted" data-status="ext"></span></div>
+        <div class="out" data-out="ext" hidden></div>
+      </section>
+
+      <section class="panel">
+        <h2>Extract claims</h2>
+        <p class="hint">Self-contained checkable statements, pronouns resolved.</p>
+        <textarea id="t-clm-in" placeholder="Paste prose to pull claims out of…"></textarea>
+        <div class="row"><button class="btn primary" data-run="clm">Extract claims</button>
+          <span class="muted" data-status="clm"></span></div>
+        <div class="out" data-out="clm" hidden></div>
+      </section>
+
+      <section class="panel">
+        <h2>Search the web</h2>
+        <p class="hint">SearXNG when it's running, DuckDuckGo otherwise. No key either way.</p>
+        <input id="t-search-q" placeholder="rust async runtime comparison">
+        <div class="row">
+          <input id="t-search-n" class="short" type="number" value="5" min="1" max="20">
+          <label class="muted" style="display:flex;align-items:center;gap:5px;font-size:12px">
+            <input type="checkbox" id="t-search-news" style="width:auto"> news
+          </label>
+          <button class="btn primary" data-run="search">Search</button>
+          <span class="muted" data-status="search"></span>
+        </div>
+        <div class="out" data-out="search" hidden></div>
+      </section>
+
+      <section class="panel">
+        <h2>Read a URL</h2>
+        <p class="hint">Full page text with the navigation stripped &mdash; not a snippet.</p>
+        <input id="t-read-url" placeholder="https://en.wikipedia.org/wiki/Eiffel_Tower">
+        <div class="row">
+          <input id="t-read-max" class="short" type="number" value="4000" min="200" step="1000">
+          <button class="btn primary" data-run="read">Read</button>
+          <span class="muted" data-status="read"></span>
+        </div>
+        <div class="out" data-out="read" hidden></div>
+      </section>
+
+    </div>
   </div>
 </main>
 
 <script>
 "use strict";
 
-// A token is only needed when the daemon was started with one. Kept in
-// sessionStorage so a reload doesn't re-prompt, and never in localStorage —
-// this is a credential, not a preference.
+// Only needed when the daemon was started with a token. sessionStorage, not
+// localStorage: this is a credential, not a preference.
 let token = sessionStorage.getItem("llm_sidecar_token") || "";
 
-async function api(path, options = {}) {
+async function raw(path, options = {}) {
   const headers = Object.assign({ "Content-Type": "application/json" }, options.headers || {});
   if (token) headers["Authorization"] = "Bearer " + token;
   const res = await fetch(path, Object.assign({}, options, { headers }));
 
   if (res.status === 401) {
     const entered = prompt("This daemon requires a token (LLM_SIDECAR_TOKEN):");
-    if (entered) {
-      token = entered;
-      sessionStorage.setItem("llm_sidecar_token", token);
-      return api(path, options);
-    }
-    throw new Error("Authentication required.");
+    if (!entered) throw new Error("Authentication required.");
+    token = entered;
+    sessionStorage.setItem("llm_sidecar_token", token);
+    return raw(path, options);
   }
   if (!res.ok) {
     let detail = res.statusText;
     try { detail = (await res.json()).detail || detail; } catch (_) {}
     throw new Error(detail);
   }
-  return res.json();
+  return res;
 }
+const api  = async (p, o) => (await raw(p, o)).json();
+const post = (p, body) => api(p, { method: "POST", body: JSON.stringify(body) });
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g,
   (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const lines = (id) => $(id).value.split("\n").map((s) => s.trim()).filter(Boolean);
 
 function kv(el, pairs) {
-  el.innerHTML = pairs
-    .map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`)
-    .join("");
+  el.innerHTML = pairs.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join("");
 }
-
 function banner(message) {
   $("banner").innerHTML = message ? `<div class="banner">${esc(message)}</div>` : "";
 }
@@ -262,19 +409,44 @@ function banner(message) {
 const VERDICT_CLASS = { fits: "ok", tight: "warn", too_big: "bad", unknown: "warn" };
 const CLAIM_CLASS = { supported: "ok", contradicted: "bad", unverified: "warn", not_a_claim: "" };
 
-// ── panels ───────────────────────────────────────────────────────────────────
+const verdictList = (results) => results.map((r) => `
+  <div class="verdict">
+    <span class="pill ${CLAIM_CLASS[r.verdict] || ""}">${esc(r.verdict)}</span>
+    <div>
+      ${esc(r.claim)}
+      <div class="muted">${esc(r.note)}</div>
+      ${(r.sources || []).slice(0, 3).map((u) =>
+        `<div><a href="${esc(u)}" target="_blank" rel="noopener noreferrer" class="mono">${esc(u.slice(0, 68))}</a></div>`
+      ).join("")}
+    </div>
+  </div>`).join("");
+
+// ── tabs ─────────────────────────────────────────────────────────────────────
+
+document.querySelectorAll("nav button").forEach((btn) => {
+  btn.onclick = () => {
+    document.querySelectorAll("nav button").forEach((b) =>
+      b.setAttribute("aria-selected", String(b === btn)));
+    document.querySelectorAll(".tab").forEach((t) =>
+      t.hidden = t.id !== "tab-" + btn.dataset.tab);
+    if (btn.dataset.tab === "chat") $("chat-in").focus();
+  };
+});
+
+// ── dashboard ────────────────────────────────────────────────────────────────
 
 let currentPins = {};
 
 async function loadStatus() {
   const s = await api("/status");
   $("version").textContent = "v" + s.version;
+  currentPins = s.pinned_tiers || {};
 
   const hw = s.hardware || {};
   const machine = [hw.chip || hw.system, hw.total_ram_gib ? hw.total_ram_gib + " GiB" : null]
     .filter(Boolean).join(" · ");
-
   const tiers = Object.entries(s.resolved_tiers || {});
+
   kv($("status-kv"), [
     ["cloud key", s.cloud_configured
       ? '<span class="pill ok">set</span>'
@@ -285,31 +457,22 @@ async function loadStatus() {
       ? tiers.map(([k, v]) => `<div class="mono">${esc(k)} → ${esc(v)}</div>`).join("")
       : '<span class="muted">nothing resolved yet</span>'],
   ]);
-
   kv($("cache-kv"), [
-    ["completions", s.cache.completions],
-    ["searches", s.cache.searches],
-    ["pages", s.cache.pages ?? 0],
-    ["size", (s.cache.bytes / 1024).toFixed(0) + " KiB"],
+    ["completions", s.cache.completions], ["searches", s.cache.searches],
+    ["pages", s.cache.pages ?? 0], ["size", (s.cache.bytes / 1024).toFixed(0) + " KiB"],
   ]);
   return s;
 }
 
 async function loadSearch() {
   const s = await api("/searxng/status").catch(() => null);
-  if (!s || s.error) {
-    kv($("search-kv"), [["provider", '<span class="muted">unknown</span>']]);
-    return;
-  }
+  if (!s || s.error) { kv($("search-kv"), [["provider", '<span class="muted">unknown</span>']]); return; }
   const live = s.answering_json;
   kv($("search-kv"), [
-    ["provider", live
-      ? '<span class="pill ok">SearXNG</span>'
-      : '<span class="pill warn">DuckDuckGo</span>'],
+    ["provider", live ? '<span class="pill ok">SearXNG</span>' : '<span class="pill warn">DuckDuckGo</span>'],
     ["searxng url", `<span class="mono">${esc(s.url)}</span>`],
-    ["container", s.container
-      ? esc(s.container.state + " — " + s.container.status)
-      : '<span class="muted">not created</span>'],
+    ["container", s.container ? esc(s.container.state + " — " + s.container.status)
+                              : '<span class="muted">not created</span>'],
     ["runtime", esc(s.docker || "unknown")],
   ]);
   $("searxng-hint").innerHTML = live
@@ -327,54 +490,44 @@ async function loadModels() {
   body.innerHTML = models.map((m) => {
     const tiers = ["fast", "balanced", "powerful"].map((t) => {
       const on = currentPins[t] === m.id;
-      return `<button class="tiny${on ? " pinned" : ""}" data-tier="${t}" data-model="${esc(m.id)}"
+      return `<button class="btn tiny${on ? " pinned" : ""}" data-tier="${t}" data-model="${esc(m.id)}"
                title="${on ? "Unpin" : "Pin " + t + " to this model"}">${t[0].toUpperCase()}</button>`;
     }).join(" ");
     return `<tr>
       <td class="mono">${esc(m.name)}</td>
       <td class="num">${m.size_gib.toFixed(1)}G</td>
       <td class="num">${m.needs_gib.toFixed(1)}G</td>
-      <td>${esc(m.parameter_size)}</td>
-      <td>${esc(m.quantization)}</td>
+      <td>${esc(m.parameter_size)}</td><td>${esc(m.quantization)}</td>
       <td><span class="pill ${VERDICT_CLASS[m.verdict] || ""}">${esc(m.verdict)}</span></td>
-      <td>${tiers}</td>
-    </tr>`;
+      <td>${tiers}</td></tr>`;
   }).join("");
 
   body.querySelectorAll("button[data-tier]").forEach((btn) => {
     btn.onclick = async () => {
       const { tier, model } = btn.dataset;
-      // Clicking the active pin clears it, returning the tier to auto-resolution.
-      const next = currentPins[tier] === model ? "" : model;
+      const next = currentPins[tier] === model ? "" : model;   // click the active pin to clear
       btn.disabled = true;
       try {
-        const r = await api("/config/tier", {
-          method: "POST", body: JSON.stringify({ tier, model: next }),
-        });
+        const r = await post("/config/tier", { tier, model: next });
         currentPins = r.models || {};
-        await Promise.all([loadModels(), loadStatus()]);
-      } catch (e) {
-        banner("Could not pin tier: " + e.message);
-      } finally {
-        btn.disabled = false;
-      }
+        await Promise.all([loadModels(), loadStatus(), loadChatModels()]);
+      } catch (e) { banner("Could not pin tier: " + e.message); }
+      finally { btn.disabled = false; }
     };
   });
 }
 
 async function loadUsage() {
   const [u, d] = await Promise.all([api("/usage?days=30"), api("/usage/daily?days=30")]);
-
   kv($("usage-kv"), [
-    ["calls", u.calls],
-    ["spend", "$" + (u.cost_usd || 0).toFixed(4)],
+    ["calls", u.calls], ["spend", "$" + (u.cost_usd || 0).toFixed(4)],
     ["tokens", (u.total_tokens || 0).toLocaleString()],
     ["from cache", u.cached + (u.calls ? ` <span class="muted">(${Math.round(u.cached / u.calls * 100)}%)</span>` : "")],
   ]);
 
   const days = d.days || [];
-  // Scale on calls rather than cost: with everything local the cost axis is
-  // flat zero, and a chart of nothing is worse than no chart.
+  // Scaled on calls, not cost: with everything local the cost axis is flat
+  // zero, and a chart of nothing is worse than no chart.
   const peak = Math.max(1, ...days.map((x) => x.calls));
   $("chart").innerHTML = days.map((x) => {
     const h = x.calls ? Math.max(3, (x.calls / peak) * 100) : 2;
@@ -386,21 +539,17 @@ async function loadUsage() {
 
   $("usage-body").innerHTML = (u.by_model || []).length
     ? u.by_model.map((m) => `<tr>
-        <td class="mono">${esc(m.model)}</td>
-        <td class="num">${m.calls}</td>
+        <td class="mono">${esc(m.model)}</td><td class="num">${m.calls}</td>
         <td class="num">${m.cost_usd ? "$" + m.cost_usd.toFixed(4) : "free"}</td>
         <td class="num">${m.total_tokens.toLocaleString()}</td>
-        <td class="num">${m.cached}</td>
-        <td class="num">${m.avg_latency_s}s</td>
-      </tr>`).join("")
+        <td class="num">${m.cached}</td><td class="num">${m.avg_latency_s}s</td></tr>`).join("")
     : '<tr><td colspan="6" class="muted">No calls recorded yet.</td></tr>';
 }
 
 async function refresh() {
   banner("");
   try {
-    const s = await loadStatus();
-    currentPins = s.pinned_tiers || currentPins;
+    await loadStatus();
     await Promise.all([loadSearch(), loadModels(), loadUsage()]);
     $("clock").textContent = "updated " + new Date().toLocaleTimeString();
   } catch (e) {
@@ -408,86 +557,246 @@ async function refresh() {
   }
 }
 
-// ── try-it panels ────────────────────────────────────────────────────────────
+// ── chat ─────────────────────────────────────────────────────────────────────
 
-$("verify-go").onclick = async () => {
-  const claims = $("verify-in").value.split("\n").map((s) => s.trim()).filter(Boolean);
-  if (!claims.length) return;
+let history = [];   // client-side only; the daemon keeps no session
 
-  const btn = $("verify-go");
-  btn.disabled = true;
-  $("verify-status").textContent = `checking ${claims.length}…`;
-  $("verify-out").hidden = true;
-
+async function loadChatModels() {
   try {
-    const { results } = await api("/v1/verify", {
-      method: "POST", body: JSON.stringify({ claims }),
-    });
-    $("verify-out").innerHTML = results.map((r) => `
-      <div class="verdict">
-        <span class="pill ${CLAIM_CLASS[r.verdict] || ""}">${esc(r.verdict)}</span>
-        <span>
-          ${esc(r.claim)}
-          <div class="muted">${esc(r.note)}</div>
-          ${(r.sources || []).slice(0, 3).map((u) =>
-            `<div><a href="${esc(u)}" target="_blank" rel="noopener noreferrer" class="mono">${esc(u.slice(0, 70))}</a></div>`
-          ).join("")}
-        </span>
-      </div>`).join("");
-    $("verify-out").hidden = false;
-    $("verify-status").textContent = "";
-    loadUsage();
-  } catch (e) {
-    $("verify-status").textContent = "failed: " + e.message;
-  } finally {
-    btn.disabled = false;
-  }
-};
+    const { data } = await api("/v1/models");
+    const sel = $("chat-model");
+    const keep = sel.value;
+    // Aliases first — "let it route" is the point, a specific model is the
+    // exception. The rest are grouped so the list is navigable.
+    const aliases = data.filter((m) => m.owned_by === "llm-sidecar");
+    const local = data.filter((m) => m.owned_by === "ollama");
+    const cloud = data.filter((m) => m.owned_by === "openrouter");
+    const group = (label, items) => items.length
+      ? `<optgroup label="${label}">` +
+        items.map((m) => `<option value="${esc(m.id)}">${esc(m.id)}</option>`).join("") +
+        "</optgroup>"
+      : "";
+    sel.innerHTML = group("route automatically", aliases)
+                  + group("local", local)
+                  + group("cloud", cloud.slice(0, 120));
+    sel.value = keep || "auto";
+  } catch (_) { /* the selector is a convenience; chat still works without it */ }
+}
 
-$("sum-go").onclick = async () => {
-  const text = $("sum-in").value.trim();
+function addMessage(role, text, receipt) {
+  if (history.length === 0) $("chat-log").innerHTML = "";
+  const el = document.createElement("div");
+  el.className = "msg " + role;
+  el.innerHTML = `<div class="body"></div><div class="receipt">${receipt || ""}</div>`;
+  el.querySelector(".body").textContent = text;
+  $("chat-log").appendChild(el);
+  $("chat-log").scrollTop = $("chat-log").scrollHeight;
+  return el;
+}
+
+function receiptFor(x) {
+  const bits = [x.model];
+  if (x.cached) bits.push("cached");
+  else if (x.latency_s) bits.push(x.latency_s.toFixed(1) + "s");
+  bits.push(x.cost_usd ? "$" + x.cost_usd.toFixed(5) : "free");
+  return esc(bits.join(" · "));
+}
+
+async function sendChat() {
+  const text = $("chat-in").value.trim();
   if (!text) return;
 
-  const btn = $("sum-go");
-  btn.disabled = true;
-  $("sum-status").textContent = "working…";
-  $("sum-out").hidden = true;
+  const model = $("chat-model").value || "auto";
+  const system = $("chat-system").value.trim();
+  const streaming = $("chat-stream").checked;
+
+  addMessage("user", text);
+  history.push({ role: "user", content: text });
+  $("chat-in").value = "";
+  $("chat-send").disabled = true;
+
+  const messages = system ? [{ role: "system", content: system }, ...history] : [...history];
+  const bubble = addMessage("assistant", "", "…");
+  const body = bubble.querySelector(".body");
+  const receipt = bubble.querySelector(".receipt");
 
   try {
-    const { summary } = await api("/ops/summarise", {
-      method: "POST",
-      body: JSON.stringify({ text, style: $("sum-style").value }),
-    });
-    $("sum-out").textContent = summary;
-    $("sum-out").hidden = false;
-    $("sum-status").textContent = "";
+    if (streaming) {
+      const res = await raw("/v1/chat/completions", {
+        method: "POST",
+        body: JSON.stringify({ model, messages, stream: true, max_tokens: 1200 }),
+      });
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "", answer = "", used = model;
+
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        // SSE frames are newline-delimited; the tail may be a partial frame.
+        const frames = buffer.split("\n");
+        buffer = frames.pop();
+        for (const frame of frames) {
+          if (!frame.startsWith("data: ")) continue;
+          const payload = frame.slice(6).trim();
+          if (payload === "[DONE]") continue;
+          let chunk;
+          try { chunk = JSON.parse(payload); } catch (_) { continue; }
+          used = chunk.model || used;
+          const delta = (chunk.choices?.[0]?.delta || {}).content;
+          if (delta) { answer += delta; body.textContent = answer; }
+          $("chat-log").scrollTop = $("chat-log").scrollHeight;
+        }
+      }
+      receipt.textContent = used + " · streamed";
+      history.push({ role: "assistant", content: answer });
+    } else {
+      const r = await post("/v1/chat/completions", { model, messages, max_tokens: 1200 });
+      const answer = r.choices[0].message.content;
+      body.textContent = answer;
+      receipt.innerHTML = receiptFor(Object.assign({ model: r.model }, r.x_sidecar || {}));
+      history.push({ role: "assistant", content: answer });
+    }
     loadUsage();
   } catch (e) {
-    $("sum-status").textContent = "failed: " + e.message;
+    body.textContent = "";
+    receipt.innerHTML = `<span class="pill bad">failed</span> ${esc(e.message)}`;
+    // Drop the user turn too: leaving it would silently poison the next
+    // request's context with an exchange that never happened.
+    history.pop();
   } finally {
-    btn.disabled = false;
+    $("chat-send").disabled = false;
+    $("chat-in").focus();
   }
+}
+
+$("chat-send").onclick = sendChat;
+$("chat-in").onkeydown = (e) => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(); }
+};
+$("chat-clear").onclick = () => {
+  history = [];
+  $("chat-log").innerHTML = '<div class="empty-chat">New conversation.</div>';
 };
 
+// ── tools ────────────────────────────────────────────────────────────────────
+
+const TOOLS = {
+  verify: async () => {
+    const claims = lines("t-verify-in");
+    if (!claims.length) throw new Error("Add at least one claim.");
+    const { results } = await post("/v1/verify", { claims });
+    return verdictList(results);
+  },
+  fact: async () => {
+    const text = $("t-fact-in").value.trim();
+    if (!text) throw new Error("Paste some text first.");
+    const r = await post("/ops/fact-check", { text });
+    const head = `<div class="muted" style="margin-bottom:6px">${r.checked} claims · ${r.contradicted} contradicted</div>`;
+    return head + (r.results.length ? verdictList(r.results) : "No checkable claims found.");
+  },
+  sum: async () => {
+    const text = $("t-sum-in").value.trim();
+    if (!text) throw new Error("Paste some text first.");
+    const r = await post("/ops/summarise", {
+      text, style: $("t-sum-style").value, focus: $("t-sum-focus").value.trim(),
+    });
+    return esc(r.summary);
+  },
+  cls: async () => {
+    const items = lines("t-cls-in");
+    const labels = $("t-cls-labels").value.split(",").map((s) => s.trim()).filter(Boolean);
+    if (!items.length) throw new Error("Add at least one item.");
+    const { results } = await post("/ops/classify", { items, labels, multi: $("t-cls-multi").checked });
+    return results.map((r) => {
+      const got = r.labels ? r.labels.join(", ") : r.label;
+      const cls = got === "unknown" ? "warn" : "ok";
+      return `<div class="verdict"><span class="pill ${cls}">${esc(got)}</span><div>${esc(r.item)}</div></div>`;
+    }).join("");
+  },
+  ext: async () => {
+    const text = $("t-ext-in").value.trim();
+    if (!text) throw new Error("Paste some text first.");
+    const fields = {};
+    for (const line of lines("t-ext-fields")) {
+      const i = line.indexOf(":");
+      if (i > 0) fields[line.slice(0, i).trim()] = line.slice(i + 1).trim();
+    }
+    if (!Object.keys(fields).length) throw new Error("Add at least one `name: description` field.");
+    const r = await post("/ops/extract", { text, fields });
+    return Object.entries(r.fields).map(([k, v]) =>
+      `<div class="verdict"><span class="pill ${v === null ? "warn" : "ok"}">${v === null ? "null" : "found"}</span>` +
+      `<div><span class="mono">${esc(k)}</span>${v === null ? "" : " = " + esc(v)}</div></div>`).join("");
+  },
+  clm: async () => {
+    const text = $("t-clm-in").value.trim();
+    if (!text) throw new Error("Paste some text first.");
+    const { claims } = await post("/ops/extract-claims", { text });
+    return claims.length
+      ? claims.map((c, i) => `<div class="verdict"><span class="muted mono">${i + 1}</span><div>${esc(c)}</div></div>`).join("")
+      : "No checkable claims found.";
+  },
+  search: async () => {
+    const query = $("t-search-q").value.trim();
+    if (!query) throw new Error("Enter a query.");
+    const { results } = await post("/ops/search", {
+      query, max_results: Number($("t-search-n").value) || 5, news: $("t-search-news").checked,
+    });
+    return results.length ? results.map((r) => `
+      <div class="verdict"><div>
+        <a href="${esc(r.url)}" target="_blank" rel="noopener noreferrer">${esc(r.title || r.url)}</a>
+        <div class="muted">${esc((r.snippet || "").slice(0, 220))}</div>
+      </div></div>`).join("") : "No results.";
+  },
+  read: async () => {
+    const url = $("t-read-url").value.trim();
+    if (!url) throw new Error("Enter a URL.");
+    const r = await post("/ops/read-url", { url, max_chars: Number($("t-read-max").value) || 4000 });
+    return esc(r.text);
+  },
+};
+
+document.querySelectorAll("button[data-run]").forEach((btn) => {
+  const key = btn.dataset.run;
+  const status = document.querySelector(`[data-status="${key}"]`);
+  const out = document.querySelector(`[data-out="${key}"]`);
+  btn.onclick = async () => {
+    btn.disabled = true;
+    status.textContent = "working…";
+    out.hidden = true;
+    try {
+      out.innerHTML = await TOOLS[key]();
+      out.hidden = false;
+      status.textContent = "";
+      loadUsage();
+    } catch (e) {
+      status.textContent = "failed: " + e.message;
+    } finally {
+      btn.disabled = false;
+    }
+  };
+});
+
+// ── boot ─────────────────────────────────────────────────────────────────────
+
+$("refresh").onclick = refresh;
 $("clear-cache").onclick = async () => {
   const btn = $("clear-cache");
   btn.disabled = true;
   try {
-    const r = await api("/cache/clear", { method: "POST" });
+    const r = await post("/cache/clear", {});
     btn.textContent = `Cleared ${r.removed}`;
     setTimeout(() => { btn.textContent = "Clear cache"; }, 2000);
     loadStatus();
-  } catch (e) {
-    banner("Could not clear cache: " + e.message);
-  } finally {
-    btn.disabled = false;
-  }
+  } catch (e) { banner("Could not clear cache: " + e.message); }
+  finally { btn.disabled = false; }
 };
 
-$("refresh").onclick = refresh;
 refresh();
+loadChatModels();
 // Slow poll. The interesting numbers move when *you* do something, and a
-// dashboard that hammers its own daemon would be measuring itself.
+// dashboard that hammers its own daemon would mostly be measuring itself.
 setInterval(refresh, 30000);
 </script>
 </body>
