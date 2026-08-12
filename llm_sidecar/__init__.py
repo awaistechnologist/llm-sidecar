@@ -27,6 +27,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import AsyncIterator, Iterable
 
 from . import (
+    answer as answer_mod,
     cache,
     catalogue,
     client,
@@ -39,6 +40,7 @@ from . import (
 )
 from .config import Config
 from .types import (
+    Answer,
     ClaimVerdict,
     Completion,
     ModelInfo,
@@ -55,6 +57,7 @@ __version__ = "0.3.0"
 
 __all__ = [
     "Sidecar",
+    "Answer",
     "Config",
     "Completion",
     "Usage",
@@ -295,6 +298,25 @@ class Sidecar:
         from . import search as search_mod
         return search_mod.read_url(url, self.config, max_chars=max_chars)
 
+    def answer(
+        self,
+        question: str,
+        *,
+        query: str | None = None,
+        model: str | None = None,
+        tier: str = "balanced",
+        max_sources: int = 4,
+        read_pages: int = 3,
+    ) -> Answer:
+        """Answer a question from live sources, with citations.
+
+        Check `.grounded` before trusting `.text` — False means the sources
+        didn't contain the answer and the text says what was missing."""
+        return answer_mod.answer_question(
+            question, self.config, sidecar=self, query=query, model=model,
+            tier=tier, max_sources=max_sources, read_pages=read_pages,
+        )
+
     def verify(self, claims: list[str], model: str | None = None) -> list[ClaimVerdict]:
         return verify_mod.verify_claims(claims, self.config, model=model, sidecar=self)
 
@@ -349,6 +371,8 @@ class Sidecar:
         return {
             "version": __version__,
             "cloud_configured": self.config.has_cloud,
+            "key_preview": (f"…{self.config.openrouter_api_key[-4:]}"
+                            if self.config.openrouter_api_key else ""),
             "default_budget": self.config.default_budget,
             "search_provider": provider,
             "hardware": hardware.probe(),

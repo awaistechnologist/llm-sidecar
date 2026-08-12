@@ -72,6 +72,11 @@ async for ev in sc.stream("Write a haiku"):
 sc.search("rust async runtime comparison")
 sc.read_url("https://example.com/article")     # full text, not a snippet
 
+# Ask a question and get an answer from live sources, with citations
+a = sc.answer("What is Iran's population?")
+if a.grounded:                     # False means the sources didn't settle it
+    print(a.text, a.sources)
+
 # Grounded verification — the differentiated bit
 for v in sc.verify(["The Eiffel Tower is in Berlin"]):
     print(v.verdict, v.note, v.sources)
@@ -158,7 +163,7 @@ llm-sidecar mcp                   # stdio
   "command": "/path/to/venv/bin/python", "args": ["-m", "llm_sidecar.mcp_server"]}}}
 ```
 
-Tools: `search_web`, `read_url`, `verify_claims`, `extract_claims`,
+Tools: `answer_question`, `search_web`, `read_url`, `verify_claims`, `extract_claims`,
 `fact_check_document`, `summarise`, `classify`, `extract_fields`, `delegate`,
 `usage_report`, `sidecar_status`.
 
@@ -175,6 +180,7 @@ llm-sidecar status                        # what's configured and reachable
 llm-sidecar models                        # local models scored against your RAM
 llm-sidecar usage --days 30               # what you have spent, by model
 llm-sidecar ask "explain CRDTs" --budget free
+llm-sidecar answer "What is Iran's population?"
 llm-sidecar verify "The Eiffel Tower is in Berlin"
 llm-sidecar sum README.md --style bullets
 llm-sidecar cache stats                   # or: cache clear
@@ -199,7 +205,7 @@ This is not trying to be a chat client; point LibreChat or Open WebUI at the
 **the model that answered, what it cost, and whether it came from cache** —
 which is the routing made visible, and no general chat client can show it.
 
-**Tools** — every capability, in one place: verify, fact-check a document,
+**Tools** — every capability, in one place: ask a grounded question, verify, fact-check a document,
 summarise, classify, extract fields, extract claims, search, read a URL. The
 point is to try something before wiring it into anything.
 
@@ -231,7 +237,7 @@ keyword arguments to `Sidecar(...)`.
 
 | Env var | Default | Meaning |
 |---|---|---|
-| `OPENROUTER_API_KEY` | — | Unset means local-only. Not required. |
+| `OPENROUTER_API_KEY` | — | Unset means local-only. Not required. Settable from the dashboard. |
 | `OLLAMA_HOST` | `http://localhost:11434` | Local inference endpoint |
 | `LLM_SIDECAR_BUDGET` | `free` | `free` \| `cheap` \| `best` |
 | `LLM_SIDECAR_MODEL_{FAST,BALANCED,POWERFUL}` | — | Pin a tier, skipping auto-pick |
@@ -342,7 +348,7 @@ one directly and never touches the config file.
 ## Tests
 
 ```bash
-pytest                                    # 114 passing, fully offline
+pytest                                    # 128 passing, fully offline
 ```
 
 Fully offline — every network path is stubbed. Live-provider behaviour is

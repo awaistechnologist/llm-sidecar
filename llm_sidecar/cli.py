@@ -4,6 +4,7 @@
     llm-sidecar mcp              # MCP server on stdio
     llm-sidecar status           # what's configured and reachable
     llm-sidecar ask "question"   # one-shot completion
+    llm-sidecar answer "question"  # grounded answer with citations
     llm-sidecar verify "claim"   # fact-check with citations
     llm-sidecar models           # local models scored against this machine
     llm-sidecar usage            # what you have spent
@@ -161,6 +162,33 @@ def _ask(args) -> int:
     return 0
 
 
+def _answer(args) -> int:
+    from . import Sidecar
+
+    try:
+        a = Sidecar().answer(" ".join(args.question), max_sources=args.sources)
+    except Exception as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+
+    if args.json:
+        print(json.dumps(a.__dict__, indent=2))
+        return 0 if a.grounded else 1
+
+    if not a.grounded:
+        print("Not answered from the sources.\n", file=sys.stderr)
+    print(a.text)
+    if a.caveat:
+        print(f"\nCaveat: {a.caveat}")
+    if a.sources:
+        print("\nSources:")
+        for s in a.sources:
+            print(f"  · {s}")
+    # Non-zero when ungrounded, so a script can tell "I don't know" from an
+    # answer without parsing prose.
+    return 0 if a.grounded else 1
+
+
 def _verify(args) -> int:
     from . import Sidecar
 
@@ -228,6 +256,11 @@ def main(argv: list[str] | None = None) -> int:
     ask.add_argument("--max-tokens", type=int, default=1000, dest="max_tokens")
     ask.add_argument("-q", "--quiet", action="store_true", help="suppress the cost receipt")
 
+    ans = sub.add_parser("answer", help="answer a question from live sources, with citations")
+    ans.add_argument("question", nargs="+")
+    ans.add_argument("--sources", type=int, default=4)
+    ans.add_argument("--json", action="store_true")
+
     ver = sub.add_parser("verify", help="fact-check claims against live web evidence")
     ver.add_argument("claims", nargs="+")
     ver.add_argument("--json", action="store_true")
@@ -264,6 +297,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.cmd == "ask":
         return _ask(args)
+    if args.cmd == "answer":
+        return _answer(args)
     if args.cmd == "verify":
         return _verify(args)
     return 2

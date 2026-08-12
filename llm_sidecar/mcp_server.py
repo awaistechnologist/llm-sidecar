@@ -38,10 +38,11 @@ logging.basicConfig(level=logging.WARNING)
 mcp = _Server(
     name="llm-sidecar",
     instructions=(
-        "Local capability sidecar. Use search_web and read_url to gather live "
-        "evidence, verify_claims to fact-check statements against that evidence "
-        "with citations, and delegate to hand bulk work to a cheap or local "
-        "model instead of doing it yourself."
+        "Local capability sidecar. Use answer_question for anything whose answer "
+        "could have changed since training — it searches, reads the pages and "
+        "answers with citations. Use search_web and read_url to gather evidence "
+        "yourself, verify_claims to fact-check statements against it, and "
+        "delegate to hand bulk work to a cheap or local model."
     ),
 )
 
@@ -81,6 +82,36 @@ def search_web(query: str, max_results: int = 5, news: bool = False) -> dict:
             for r in results
         ],
     }
+
+
+@mcp.tool()
+def answer_question(question: str, query: str = "", max_sources: int = 4) -> dict:
+    """
+    Answer a question from live web sources, with citations.
+
+    Searches, reads the top pages in full, and answers from those pages only —
+    so the answer reflects the web now rather than training data. Use this
+    instead of answering from memory whenever the answer could have changed:
+    prices, populations, versions, who currently holds a position, what
+    happened recently.
+
+    Args:
+        question:    The question, in full.
+        query:       Optional search query, when the question phrases badly.
+        max_sources: How many results to consider (default 4).
+
+    Returns {"answered", "answer", "sources", "caveat"}. Check "answered":
+    false means the sources did not settle it and "answer" says what was
+    missing — do not present that as a fact.
+    """
+    try:
+        a = sidecar().answer(question, query=query or None, max_sources=max_sources)
+    except SidecarError as e:
+        return {"error": str(e)}
+    except Exception as e:
+        return {"error": f"Answering failed: {e}"}
+    return {"answered": a.grounded, "answer": a.text,
+            "sources": a.sources, "caveat": a.caveat}
 
 
 @mcp.tool()

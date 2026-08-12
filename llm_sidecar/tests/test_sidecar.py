@@ -1508,3 +1508,162 @@ def test_failed_page_fetch_keeps_the_snippets(cfg, monkeypatch):
     monkeypatch.setattr(search_mod, "read_url",
                         lambda *a, **k: (_ for _ in ()).throw(SidecarError("404")))
     assert verify_mod._fetch_pages("c", original, cfg) == original
+
+
+# ── grounded answering ────────────────────────────────────────────────────────
+
+def _stub_answer(monkeypatch, payload, docs=None):
+    from llm_sidecar import answer as answer_mod
+    from llm_sidecar.types import Completion
+
+    monkeypatch.setattr(answer_mod, "gather", lambda *a, **k: docs if docs is not None else [
+        {"title": "t1", "url": "http://one", "text": "page one"},
+        {"title": "t2", "url": "http://two", "text": "page two"},
+    ])
+
+    class Stub:
+        def complete(self, *a, **k):
+            return Completion(text=payload, model="m/1")
+
+    return Stub()
+
+
+def test_answer_cites_only_the_sources_it_used(cfg, monkeypatch):
+    from llm_sidecar import answer as answer_mod
+
+    stub = _stub_answer(monkeypatch, '{"answered": true, "answer": "92 million.", "sources_used": [2]}')
+    a = answer_mod.answer_question("population?", cfg, sidecar=stub)
+    assert a.grounded is True
+    assert a.sources == ["http://two"]        # not everything fetched
+
+
+def test_answer_reports_when_sources_dont_settle_it(cfg, monkeypatch):
+    """The point of the capability. Regression: the model read "answered" as
+    "I wrote something using the sources" and returned a confident answer
+    about microphone checks when asked what someone ate in 2019."""
+    from llm_sidecar import answer as answer_mod
+
+    stub = _stub_answer(monkeypatch,
+                        '{"answered": false, "answer": "The sources do not cover this.", "sources_used": []}')
+    a = answer_mod.answer_question("what did I eat?", cfg, sidecar=stub)
+    assert a.grounded is False
+    assert a.sources                          # still shows what was consulted
+
+
+def test_answer_prompt_forbids_topical_matches():
+    from llm_sidecar.answer import ANSWER_SYSTEM
+
+    lowered = ANSWER_SYSTEM.lower()
+    assert "specific question" in lowered
+    assert "share a topic" in lowered
+
+
+def test_answer_survives_a_model_that_ignores_the_schema(cfg, monkeypatch):
+    from llm_sidecar import answer as answer_mod
+
+    stub = _stub_answer(monkeypatch, "Sorry, here is some prose instead.")
+    a = answer_mod.answer_question("q", cfg, sidecar=stub)
+    assert a.grounded is False                # can't claim grounding we didn't verify
+    assert "prose" in a.text
+    assert a.caveat
+
+
+def test_answer_with_no_results_is_honest(cfg, monkeypatch):
+    from llm_sidecar import answer as answer_mod
+
+    stub = _stub_answer(monkeypatch, "{}", docs=[])
+    a = answer_mod.answer_question("q", cfg, sidecar=stub)
+    assert a.grounded is False
+    assert "no search results" in a.text.lower()
+
+
+def test_answer_rejects_empty_and_oversized(cfg):
+    from llm_sidecar import answer as answer_mod
+
+    with pytest.raises(SidecarError):
+        answer_mod.answer_question("   ", cfg, sidecar=object())
+    with pytest.raises(SidecarError):
+        answer_mod.answer_question("x" * 5000, cfg, sidecar=object())
+
+
+def test_answer_endpoint(api, monkeypatch):
+    from llm_sidecar import Sidecar
+    from llm_sidecar.types import Answer
+
+    monkeypatch.setattr(Sidecar, "answer", lambda self, q, **k: Answer(
+        question=q, text="42", grounded=True, sources=["http://u"]))
+    body = api.post("/v1/answer", json={"question": "meaning of life?"}).json()
+    assert body["grounded"] is True and body["sources"] == ["http://u"]
+
+
+# ── settings from the UI ──────────────────────────────────────────────────────
+
+def test_api_key_can_be_set_at_runtime(api):
+    assert api.get("/config").json()["cloud_configured"] is True   # fixture has one
+
+    r = api.post("/config/api-key", json={"key": "sk-or-abcd1234"}).json()
+    assert r["cloud_configured"] is True
+    assert r["key_preview"] == "…1234"
+    assert r["persisted"] is False
+
+
+def test_api_key_is_never_echoed_back(api):
+    """A loopback port is not a vault: setting the key is fine, reading it
+    back would let anything on localhost lift it."""
+    api.post("/config/api-key", json={"key": "sk-or-supersecret"})
+    for body in (api.get("/config").json(), api.get("/status").json()):
+        assert "supersecret" not in json.dumps(body)
+
+
+def test_clearing_the_key_returns_to_local_only(api):
+    api.post("/config/api-key", json={"key": "sk-or-abcd1234"})
+    r = api.post("/config/api-key", json={"key": ""}).json()
+    assert r["cloud_configured"] is False
+    assert r["key_preview"] == ""
+
+
+def test_setting_a_key_drops_stale_resolution(cfg, monkeypatch):
+    """Tiers resolved without a key were picked from an Ollama-only pool, so
+    they must not survive a key being added."""
+    from fastapi.testclient import TestClient
+
+    from llm_sidecar import daemon
+
+    cfg.openrouter_api_key = None
+    app = daemon.create_app(cfg)
+    c = TestClient(app)
+    c.post("/config/api-key", json={"key": "sk-or-abcd1234"})
+    assert c.get("/status").json()["resolved_tiers"] == {}
+
+
+def test_persist_writes_the_key_only_when_asked(cfg, tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from llm_sidecar import config as config_mod, daemon
+
+    monkeypatch.setattr(config_mod, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(config_mod, "CONFIG_FILE", tmp_path / "config.json")
+    c = TestClient(daemon.create_app(cfg))
+
+    c.post("/config/api-key", json={"key": "sk-or-abcd1234", "persist": False})
+    assert not (tmp_path / "config.json").exists()
+
+    r = c.post("/config/api-key", json={"key": "sk-or-abcd1234", "persist": True}).json()
+    assert r["persisted"] is True
+    assert json.loads((tmp_path / "config.json").read_text())["openrouter_api_key"] == "sk-or-abcd1234"
+
+
+def test_budget_can_be_set_and_is_validated(api):
+    assert api.post("/config/budget", json={"budget": "best"}).json()["default_budget"] == "best"
+    assert api.post("/config/budget", json={"budget": "lavish"}).status_code == 400
+
+
+def test_dashboard_has_a_settings_panel():
+    from pathlib import Path
+
+    import llm_sidecar
+
+    html = (Path(llm_sidecar.__file__).parent / "ui" / "index.html").read_text()
+    assert "/config/api-key" in html
+    assert 'id="cfg-key"' in html and 'type="password"' in html
+    assert "/v1/answer" in html

@@ -179,6 +179,40 @@
   <!-- ── Dashboard ─────────────────────────────────────────────────────── -->
   <div class="tab" id="tab-dash">
     <div class="grid">
+      <section class="panel wide">
+        <h2>Settings</h2>
+        <p class="hint">
+          Without a key the sidecar is local-only. With one it can also route to
+          OpenRouter's free models — verified working before each use, and rotated
+          when one throttles.
+        </p>
+        <div class="row" style="margin-top:0">
+          <input id="cfg-key" type="password" autocomplete="off" spellcheck="false"
+                 placeholder="OpenRouter API key (sk-or-…)" style="flex:1;min-width:260px">
+          <label class="muted" style="display:flex;align-items:center;gap:5px;font-size:12px"
+                 title="Writes the key to ~/.config/llm-sidecar/config.json in plaintext">
+            <input type="checkbox" id="cfg-persist" style="width:auto"> remember on this machine
+          </label>
+          <button class="btn primary" id="cfg-save">Save key</button>
+          <button class="btn" id="cfg-clear">Clear</button>
+          <span class="muted" id="cfg-status"></span>
+        </div>
+        <div class="row">
+          <span class="muted" style="font-size:12px">Budget</span>
+          <select id="cfg-budget" title="What an auto-picked model is allowed to cost">
+            <option value="free">free — local + free cloud models</option>
+            <option value="cheap">cheap — inexpensive paid models</option>
+            <option value="best">best — top-tier paid models</option>
+          </select>
+          <span class="muted" id="cfg-budget-status"></span>
+        </div>
+        <p class="hint" style="margin:10px 0 0">
+          The key is applied immediately and never sent back to this page — only a
+          masked preview. Unless you tick "remember", it lives in the running daemon
+          and is gone when you restart it.
+        </p>
+      </section>
+
       <section class="panel">
         <h2>Status</h2>
         <dl class="kv" id="status-kv"><dd class="muted">Loading…</dd></dl>
@@ -262,6 +296,23 @@
   <!-- ── Tools ─────────────────────────────────────────────────────────── -->
   <div class="tab" id="tab-tools" hidden>
     <div class="grid">
+
+      <section class="panel wide">
+        <h2>Ask a question</h2>
+        <p class="hint">
+          Searches, reads the top pages in full, and answers from those only — so
+          it reflects the web now, not training data. Says so when the sources
+          don't settle it, rather than guessing.
+        </p>
+        <input id="t-ask-q" placeholder="What is Iran's population?">
+        <div class="row">
+          <input id="t-ask-n" class="short" type="number" value="4" min="1" max="8"
+                 title="How many search results to consider">
+          <button class="btn primary" data-run="ask">Ask</button>
+          <span class="muted" data-status="ask"></span>
+        </div>
+        <div class="out" data-out="ask" hidden></div>
+      </section>
 
       <section class="panel">
         <h2>Verify claims</h2>
@@ -441,6 +492,12 @@ async function loadStatus() {
   const s = await api("/status");
   $("version").textContent = "v" + s.version;
   currentPins = s.pinned_tiers || {};
+  // Don't clobber a key the user is mid-way through typing.
+  if (document.activeElement !== $("cfg-key")) {
+    $("cfg-key").placeholder = s.key_preview
+      ? `key set (${s.key_preview})` : "OpenRouter API key (sk-or-…)";
+  }
+  $("cfg-budget").value = s.default_budget;
 
   const hw = s.hardware || {};
   const machine = [hw.chip || hw.system, hw.total_ram_gib ? hw.total_ram_gib + " GiB" : null]
@@ -692,6 +749,23 @@ $("chat-clear").onclick = () => {
 // ── tools ────────────────────────────────────────────────────────────────────
 
 const TOOLS = {
+  ask: async () => {
+    const question = $("t-ask-q").value.trim();
+    if (!question) throw new Error("Ask something.");
+    const a = await post("/v1/answer", {
+      question, max_sources: Number($("t-ask-n").value) || 4,
+    });
+    const badge = a.grounded
+      ? '<span class="pill ok">from sources</span>'
+      : '<span class="pill warn">not in the sources</span>';
+    return `<div class="verdict">${badge}<div>
+        ${esc(a.text)}
+        ${a.caveat ? `<div class="muted" style="margin-top:5px">${esc(a.caveat)}</div>` : ""}
+        <div style="margin-top:6px">${(a.sources || []).map((u) =>
+          `<div><a href="${esc(u)}" target="_blank" rel="noopener noreferrer" class="mono">${esc(u.slice(0, 74))}</a></div>`
+        ).join("")}</div>
+      </div></div>`;
+  },
   verify: async () => {
     const claims = lines("t-verify-in");
     if (!claims.length) throw new Error("Add at least one claim.");
@@ -788,6 +862,44 @@ document.querySelectorAll("button[data-run]").forEach((btn) => {
 });
 
 // ── boot ─────────────────────────────────────────────────────────────────────
+
+$("cfg-save").onclick = async () => {
+  const key = $("cfg-key").value.trim();
+  if (!key) { $("cfg-status").textContent = "Paste a key first."; return; }
+  const btn = $("cfg-save");
+  btn.disabled = true;
+  $("cfg-status").textContent = "saving…";
+  try {
+    const r = await post("/config/api-key", { key, persist: $("cfg-persist").checked });
+    $("cfg-key").value = "";
+    $("cfg-status").textContent = r.persisted
+      ? `saved (${r.key_preview}) and remembered`
+      : `saved (${r.key_preview}) for this session`;
+    // Cloud models are now candidates, so the whole picture changes.
+    await refresh();
+    loadChatModels();
+  } catch (e) {
+    $("cfg-status").textContent = "failed: " + e.message;
+  } finally { btn.disabled = false; }
+};
+
+$("cfg-clear").onclick = async () => {
+  try {
+    await post("/config/api-key", { key: "", persist: $("cfg-persist").checked });
+    $("cfg-key").value = "";
+    $("cfg-status").textContent = "cleared — local only";
+    await refresh();
+  } catch (e) { $("cfg-status").textContent = "failed: " + e.message; }
+};
+
+$("cfg-budget").onchange = async () => {
+  try {
+    await post("/config/budget", { budget: $("cfg-budget").value });
+    $("cfg-budget-status").textContent = "saved for this session";
+    setTimeout(() => { $("cfg-budget-status").textContent = ""; }, 2500);
+    await refresh();
+  } catch (e) { $("cfg-budget-status").textContent = "failed: " + e.message; }
+};
 
 $("refresh").onclick = refresh;
 $("clear-cache").onclick = async () => {

@@ -57,6 +57,26 @@ class SummariseRequest(BaseModel):
     focus: str = ""
 
 
+class ApiKeyRequest(BaseModel):
+    # Empty string clears the key and returns the sidecar to local-only.
+    key: str = ""
+    # Write it to ~/.config/llm-sidecar/config.json in plaintext. Off by
+    # default: the caller has to ask for that explicitly.
+    persist: bool = False
+
+
+class BudgetRequest(BaseModel):
+    budget: str
+
+
+class AskRequest(BaseModel):
+    question: str
+    # Override the search query when the question itself searches badly.
+    query: str = ""
+    max_sources: int = 4
+    read_pages: int = 3
+
+
 class ClassifyRequest(BaseModel):
     items: list[str]
     labels: list[str]
@@ -180,6 +200,16 @@ def create_app(config: Config | None = None) -> FastAPI:
             logger.exception("operation failed")
             raise HTTPException(status_code=502, detail=str(e)) from e
 
+    @app.post("/v1/answer")
+    def op_answer(req: AskRequest, _: None = Depends(require_token)) -> dict:
+        """Answer a question from live sources.
+
+        Sits under /v1 alongside verify rather than in /ops: it is a headline
+        capability, not a utility."""
+        a = _op(sidecar.answer, req.question, query=req.query or None,
+                max_sources=req.max_sources, read_pages=req.read_pages)
+        return a.__dict__
+
     @app.post("/ops/classify")
     def op_classify(req: ClassifyRequest, _: None = Depends(require_token)) -> dict:
         return {"results": _op(sidecar.classify, req.items, req.labels, multi=req.multi)}
@@ -218,6 +248,61 @@ def create_app(config: Config | None = None) -> FastAPI:
     @app.get("/local-models")
     def local_models(context: int = 8000, _: None = Depends(require_token)) -> dict:
         return {"models": sidecar.local_models(context_tokens=context)}
+
+    def _mask(key: str | None) -> str:
+        """Never return the key itself — a loopback port is not a vault."""
+        return f"…{key[-4:]}" if key and len(key) >= 4 else ("set" if key else "")
+
+    @app.get("/config")
+    def get_config(_: None = Depends(require_token)) -> dict:
+        return {
+            "cloud_configured": cfg.has_cloud,
+            "key_preview": _mask(cfg.openrouter_api_key),
+            "default_budget": cfg.default_budget,
+            "ollama_host": cfg.ollama_host,
+            "search_provider": cfg.search_provider,
+            "models": cfg.models,
+        }
+
+    @app.post("/config/api-key")
+    def set_api_key(req: ApiKeyRequest, _: None = Depends(require_token)) -> dict:
+        """Set or clear the OpenRouter key on the running daemon.
+
+        Applies immediately — the picker reads config at call time, so the
+        next request can already route to cloud models. The response never
+        echoes the key back, only a masked preview."""
+        from . import catalogue, config as config_mod
+
+        key = req.key.strip() or None
+        cfg.openrouter_api_key = key
+        # The catalogue was fetched (or not) under the old auth; drop the memo
+        # so the next lookup reflects what this key can actually see.
+        catalogue.forget()
+        # Resolved tiers were chosen from a different candidate pool.
+        sidecar._resolved.clear()
+
+        persisted = False
+        if req.persist:
+            try:
+                config_mod.save(cfg, include_api_key=True)
+                persisted = True
+            except OSError as e:
+                raise HTTPException(status_code=500, detail=f"Could not write config: {e}") from e
+
+        return {
+            "ok": True,
+            "cloud_configured": cfg.has_cloud,
+            "key_preview": _mask(key),
+            "persisted": persisted,
+        }
+
+    @app.post("/config/budget")
+    def set_budget(req: BudgetRequest, _: None = Depends(require_token)) -> dict:
+        if req.budget not in BUDGET_ALIASES:
+            raise HTTPException(status_code=400,
+                                detail=f"Unknown budget {req.budget!r}. Expected one of {BUDGET_ALIASES}.")
+        cfg.default_budget = req.budget
+        return {"ok": True, "default_budget": cfg.default_budget}
 
     @app.post("/config/tier")
     def set_tier(req: TierRequest, _: None = Depends(require_token)) -> dict:

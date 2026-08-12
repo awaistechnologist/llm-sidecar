@@ -63,6 +63,21 @@ class SearchResult:
 
 
 @dataclass
+class Answer:
+    """A question answered from retrieved sources.
+
+    `grounded` is the field that matters: False means the sources did not
+    contain the answer, and `text` explains what was missing rather than
+    guessing. Callers should branch on it instead of just printing text."""
+    question: str
+    text: str
+    grounded: bool = False
+    sources: list[str] = field(default_factory=list)
+    caveat: str = ""
+    model: str = ""
+
+
+@dataclass
 class ClaimVerdict:
     claim: str
     verdict: str  # supported | contradicted | unverified | not_a_claim
