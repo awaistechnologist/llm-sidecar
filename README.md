@@ -37,14 +37,35 @@ slow and sometimes have to be rotated past.
 
 ```bash
 git clone https://github.com/awaistechnologist/llm-sidecar
-cd llm-sidecar && pip install -e ".[all]"
-
-llm-sidecar status            # what it can see: your hardware, models, search
-llm-sidecar serve             # API on :4001, dashboard at http://localhost:4001
+cd llm-sidecar
+./install.sh          # Windows: install.bat
+./run.sh              # Windows: run.bat
 ```
 
+`install.sh` builds a virtualenv, installs everything, then tells you what it
+can actually reach — whether Ollama is running and how many models you have,
+whether a key is set, whether Docker is available for SearXNG — and prints the
+MCP config with your real paths filled in. Safe to re-run.
+
+`run.sh` starts the daemon and opens the dashboard once it's answering. It
+passes arguments through (`./run.sh --port 4100`, `./run.sh --no-ui`) and reads
+a `.env` in the project directory if you keep your key there.
+
 Open the dashboard: a chat window, every capability in a Tools tab, and a live
-view of what is being chosen and what it costs. No key required.
+view of what is being chosen and what it costs. **No key required.**
+
+<details>
+<summary>Prefer to do it by hand?</summary>
+
+```bash
+python3 -m venv .venv && ./.venv/bin/pip install -e ".[all]"
+./.venv/bin/llm-sidecar status
+./.venv/bin/llm-sidecar serve
+```
+
+Python 3.11+. The core needs only `httpx`; `.[search]`, `.[daemon]` and
+`.[mcp]` pull in the rest per door.
+</details>
 
 ---
 
