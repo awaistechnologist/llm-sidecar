@@ -260,7 +260,7 @@ def test_pinned_model_failure_is_not_rotated(cfg, monkeypatch):
 
 # ── verify ────────────────────────────────────────────────────────────────────
 
-def test_judge_json_survives_fences_and_prose():
+def test_verifier_json_survives_fences_and_prose():
     from llm_sidecar.verify import _parse_json
 
     assert _parse_json('```json\n{"results": [1]}\n```')["results"] == [1]
@@ -273,22 +273,22 @@ def test_unknown_verdict_becomes_unverified(cfg, monkeypatch):
     from llm_sidecar import verify as verify_mod
 
     monkeypatch.setattr(verify_mod, "gather_evidence", lambda c, cfg, **k: [{"title": "t", "snippet": "s", "url": "http://e"}])
-    monkeypatch.setattr(verify_mod, "_judge_batch", lambda b, m, c: [{"claim": 1, "verdict": "definitely-true", "note": "n"}])
+    monkeypatch.setattr(verify_mod, "_verify_batch", lambda b, m, c: [{"claim": 1, "verdict": "definitely-true", "note": "n"}])
 
     out = verify_mod.verify_claims(["a claim"], cfg, model="x")
     assert out[0].verdict == "unverified"
     assert out[0].sources == ["http://e"]
 
 
-def test_judge_failure_degrades_not_crashes(cfg, monkeypatch):
+def test_verifier_failure_degrades_not_crashes(cfg, monkeypatch):
     from llm_sidecar import verify as verify_mod
 
     monkeypatch.setattr(verify_mod, "gather_evidence", lambda c, cfg, **k: [])
 
     def boom(*a, **k):
-        raise RuntimeError("judge exploded")
+        raise RuntimeError("verifier exploded")
 
-    monkeypatch.setattr(verify_mod, "_judge_batch", boom)
+    monkeypatch.setattr(verify_mod, "_verify_batch", boom)
     out = verify_mod.verify_claims(["a", "b"], cfg, model="x")
     assert [v.verdict for v in out] == ["unverified", "unverified"]
 
@@ -788,13 +788,13 @@ def test_receipt_reports_cache_hits(api):
     assert b["x_sidecar"]["cached"] is True
 
 
-def test_judge_prompt_covers_namesakes():
+def test_verify_prompt_covers_namesakes():
     """Regression: a search for "The Eiffel Tower is in Berlin" surfaced a
-    replica, and the judge graded the claim supported. The prompt now has to
+    replica, and the verifier graded the claim supported. The prompt now has to
     tell it that a namesake is not the subject."""
-    from llm_sidecar.verify import JUDGE_SYSTEM
+    from llm_sidecar.verify import VERIFY_SYSTEM
 
-    lowered = JUDGE_SYSTEM.lower()
+    lowered = VERIFY_SYSTEM.lower()
     assert "replica" in lowered
     assert "namesake" in lowered
 

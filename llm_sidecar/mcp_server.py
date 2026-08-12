@@ -108,7 +108,7 @@ def verify_claims(claims: list[str], model: str = "") -> dict:
     """
     Fact-check claims against fresh web evidence, with citations.
 
-    Each claim gets its own targeted search; a judge model then grades every
+    Each claim gets its own targeted search; a verification model then grades every
     claim strictly against the evidence found — it is not allowed to mark a
     claim "supported" from its own knowledge. Claims are graded exactly as
     stated, so a line asserting "X is a myth" is supported when evidence
@@ -117,7 +117,7 @@ def verify_claims(claims: list[str], model: str = "") -> dict:
     Args:
         claims: Self-contained factual statements (max 40). Resolve pronouns
                 first — "it was founded in 1998" cannot be checked alone.
-        model:  Optional judge model override, e.g. "ollama/qwen2.5:32b" to
+        model:  Optional verification model override, e.g. "ollama/qwen2.5:32b" to
                 keep the whole check on-device.
 
     Returns {"results": [{claim, verdict, note, sources}]} where verdict is

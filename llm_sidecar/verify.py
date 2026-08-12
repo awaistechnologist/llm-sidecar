@@ -1,6 +1,6 @@
-"""Claim verification — extract, search, judge, cite.
+"""Claim verification — extract, search, grade, cite.
 
-The pipeline: each claim gets its own targeted search, then a judge model
+The pipeline: each claim gets its own targeted search, then a verification model
 grades a batch of claims strictly against the evidence gathered for them.
 Verdicts come back with the source URLs they were based on.
 
@@ -29,7 +29,7 @@ BATCH_SIZE = 5
 MAX_EVIDENCE_PER_CLAIM = 4
 MAX_CLAIMS = 40
 
-JUDGE_SYSTEM = """You are a careful fact-checking judge. For each numbered claim you are
+VERIFY_SYSTEM = """You are a careful fact-checker. For each numbered claim you are
 given web search evidence. Grade each claim STRICTLY on the evidence provided:
 - "supported": the evidence clearly backs the claim AS STATED.
 - "contradicted": the evidence clearly conflicts with the claim AS STATED.
@@ -48,7 +48,7 @@ Never use outside knowledge to mark a claim "supported" — evidence only. You m
 well-established knowledge to mark an obviously false claim "contradicted".
 Respond ONLY with valid JSON, no markdown fences, no commentary."""
 
-JUDGE_TEMPLATE = """Grade these claims against their evidence:
+VERIFY_TEMPLATE = """Grade these claims against their evidence:
 
 {blocks}
 
@@ -104,7 +104,7 @@ def gather_all(claims: list[str], config: Config) -> dict[str, list[dict]]:
         return out
 
 
-def _judge_batch(
+def _verify_batch(
     batch: list[tuple[str, list[dict]]],
     sidecar,
     model: str | None,
@@ -120,8 +120,8 @@ def _judge_batch(
         blocks.append("\n".join(lines))
 
     completion = sidecar.complete(
-        JUDGE_TEMPLATE.format(blocks="\n\n".join(blocks)),
-        system=JUDGE_SYSTEM,
+        VERIFY_TEMPLATE.format(blocks="\n\n".join(blocks)),
+        system=VERIFY_SYSTEM,
         model=model,
         tier="fast",
         max_tokens=1200,
@@ -154,7 +154,7 @@ def verify_claims(
 ) -> list[ClaimVerdict]:
     """Verify a list of claims. Returns one verdict per claim, in order.
 
-    Routing goes through a Sidecar so the judge calls are cached and recorded
+    Routing goes through a Sidecar so the verification calls are cached and recorded
     like any other completion — re-checking a document after an edit should
     not re-pay for the claims that didn't change."""
     claims = [c.strip() for c in claims if c and c.strip()]
@@ -173,18 +173,18 @@ def verify_claims(
 
     def grade(chunk: list[str]) -> list[dict]:
         try:
-            return _judge_batch([(c, evidence_by_claim[c]) for c in chunk], sidecar, model)
+            return _verify_batch([(c, evidence_by_claim[c]) for c in chunk], sidecar, model)
         except Exception as e:
-            logger.warning(f"Judge call failed: {e}")
+            logger.warning(f"Verification call failed: {e}")
             return []
 
-    # Batches are independent, so a 20-claim check is four judge calls that can
+    # Batches are independent, so a 20-claim check is four verification calls that can
     # overlap rather than four that queue. Capped: they all hit one model, and
     # stampeding a free tier is how you turn four calls into four 429s.
     if len(chunks) == 1:
         graded_batches = [grade(chunks[0])]
     else:
-        with ThreadPoolExecutor(max_workers=min(len(chunks), config.max_judge_workers)) as pool:
+        with ThreadPoolExecutor(max_workers=min(len(chunks), config.max_verify_workers)) as pool:
             graded_batches = list(pool.map(grade, chunks))
 
     verdicts: list[ClaimVerdict] = []

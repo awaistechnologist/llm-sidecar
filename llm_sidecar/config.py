@@ -63,8 +63,8 @@ class Config:
     # Higher finishes sooner but is likelier to trip a provider's rate limit;
     # DuckDuckGo in particular does not enjoy this.
     max_search_workers: int = 4
-    # Judge batches run concurrently against one model; keep this modest.
-    max_judge_workers: int = 3
+    # Verification batches run concurrently against one model; keep this modest.
+    max_verify_workers: int = 3
     # Concurrency ceiling for Sidecar.complete_many().
     max_completion_workers: int = 5
 

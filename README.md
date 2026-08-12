@@ -278,7 +278,7 @@ of the above; `status` reports any reachable instance, not just ours.
 | `picker.py` | Candidate ranking, live pretest, `pick` / `pick_pool` |
 | `client.py` | `complete` / `stream`, provider routing, 429 backoff |
 | `search/` | Provider dispatch, DDG, SearXNG, `read_url` |
-| `verify.py` | Claim extraction, evidence gathering, judging |
+| `verify.py` | Claim extraction, evidence gathering, grading |
 | `__init__.py` | The `Sidecar` facade |
 | `cache.py` | Response + search cache, deterministic requests only |
 | `ledger.py` | Append-only usage and spend record |
@@ -335,7 +335,7 @@ to pay the full timeout for every stale entry ahead of the live model.
 Priority order still decides *which* model wins — concurrency only changes how
 fast it is found.
 
-Judge batches also run concurrently, which helps against cloud models. It does
+Verification batches also run concurrently, which helps against cloud models. It does
 not help much against a single local Ollama model, since those requests queue
 server-side anyway.
 
@@ -350,7 +350,7 @@ server-side anyway.
 
 - `read_url` is a regex text extractor, not a readability port. It keeps nav
   chrome. Fine for feeding a model, not for display.
-- **Verification quality is bounded by search quality.** The judge can only
+- **Verification quality is bounded by search quality.** Verification can only
   grade what the search returned. Ambiguous evidence — a namesake, a replica,
   a stale page — produces a wrong verdict. SearXNG helps by covering more
   engines, but it is not a fix.

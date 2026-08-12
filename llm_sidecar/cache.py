@@ -4,7 +4,7 @@ Two things get cached, for different reasons:
 
   completions — deterministic requests (temperature 0) repeated across runs.
                 Verification is the motivating case: re-checking a document
-                after an edit re-judges every unchanged claim identically.
+                after an edit re-grades every unchanged claim identically.
   searches    — the same claim searched twice in a session, and the reason
                 a cached verify run does not hammer DuckDuckGo.
 
