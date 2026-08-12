@@ -5,11 +5,16 @@ build-backend = "hatchling.build"
 [project]
 name = "llm-sidecar"
 version = "0.4.0"
-description = "A local capability sidecar for AI tooling: routed inference, web search, and grounded fact-checking."
+description = "Local sidecar giving any tool grounded, cited, routed AI — Ollama or OpenRouter, no API key required."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
-keywords = ["llm", "ollama", "openrouter", "mcp", "fact-checking", "local-first", "sidecar"]
+keywords = [
+    "llm", "ollama", "openrouter", "mcp", "model-context-protocol",
+    "fact-checking", "rag", "local-first", "sidecar", "llm-router",
+    "grounded-generation", "citations",
+]
+authors = [{ name = "Muhammad Awais Tahir" }]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -17,7 +22,14 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Internet :: WWW/HTTP :: Indexing/Search",
+    "Environment :: Console",
+    "Environment :: Web Environment",
+    "Operating System :: OS Independent",
+    "Typing :: Typed",
 ]
 
 # The core library stays deliberately thin — a program that only wants
@@ -41,10 +53,19 @@ llm-sidecar = "llm_sidecar.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/awaistechnologist/llm-sidecar"
+Repository = "https://github.com/awaistechnologist/llm-sidecar"
 Issues = "https://github.com/awaistechnologist/llm-sidecar/issues"
+Changelog = "https://github.com/awaistechnologist/llm-sidecar/releases"
 
 [tool.hatch.build.targets.wheel]
 packages = ["llm_sidecar"]
+exclude = ["tests", "tests/*"]
+
+[tool.hatch.build.targets.sdist]
+# The sdist should be able to rebuild and re-verify itself, so it keeps the
+# tests the wheel drops.
+include = ["llm_sidecar", "README.md", "LICENSE", "pyproject.toml",
+           "install.sh", "install.bat", "run.sh", "run.bat"]
 
 [tool.pytest.ini_options]
 testpaths = ["llm_sidecar/tests"]

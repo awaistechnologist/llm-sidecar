@@ -1,0 +1,64 @@
+# Publish to PyPI when a version tag is pushed.
+#
+# Uses PyPI Trusted Publishing (OIDC): GitHub proves the workflow's identity
+# to PyPI directly, so there is no API token to create, paste, rotate, or leak.
+# That is the point — a long-lived upload token stored in repo secrets is the
+# single most stealable thing a small project owns.
+#
+# One-time setup at https://pypi.org/manage/account/publishing/ :
+#   PyPI project name  llm-sidecar
+#   Owner              awaistechnologist
+#   Repository         llm-sidecar
+#   Workflow           publish.yml
+#   Environment        pypi
+name: publish
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Refuse to publish a tag that disagrees with the package
+        run: |
+          python -m pip install --quiet tomli
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG=$(python -c "import tomli;print(tomli.load(open('pyproject.toml','rb'))['project']['version'])")
+          echo "tag=$TAG package=$PKG"
+          if [ "$TAG" != "$PKG" ]; then
+            echo "::error::Tag $TAG does not match pyproject version $PKG"
+            exit 1
+          fi
+
+      # A release that fails its own tests is worse than no release.
+      - run: pip install --quiet -e ".[all]" pytest
+      - run: pytest -q
+
+      - run: pip install --quiet build && python -m build
+      - run: pip install --quiet twine && twine check dist/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write        # the OIDC token; nothing else is needed
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1

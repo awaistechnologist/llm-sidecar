@@ -1,0 +1,27 @@
+# Run the suite on every push and pull request.
+#
+# The tests are fully offline — every network path is stubbed — so this needs
+# no keys, no services, and no network flakiness budget.
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install --quiet -e ".[all]" pytest
+      - run: pytest -q

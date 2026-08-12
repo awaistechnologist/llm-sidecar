@@ -1,5 +1,10 @@
 # llm-sidecar
 
+[![tests](https://github.com/awaistechnologist/llm-sidecar/actions/workflows/test.yml/badge.svg)](https://github.com/awaistechnologist/llm-sidecar/actions/workflows/test.yml)
+[![PyPI](https://img.shields.io/pypi/v/llm-sidecar)](https://pypi.org/project/llm-sidecar/)
+[![Python](https://img.shields.io/pypi/pyversions/llm-sidecar)](https://pypi.org/project/llm-sidecar/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
 **A local sidecar that gives every tool on your machine grounded, cited, routed AI — and never asks you which model to use.**
 
 One process. It picks a working model, searches the web, reads pages, checks
@@ -36,6 +41,13 @@ slow and sometimes have to be rotated past.
 ## Sixty seconds
 
 ```bash
+pip install "llm-sidecar[all]"
+llm-sidecar serve            # dashboard at http://localhost:4001
+```
+
+Or clone it, which also gets you the setup scripts:
+
+```bash
 git clone https://github.com/awaistechnologist/llm-sidecar
 cd llm-sidecar
 ./install.sh          # Windows: install.bat
@@ -54,18 +66,16 @@ a `.env` in the project directory if you keep your key there.
 Open the dashboard: a chat window, every capability in a Tools tab, and a live
 view of what is being chosen and what it costs. **No key required.**
 
-<details>
-<summary>Prefer to do it by hand?</summary>
+Python 3.11+. **The core needs only `httpx`** — `llm-sidecar` on its own is a
+seven-package install. The extras add what each door needs:
 
 ```bash
-python3 -m venv .venv && ./.venv/bin/pip install -e ".[all]"
-./.venv/bin/llm-sidecar status
-./.venv/bin/llm-sidecar serve
+pip install llm-sidecar              # library only: complete, stream
+pip install "llm-sidecar[search]"    # + web search and read_url
+pip install "llm-sidecar[daemon]"    # + HTTP server and dashboard
+pip install "llm-sidecar[mcp]"       # + MCP server
+pip install "llm-sidecar[all]"
 ```
-
-Python 3.11+. The core needs only `httpx`; `.[search]`, `.[daemon]` and
-`.[mcp]` pull in the rest per door.
-</details>
 
 ---
 
