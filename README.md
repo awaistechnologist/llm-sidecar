@@ -32,7 +32,7 @@ It is not instant: a grounded answer means a search, two or three page fetches
 and a model call, so expect tens of seconds — more on free models, which are
 slow and sometimes have to be rotated past.
 
-> **Status: early (0.5.0).** The API may still move. Extracted from
+> **Status: early (0.5.1).** The API may still move. Extracted from
 > [Agora](https://github.com/awaistechnologist/agora), where the routing and
 > verification were originally built and proven.
 
@@ -41,31 +41,54 @@ slow and sometimes have to be rotated past.
 ## Install
 
 ```bash
-brew install pipx && pipx ensurepath        # once, if you don't have pipx
-exec $SHELL                                 # pick up the new PATH
+brew install pipx
+pipx ensurepath
+exec $SHELL
 pipx install llm-sidecar
 ```
 
-That's the whole install — no extras to remember, every door works. On Linux,
-`apt install pipx` instead.
+On Linux use `apt install pipx` instead of brew. That is the whole install —
+no extras to remember, every door works.
 
-> **Why pipx, not pip?** Most Python installs on macOS and Linux are now
-> marked externally-managed (PEP 668), so `pip install` into them fails
-> outright. And `pipx ensurepath` edits your shell config — it cannot change a
-> shell that's already running, which is why the `exec $SHELL` line is there.
+The third line matters: `pipx ensurepath` edits your shell config, and cannot
+change a shell that is already running. `exec $SHELL` reloads it. Without that
+you get `command not found: llm-sidecar` even though the install succeeded.
 
-Then, optionally, add an OpenRouter key for free cloud models:
+Add an OpenRouter key if you want free cloud models. Without one it runs
+entirely on [Ollama](https://ollama.com).
 
 ```bash
 llm-sidecar config key sk-or-your-key --save
-```
-
-Without one it runs entirely on [Ollama](https://ollama.com). Check what it can
-see:
-
-```bash
 llm-sidecar status
 ```
+
+<details>
+<summary><b>"command not found: pip"</b>, or <b>"externally-managed-environment"</b></summary>
+
+Neither is broken — both are modern Python on macOS and Linux behaving as
+designed, and they are the reason this page says pipx.
+
+**`pip` is not a command on most Macs.** Homebrew installs `pip3`, not `pip`.
+PyPI's install line is boilerplate it prints for every package; it doesn't
+know what your Python looks like.
+
+**`pip3 install` then refuses anyway**, with
+`error: externally-managed-environment`. Since PEP 668, distributions mark
+their Python as off-limits to global installs, because system tooling depends
+on it and one bad upgrade breaks the OS.
+
+**pipx exists for exactly this.** It creates a private virtualenv per tool and
+puts just the command on your PATH, so nothing global changes. It is the
+standard way to install a Python application, as opposed to a library.
+
+For a library in your own project, `pip` is still right — inside that
+project's virtualenv:
+
+```bash
+python3 -m venv .venv
+./.venv/bin/pip install llm-sidecar
+```
+</details>
 
 ## Run it as a service
 

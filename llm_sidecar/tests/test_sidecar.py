@@ -2247,3 +2247,38 @@ def test_config_key_without_save_is_refused(tmp_path, monkeypatch):
     assert cli.main(["config", "key", "sk-or-test", "--save"]) == 0
     assert json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))[
         "openrouter_api_key"] == "sk-or-test"
+
+
+def test_readme_bash_blocks_survive_a_paste():
+    """Regression from a real user: copying the install block produced
+    `cmdand quote>` and hung the terminal.
+
+    zsh's `interactive_comments` is off in many setups, so a trailing
+    `# once, if you don't have pipx` is not a comment — and the apostrophe in
+    "don't" opens a quote that never closes. Copy-pasteable blocks therefore
+    must not carry inline comments at all.
+
+    Only ```bash blocks are checked; ```console blocks are transcripts with
+    prompts and output, not things anyone pastes whole."""
+    import re
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    readme = Path(__file__).parent.parent.parent / "README.md"
+    if not readme.exists():
+        pytest.skip("source checkout only")
+    if not shutil.which("zsh"):
+        pytest.skip("zsh not available on this runner")
+
+    blocks = re.findall(r"```bash\n(.*?)```", readme.read_text(encoding="utf-8"), re.S)
+    assert blocks, "no bash blocks found — has the README format changed?"
+
+    broken = []
+    for block in blocks:
+        # -n parses without executing; unsetopt reproduces the hostile shell.
+        r = subprocess.run(["zsh", "-n", "-c", "unsetopt interactivecomments\n" + block],
+                           capture_output=True, text=True, timeout=20)
+        if r.returncode != 0:
+            broken.append(f"{block.strip().splitlines()[0]!r}: {r.stderr.strip()}")
+    assert not broken, "README bash blocks that break when pasted:\n" + "\n".join(broken)

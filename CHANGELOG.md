@@ -2,6 +2,20 @@
 
 Notable changes per release. Dates are release dates.
 
+## [0.5.1] — 2026-08-12
+
+### Fixed
+- README install block could not be copy-pasted. zsh's `interactive_comments`
+  is off in many setups, so a trailing `# once, if you don't have pipx` was not
+  a comment — the apostrophe in "don't" opened a quote and the terminal hung on
+  `cmdand quote>`. Copy-pasteable blocks no longer carry inline comments, and a
+  test now parses every one of them in a shell configured that way.
+
+### Added
+- A troubleshooting section for `command not found: pip` and
+  `externally-managed-environment` — the two things a new user hits first, and
+  the reason the install instructions say pipx rather than pip.
+
 ## [0.5.0] — 2026-08-12
 
 Install and first-run fixes. Everything in this release came from watching an

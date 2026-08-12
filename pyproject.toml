@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "llm-sidecar"
-version = "0.5.0"
+version = "0.5.1"
 description = "Local sidecar giving any tool grounded, cited, routed AI — Ollama or OpenRouter, no API key required."
 readme = "README.md"
 requires-python = ">=3.11"
