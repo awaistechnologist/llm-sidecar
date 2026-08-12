@@ -1,9 +1,9 @@
 # llm-sidecar
 
 [![tests](https://github.com/awaistechnologist/llm-sidecar/actions/workflows/test.yml/badge.svg)](https://github.com/awaistechnologist/llm-sidecar/actions/workflows/test.yml)
-[![PyPI](https://img.shields.io/pypi/v/llm-sidecar)](https://pypi.org/project/llm-sidecar/)
-[![Python](https://img.shields.io/pypi/pyversions/llm-sidecar)](https://pypi.org/project/llm-sidecar/)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![PyPI](https://img.shields.io/pypi/v/llm-sidecar?logo=pypi&logoColor=white&color=2f6fdb)](https://pypi.org/project/llm-sidecar/)
+[![Python](https://img.shields.io/pypi/pyversions/llm-sidecar?logo=python&logoColor=white)](https://pypi.org/project/llm-sidecar/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue?logo=opensourceinitiative&logoColor=white)](LICENSE)
 
 **A local sidecar that gives every tool on your machine grounded, cited, routed AI — and never asks you which model to use.**
 
