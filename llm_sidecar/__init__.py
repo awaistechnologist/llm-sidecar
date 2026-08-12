@@ -197,7 +197,7 @@ class Sidecar:
         self._record(done, operation)
         return done
 
-    def stream(
+    async def stream(
         self,
         prompt: str | None = None,
         *,
@@ -208,12 +208,39 @@ class Sidecar:
         system: str | None = None,
         max_tokens: int = 1000,
         temperature: float = 0.7,
+        operation: str = "stream",
     ) -> AsyncIterator[dict]:
-        """Token stream. Yields {"type": "token"|"usage", ...}."""
+        """Token stream. Yields {"type": "token"|"usage", ...}.
+
+        Wraps the client generator rather than returning it directly so the
+        call still lands in the ledger. It didn't before, which meant every
+        streamed call was invisible to usage and spend tracking — the numbers
+        were quietly wrong rather than merely incomplete.
+
+        Streams deliberately do not consult the completion cache: replaying
+        stored tokens is a different feature, and a cache hit here would have
+        to fake the timing to look like a stream."""
         msgs = client.build_messages(prompt, system, messages)
         chosen = model or self.model_for(tier, budget)
-        return client.stream(msgs, chosen, self.config,
-                             max_tokens=max_tokens, temperature=temperature)
+
+        started = time.time()
+        usage: Usage | None = None
+        try:
+            async for event in client.stream(
+                msgs, chosen, self.config,
+                max_tokens=max_tokens, temperature=temperature,
+            ):
+                if event["type"] == "usage":
+                    usage = event["usage"]
+                yield event
+        finally:
+            # In a finally block so an abandoned or failed stream still records
+            # the tokens it burned before stopping.
+            self._record(
+                Completion(text="", model=chosen, usage=usage or Usage(),
+                           latency_s=round(time.time() - started, 3)),
+                operation,
+            )
 
     async def acomplete(self, prompt: str | None = None, **kwargs) -> Completion:
         """`complete` off the event loop.

@@ -598,7 +598,9 @@ function receiptFor(x) {
   const bits = [x.model];
   if (x.cached) bits.push("cached");
   else if (x.latency_s) bits.push(x.latency_s.toFixed(1) + "s");
+  if (x.tokens) bits.push(x.tokens.toLocaleString() + " tok");
   bits.push(x.cost_usd ? "$" + x.cost_usd.toFixed(5) : "free");
+  if (x.streamed) bits.push("streamed");
   return esc(bits.join(" · "));
 }
 
@@ -628,7 +630,7 @@ async function sendChat() {
       });
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
-      let buffer = "", answer = "", used = model;
+      let buffer = "", answer = "", used = model, tally = null;
 
       for (;;) {
         const { done, value } = await reader.read();
@@ -644,12 +646,19 @@ async function sendChat() {
           let chunk;
           try { chunk = JSON.parse(payload); } catch (_) { continue; }
           used = chunk.model || used;
+          // The final frame carries the receipt and has no choices.
+          if (chunk.usage) {
+            tally = Object.assign(
+              { tokens: chunk.usage.total_tokens }, chunk.x_sidecar || {});
+          }
           const delta = (chunk.choices?.[0]?.delta || {}).content;
           if (delta) { answer += delta; body.textContent = answer; }
           $("chat-log").scrollTop = $("chat-log").scrollHeight;
         }
       }
-      receipt.textContent = used + " · streamed";
+      receipt.innerHTML = tally
+        ? receiptFor(Object.assign({ model: used }, tally))
+        : esc(used + " · streamed");
       history.push({ role: "assistant", content: answer });
     } else {
       const r = await post("/v1/chat/completions", { model, messages, max_tokens: 1200 });

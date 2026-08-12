@@ -381,16 +381,42 @@ async def _stream_body(sidecar, rid, created, msgs, target, req):
         model = target.get("model") or sidecar.model_for(target.get("tier"), target.get("budget"))
         yield chunk({"role": "assistant", "content": ""}, model)
 
+        usage = None
         async for ev in sidecar.stream(
             messages=msgs,
             max_tokens=req.max_tokens,
             temperature=req.temperature,
             model=model,
+            operation="daemon-stream",
         ):
             if ev["type"] == "token":
                 yield chunk({"content": ev["text"]}, model)
+            elif ev["type"] == "usage":
+                usage = ev["usage"]
 
         yield chunk({}, model, finish="stop")
+
+        # A final frame carrying the receipt. The streaming format has no slot
+        # for cost, and dropping it meant a streamed reply arrived with no way
+        # to know what it spent — which is the one thing routing through here
+        # is supposed to tell you. Clients that don't expect it see a chunk
+        # with no choices and ignore it, which is the documented behaviour for
+        # the usage frame OpenAI itself emits.
+        if usage:
+            yield "data: " + json.dumps({
+                "id": rid, "object": "chat.completion.chunk", "created": created,
+                "model": model, "choices": [],
+                "usage": {
+                    "prompt_tokens": usage.prompt_tokens,
+                    "completion_tokens": usage.completion_tokens,
+                    "total_tokens": usage.total_tokens,
+                },
+                "x_sidecar": {
+                    "cost_usd": usage.cost_usd,
+                    "local": model.startswith("ollama/"),
+                    "streamed": True,
+                },
+            }) + "\n\n"
     except Exception as e:
         logger.exception("stream failed")
         # The status line is long gone by now, so an error can only be

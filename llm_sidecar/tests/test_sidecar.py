@@ -1306,3 +1306,102 @@ def test_dashboard_exposes_every_tool():
                      "/ops/extract", "/ops/extract-claims", "/ops/fact-check",
                      "/ops/search", "/ops/read-url"):
         assert endpoint in html, f"dashboard has no panel calling {endpoint}"
+
+
+# ── streaming receipts ────────────────────────────────────────────────────────
+
+def test_streaming_is_recorded_in_the_ledger(cfg, monkeypatch):
+    """Regression: Sidecar.stream returned the client generator directly and
+    never recorded, so every streamed call was invisible to usage and spend —
+    the totals were quietly wrong rather than merely incomplete."""
+    import asyncio
+
+    from llm_sidecar import client, ledger, picker
+    from llm_sidecar.types import Pick, Usage as U
+
+    monkeypatch.setattr(picker, "pick", lambda *a, **k: Pick("m/1", "m"))
+
+    async def fake_stream(messages, model, config, **k):
+        yield {"type": "token", "text": "hi"}
+        yield {"type": "usage", "usage": U(5, 7, 12, 0.25)}
+
+    monkeypatch.setattr(client, "stream", fake_stream)
+    sc = Sidecar(cfg)
+
+    async def drain():
+        return [e async for e in sc.stream("q")]
+
+    events = asyncio.run(drain())
+    assert [e["type"] for e in events] == ["token", "usage"]
+
+    entry = ledger.read()[-1]
+    assert entry["operation"] == "stream"
+    assert entry["completion_tokens"] == 7
+    assert entry["cost_usd"] == 0.25
+
+
+def test_abandoned_stream_still_records(cfg, monkeypatch):
+    """Tokens burned before a consumer walks away were still spent."""
+    import asyncio
+
+    from llm_sidecar import client, ledger, picker
+    from llm_sidecar.types import Pick
+
+    monkeypatch.setattr(picker, "pick", lambda *a, **k: Pick("m/1", "m"))
+
+    async def fake_stream(messages, model, config, **k):
+        yield {"type": "token", "text": "a"}
+        yield {"type": "token", "text": "b"}
+
+    monkeypatch.setattr(client, "stream", fake_stream)
+    sc = Sidecar(cfg)
+
+    async def take_one():
+        async for _ in sc.stream("q"):
+            break            # walk away after the first token
+
+    asyncio.run(take_one())
+    assert ledger.read()[-1]["operation"] == "stream"
+
+
+def test_stream_emits_a_usage_frame(api):
+    """The chat panel's whole point is the receipt, and the streaming format
+    has no slot for cost — so a final frame carries it."""
+    import json as _json
+
+    from llm_sidecar import client
+    from llm_sidecar.types import Usage as U
+
+    async def fake_stream(messages, model, config, **k):
+        yield {"type": "token", "text": "hello"}
+        yield {"type": "usage", "usage": U(3, 4, 7, 0.002)}
+
+    import llm_sidecar.client as client_mod
+    client_mod.stream = fake_stream
+
+    r = api.post("/v1/chat/completions", json={
+        "model": "auto", "stream": True,
+        "messages": [{"role": "user", "content": "hi"}],
+    })
+    frames = [_json.loads(line[6:]) for line in r.text.splitlines()
+              if line.startswith("data: ") and line[6:].strip() != "[DONE]"]
+
+    final = [f for f in frames if f.get("usage")]
+    assert final, "no usage frame emitted"
+    assert final[0]["usage"]["total_tokens"] == 7
+    assert final[0]["x_sidecar"]["cost_usd"] == 0.002
+    assert final[0]["x_sidecar"]["streamed"] is True
+    # Empty choices is what makes it safe for clients that don't expect it.
+    assert final[0]["choices"] == []
+    assert r.text.rstrip().endswith("[DONE]")
+
+
+def test_dashboard_renders_a_receipt_for_streams():
+    """The word "streamed" alone used to stand in for the receipt."""
+    from pathlib import Path
+
+    import llm_sidecar
+
+    html = (Path(llm_sidecar.__file__).parent / "ui" / "index.html").read_text()
+    assert "chunk.usage" in html, "UI never reads the usage frame"
+    assert "receiptFor(Object.assign({ model: used }, tally))" in html
