@@ -342,7 +342,7 @@ one directly and never touches the config file.
 ## Tests
 
 ```bash
-pytest                                    # 105 passing, fully offline
+pytest                                    # 114 passing, fully offline
 ```
 
 Fully offline — every network path is stubbed. Live-provider behaviour is

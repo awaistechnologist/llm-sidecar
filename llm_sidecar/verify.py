@@ -28,6 +28,11 @@ VERDICTS = ("supported", "contradicted", "unverified", "not_a_claim")
 BATCH_SIZE = 5
 MAX_EVIDENCE_PER_CLAIM = 4
 MAX_CLAIMS = 40
+# Claims that come back unverified get a second pass against the full text of
+# their top sources. Capped because fetching pages is the expensive part.
+MAX_ESCALATIONS = 10
+PAGES_PER_ESCALATION = 2
+ESCALATION_CHARS = 6000
 
 VERIFY_SYSTEM = """You are a careful fact-checker. For each numbered claim you are
 given web search evidence. Grade each claim STRICTLY on the evidence provided:
@@ -104,6 +109,46 @@ def gather_all(claims: list[str], config: Config) -> dict[str, list[dict]]:
         return out
 
 
+def _fetch_pages(claim: str, evidence: list[dict], config: Config) -> list[dict]:
+    """Replace snippets with full page text for one claim's top sources.
+
+    A 400-character snippet is a hard ceiling on grounding: it often doesn't
+    contain the fact even when the page does. Reading the page is the
+    difference between grading a headline and grading the article."""
+    from . import search as search_mod
+
+    out = []
+    for item in evidence[:PAGES_PER_ESCALATION]:
+        url = item.get("url")
+        if not url:
+            continue
+        try:
+            text = search_mod.read_url(url, config, max_chars=ESCALATION_CHARS)
+        except Exception as e:
+            logger.debug(f"escalation fetch failed for {url}: {e}")
+            continue
+        out.append({"title": item.get("title", ""), "url": url, "snippet": text})
+    # Keep the original snippets for anything we couldn't fetch, so escalation
+    # can only add evidence, never remove it.
+    return out or evidence
+
+
+def _escalate(
+    unresolved: list[str],
+    evidence_by_claim: dict[str, list[dict]],
+    config: Config,
+) -> dict[str, list[dict]]:
+    """Full-text evidence for claims the snippets couldn't settle."""
+    targets = unresolved[:MAX_ESCALATIONS]
+    workers = max(1, min(config.max_search_workers, len(targets)))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {
+            c: pool.submit(_fetch_pages, c, evidence_by_claim.get(c, []), config)
+            for c in targets
+        }
+        return {c: f.result() for c, f in futures.items()}
+
+
 def _verify_batch(
     batch: list[tuple[str, list[dict]]],
     sidecar,
@@ -151,12 +196,22 @@ def verify_claims(
     config: Config,
     model: str | None = None,
     sidecar=None,
+    escalate: bool | None = None,
 ) -> list[ClaimVerdict]:
     """Verify a list of claims. Returns one verdict per claim, in order.
 
-    Routing goes through a Sidecar so the verification calls are cached and recorded
-    like any other completion — re-checking a document after an edit should
-    not re-pay for the claims that didn't change."""
+    Two passes. The first grades against search snippets, which settles most
+    claims cheaply. Anything still "unverified" gets its top sources fetched in
+    full and re-graded — search snippets frequently omit the fact even when the
+    page contains it, and giving up at that point produces a shrug where an
+    answer was available.
+
+    Only unverified claims pay the second pass, and a re-grade can only change
+    "unverified" into something better: if the full text settles nothing, the
+    original verdict stands.
+
+    Routing goes through a Sidecar so the verification calls are cached and
+    recorded like any other completion."""
     claims = [c.strip() for c in claims if c and c.strip()]
     if not claims:
         return []
@@ -207,5 +262,48 @@ def verify_claims(
                 note=g.get("note", "") if isinstance(g.get("note"), str) else "",
                 sources=[e["url"] for e in evidence_by_claim[claim] if e.get("url")],
             ))
+
+    if escalate is None:
+        escalate = config.verify_escalate
+    if not escalate:
+        return verdicts
+
+    unresolved = [
+        v.claim for v in verdicts
+        if v.verdict == "unverified" and evidence_by_claim.get(v.claim)
+    ]
+    if not unresolved:
+        return verdicts
+
+    logger.info(f"Escalating {len(unresolved)} unverified claim(s) to full page text.")
+    deep = _escalate(unresolved, evidence_by_claim, config)
+
+    by_claim = {v.claim: v for v in verdicts}
+    targets = [c for c in unresolved if c in deep]
+    for start in range(0, len(targets), BATCH_SIZE):
+        chunk = targets[start:start + BATCH_SIZE]
+        try:
+            graded = _verify_batch([(c, deep[c]) for c in chunk], sidecar, model)
+        except Exception as e:
+            logger.warning(f"Escalated verification failed: {e}")
+            continue
+
+        by_index = {}
+        for g in graded:
+            try:
+                by_index[int(g.get("claim", 0))] = g
+            except (TypeError, ValueError):
+                continue
+
+        for i, claim in enumerate(chunk, 1):
+            g = by_index.get(i, {})
+            verdict = g.get("verdict")
+            # Only an improvement counts. A second "unverified" leaves the
+            # first result alone rather than overwriting it with the same
+            # answer and a different note.
+            if verdict in VERDICTS and verdict != "unverified":
+                v = by_claim[claim]
+                v.verdict = verdict
+                v.note = g.get("note", "") if isinstance(g.get("note"), str) else ""
 
     return verdicts

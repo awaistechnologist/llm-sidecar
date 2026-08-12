@@ -1405,3 +1405,106 @@ def test_dashboard_renders_a_receipt_for_streams():
     html = (Path(llm_sidecar.__file__).parent / "ui" / "index.html").read_text()
     assert "chunk.usage" in html, "UI never reads the usage frame"
     assert "receiptFor(Object.assign({ model: used }, tally))" in html
+
+
+# ── escalation to full page text ──────────────────────────────────────────────
+
+def test_unverified_claims_escalate_to_full_text(cfg, monkeypatch):
+    """Regression: "there's a london in US" came back unverified because the
+    search snippets were about London UK, even though the pages behind them
+    listed London, Ohio."""
+    from llm_sidecar import verify as verify_mod
+
+    monkeypatch.setattr(verify_mod, "gather_all", lambda claims, config: {
+        c: [{"title": "t", "url": "http://page", "snippet": "unhelpful snippet"}] for c in claims
+    })
+    monkeypatch.setattr(verify_mod, "_fetch_pages",
+                        lambda claim, ev, config: [{"title": "t", "url": "http://page",
+                                                    "snippet": "London, Ohio is a city in the US."}])
+
+    passes = []
+
+    def grader(batch, sidecar, model):
+        passes.append(batch[0][1][0]["snippet"])
+        verdict = "supported" if "Ohio" in batch[0][1][0]["snippet"] else "unverified"
+        return [{"claim": 1, "verdict": verdict, "note": "n"}]
+
+    monkeypatch.setattr(verify_mod, "_verify_batch", grader)
+    out = verify_mod.verify_claims(["there's a london in US"], cfg, sidecar=object())
+
+    assert len(passes) == 2                    # snippets, then full text
+    assert out[0].verdict == "supported"
+
+
+def test_escalation_only_improves(cfg, monkeypatch):
+    """A second "unverified" must not overwrite the first with the same answer
+    and a different note."""
+    from llm_sidecar import verify as verify_mod
+
+    monkeypatch.setattr(verify_mod, "gather_all", lambda claims, config: {
+        c: [{"title": "t", "url": "http://p", "snippet": "s"}] for c in claims
+    })
+    monkeypatch.setattr(verify_mod, "_fetch_pages", lambda c, ev, config: ev)
+
+    calls = []
+
+    def grader(batch, sidecar, model):
+        calls.append(1)
+        note = "first note" if len(calls) == 1 else "second note"
+        return [{"claim": 1, "verdict": "unverified", "note": note}]
+
+    monkeypatch.setattr(verify_mod, "_verify_batch", grader)
+
+    out = verify_mod.verify_claims(["x"], cfg, sidecar=object())
+    assert len(calls) == 2                     # it did escalate
+    assert out[0].verdict == "unverified"
+    assert out[0].note == "first note"         # but the original stands
+
+
+def test_settled_claims_are_not_escalated(cfg, monkeypatch):
+    """Escalation costs a page fetch per claim, so it must only touch the
+    claims that snippets failed to settle."""
+    from llm_sidecar import verify as verify_mod
+
+    monkeypatch.setattr(verify_mod, "gather_all", lambda claims, config: {
+        c: [{"title": "t", "url": "http://p", "snippet": "s"}] for c in claims
+    })
+    fetched = []
+    monkeypatch.setattr(verify_mod, "_fetch_pages",
+                        lambda c, ev, config: (fetched.append(c), ev)[1])
+    monkeypatch.setattr(verify_mod, "_verify_batch",
+                        lambda b, s, m: [{"claim": i, "verdict": "supported", "note": ""}
+                                         for i in range(1, len(b) + 1)])
+
+    verify_mod.verify_claims(["a", "b"], cfg, sidecar=object())
+    assert fetched == []
+
+
+def test_escalation_can_be_turned_off(cfg, monkeypatch):
+    from llm_sidecar import verify as verify_mod
+
+    monkeypatch.setattr(verify_mod, "gather_all", lambda claims, config: {
+        c: [{"title": "t", "url": "http://p", "snippet": "s"}] for c in claims
+    })
+    fetched = []
+    monkeypatch.setattr(verify_mod, "_fetch_pages",
+                        lambda c, ev, config: (fetched.append(c), ev)[1])
+    monkeypatch.setattr(verify_mod, "_verify_batch",
+                        lambda b, s, m: [{"claim": 1, "verdict": "unverified", "note": ""}])
+
+    cfg.verify_escalate = False
+    verify_mod.verify_claims(["x"], cfg, sidecar=object())
+    assert fetched == []
+
+
+def test_failed_page_fetch_keeps_the_snippets(cfg, monkeypatch):
+    """Escalation may add evidence; it must never remove any."""
+    from llm_sidecar import verify as verify_mod
+
+    original = [{"title": "t", "url": "http://p", "snippet": "original"}]
+    monkeypatch.setattr(verify_mod, "search" if False else "logger", verify_mod.logger)
+
+    from llm_sidecar import search as search_mod
+    monkeypatch.setattr(search_mod, "read_url",
+                        lambda *a, **k: (_ for _ in ()).throw(SidecarError("404")))
+    assert verify_mod._fetch_pages("c", original, cfg) == original

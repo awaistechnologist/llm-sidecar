@@ -65,6 +65,9 @@ class Config:
     max_search_workers: int = 4
     # Verification batches run concurrently against one model; keep this modest.
     max_verify_workers: int = 3
+    # Re-check unverified claims against full page text rather than snippets.
+    # Costs a page fetch and one extra model call per unresolved claim.
+    verify_escalate: bool = True
     # Concurrency ceiling for Sidecar.complete_many().
     max_completion_workers: int = 5
 
