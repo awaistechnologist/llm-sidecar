@@ -10,6 +10,8 @@
     llm-sidecar usage            # what you have spent
     llm-sidecar sum FILE         # summarise a file
     llm-sidecar searxng up       # start a local SearXNG for better search
+    llm-sidecar config key KEY   # save your OpenRouter key
+    llm-sidecar service install  # run at login, restart on failure
 """
 
 from __future__ import annotations
@@ -82,6 +84,92 @@ def _usage(args) -> int:
     for m in s["by_model"]:
         print(f"{m['model'][:40]:<40} {m['calls']:>6} {m['cost_usd']:>10.4f} "
               f"{m['total_tokens']:>10,} {m['avg_latency_s']:>6.1f}s")
+    return 0
+
+
+def _config(args) -> int:
+    """Set the key without needing the daemon running, or curl."""
+    from . import config as config_mod
+
+    cfg = config_mod.load()
+
+    if args.action == "key":
+        key = (args.value or "").strip()
+        if not key:
+            print("Pass the key: llm-sidecar config key sk-or-…", file=sys.stderr)
+            return 1
+        cfg.openrouter_api_key = key
+        if args.save:
+            path = config_mod.save(cfg, include_api_key=True)
+            print(f"Saved to {path}")
+            print("  Plain text, readable by anything running as you.")
+        else:
+            print("Key accepted but NOT saved — this process is about to exit, "
+                  "so that achieved nothing.")
+            print()
+            print("  Persist it:   llm-sidecar config key <KEY> --save")
+            print("  Or per-shell: export OPENROUTER_API_KEY=<KEY>")
+            return 1
+        return 0
+
+    if args.action == "budget":
+        if args.value not in ("free", "cheap", "best"):
+            print("Budget must be free, cheap or best.", file=sys.stderr)
+            return 1
+        cfg.default_budget = args.value
+        print(f"Saved to {config_mod.save(cfg)}")
+        return 0
+
+    if args.action == "show":
+        key = cfg.openrouter_api_key
+        print(f"config file    : {config_mod.CONFIG_FILE}")
+        print(f"openrouter key : {'…' + key[-4:] if key else 'not set'}")
+        print(f"budget         : {cfg.default_budget}")
+        print(f"ollama         : {cfg.ollama_host}")
+        print(f"search         : {cfg.search_provider}")
+        print(f"locked tiers   : {cfg.models or 'none'}")
+        return 0
+
+    if args.action == "clear-key":
+        cfg.openrouter_api_key = None
+        config_mod.save(cfg)
+        print("Key removed from the config file. Local models only.")
+        print("  An OPENROUTER_API_KEY in your environment still wins over this.")
+        return 0
+    return 2
+
+
+def _service(args) -> int:
+    from . import service
+    from .types import SidecarError
+
+    try:
+        if args.action == "install":
+            r = service.install(port=args.port)
+            print(f"Installed as a {r['manager']} service on port {r['port']}.")
+            print(f"  definition : {r['path']}")
+            if r.get("log"):
+                print(f"  logs       : {r['log']}")
+            if r.get("note"):
+                print(f"  note       : {r['note']}")
+            print()
+            print("It starts at login and restarts if it dies.")
+            print(f"  check: curl -s localhost:{r['port']}/health")
+        elif args.action == "uninstall":
+            r = service.uninstall()
+            print("Removed." if r["removed"] else "Nothing was installed.")
+        else:
+            s = service.status()
+            print(f"platform  : {s['platform']}")
+            print(f"installed : {'yes' if s['installed'] else 'no'}  ({s['path']})")
+            print(f"running   : {'yes' if s['running'] else 'no'}")
+            print(f"logs      : {s['log']}")
+            if not s["installed"]:
+                print()
+                print("  Install it: llm-sidecar service install")
+    except SidecarError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -244,6 +332,17 @@ def main(argv: list[str] | None = None) -> int:
     ca = sub.add_parser("cache", help="inspect or clear the response cache")
     ca.add_argument("action", nargs="?", default="stats", choices=["stats", "clear"])
 
+    cf = sub.add_parser("config", help="set your API key, budget, and see what's configured")
+    cf.add_argument("action", choices=["key", "budget", "show", "clear-key"])
+    cf.add_argument("value", nargs="?", default="")
+    cf.add_argument("--save", action="store_true",
+                    help="write it to the config file (plain text) rather than this process only")
+
+    sv = sub.add_parser("service", help="run the daemon at login (launchd / systemd)")
+    sv.add_argument("action", nargs="?", default="status",
+                    choices=["install", "uninstall", "status"])
+    sv.add_argument("--port", type=int, default=4001)
+
     sx = sub.add_parser("searxng", help="run a local SearXNG for better search")
     sx.add_argument("action", nargs="?", default="status",
                     choices=["up", "down", "status", "logs"])
@@ -288,6 +387,10 @@ def main(argv: list[str] | None = None) -> int:
         return _usage(args)
     if args.cmd == "sum":
         return _summarise(args)
+    if args.cmd == "config":
+        return _config(args)
+    if args.cmd == "service":
+        return _service(args)
     if args.cmd == "searxng":
         return _searxng(args)
     if args.cmd == "cache":

@@ -17,13 +17,13 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        python: ["3.11", "3.13"]
+        python: ["3.11", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-      - run: pip install --quiet -e ".[all]" pytest
+      - run: pip install --quiet -e ".[dev]"
       - run: pytest -q
 
   # The setup scripts are the first thing a new user runs, and until now they

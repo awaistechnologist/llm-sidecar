@@ -2167,3 +2167,72 @@ def test_install_bat_exits_zero_on_success():
     if not bat.exists():
         pytest.skip("install.bat is only present in a source checkout")
     assert bat.read_text(encoding="utf-8").rstrip().endswith("exit /b 0")
+
+
+# ── install and service ergonomics ────────────────────────────────────────────
+
+def test_default_install_covers_every_door():
+    """Regression: the base install was httpx only, so `pip install
+    llm-sidecar` produced a command whose main subcommands died with a raw
+    ModuleNotFoundError. Six saved packages is not worth a broken first run."""
+    import tomllib
+    from pathlib import Path
+
+    root = Path(__file__).parent.parent.parent
+    pyproject = root / "pyproject.toml"
+    if not pyproject.exists():
+        pytest.skip("source checkout only")
+
+    deps = " ".join(tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["dependencies"])
+    for needed in ("httpx", "ddgs", "fastapi", "uvicorn", "mcp"):
+        assert needed in deps, f"{needed} must be a default dependency, not an extra"
+
+
+def test_service_refuses_a_tcc_protected_location():
+    """macOS gates ~/Documents behind a privacy prompt that background
+    services never get. A launchd agent pointed there dies on startup and,
+    with KeepAlive, is restarted forever — which is what happened."""
+    from pathlib import Path
+
+    from llm_sidecar.service import _protected_location
+
+    home = str(Path.home())
+    assert _protected_location(f"{home}/Documents/x/.venv/bin/llm-sidecar") == "Documents"
+    assert _protected_location(f"{home}/Desktop/x/bin/llm-sidecar") == "Desktop"
+    assert _protected_location(f"{home}/Library/Application Support/pipx/venvs/x/bin/llm-sidecar") is None
+    assert _protected_location("/opt/homebrew/bin/llm-sidecar") is None
+
+
+def test_service_install_explains_the_fix(monkeypatch):
+    from pathlib import Path
+
+    from llm_sidecar import service
+
+    monkeypatch.setattr(service, "_executable",
+                        lambda: f"{Path.home()}/Documents/x/.venv/bin/llm-sidecar")
+    monkeypatch.setattr(service.platform, "system", lambda: "Darwin")
+    with pytest.raises(SidecarError) as e:
+        service.install()
+    assert "pipx install" in str(e.value)      # names the way out
+
+
+def test_plist_throttles_restarts():
+    """A crash loop at launchd's default speed buries the error in the log."""
+    from llm_sidecar.service import _plist
+
+    assert "ThrottleInterval" in _plist("/usr/local/bin/llm-sidecar", 4001)
+
+
+def test_config_key_without_save_is_refused(tmp_path, monkeypatch):
+    """Setting a key in a process that is about to exit achieves nothing;
+    saying "ok" would be a lie."""
+    from llm_sidecar import cli, config as config_mod
+
+    monkeypatch.setattr(config_mod, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(config_mod, "CONFIG_FILE", tmp_path / "config.json")
+    assert cli.main(["config", "key", "sk-or-test"]) == 1
+    assert not (tmp_path / "config.json").exists()
+
+    assert cli.main(["config", "key", "sk-or-test", "--save"]) == 0
+    assert json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))[
+        "openrouter_api_key"] == "sk-or-test"

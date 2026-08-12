@@ -2,6 +2,38 @@
 
 Notable changes per release. Dates are release dates.
 
+## [0.5.0] — 2026-08-12
+
+Install and first-run fixes. Everything in this release came from watching an
+actual install fail.
+
+### Changed
+- **`pip install llm-sidecar` now installs everything.** The base package was
+  httpx alone, with the daemon, search and MCP behind extras — so the default
+  install produced a command whose main subcommands died with a raw
+  ModuleNotFoundError. The extras still exist as no-ops so old instructions
+  keep working.
+
+### Added
+- `llm-sidecar service install` — writes a launchd agent or systemd user unit
+  so the daemon starts at login and restarts on failure. `uninstall` and
+  `status` too.
+- `llm-sidecar config key <KEY> --save`, `config budget`, `config show`,
+  `config clear-key`. Setting a key previously needed the daemon running and a
+  curl command.
+- Python 3.14 in CI. pipx picked it by default on a real machine and nothing
+  had ever tested it.
+
+### Fixed
+- `service install` refuses when the executable sits in `~/Documents`,
+  `~/Desktop` or `~/Downloads`. macOS keeps those behind a privacy prompt that
+  background services never receive, so the agent died at startup and
+  KeepAlive restarted it forever. It now explains and points at pipx.
+- The generated launchd plist sets `ThrottleInterval`, so a genuine crash is
+  visible in the log rather than drowned by restarts.
+- `config key` without `--save` exits non-zero and says why, instead of
+  reporting success for something that vanishes when the process exits.
+
 ## [0.4.0] — 2026-08-12
 
 First public release.

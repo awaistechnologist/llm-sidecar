@@ -32,64 +32,77 @@ It is not instant: a grounded answer means a search, two or three page fetches
 and a model call, so expect tens of seconds — more on free models, which are
 slow and sometimes have to be rotated past.
 
-> **Status: early (0.4.0).** The API may still move. Extracted from
+> **Status: early (0.5.0).** The API may still move. Extracted from
 > [Agora](https://github.com/awaistechnologist/agora), where the routing and
 > verification were originally built and proven.
 
 ---
 
-## Sixty seconds
+## Install
 
 ```bash
-pipx install "llm-sidecar[all]"
-llm-sidecar serve            # dashboard at http://localhost:4001
+brew install pipx && pipx ensurepath        # once, if you don't have pipx
+exec $SHELL                                 # pick up the new PATH
+pipx install llm-sidecar
 ```
 
-**Use `pipx`, not `pip`, for the command-line tool.** Most Python installs on
-macOS and Linux are now marked externally-managed (PEP 668), so a bare
-`pip install` into them fails outright. `pipx` puts it in its own environment
-and on your PATH, which is what you want for something you run rather than
-import. If you don't have it: `brew install pipx` or `apt install pipx`.
+That's the whole install — no extras to remember, every door works. On Linux,
+`apt install pipx` instead.
 
-Or clone it, which also gets you the setup scripts:
+> **Why pipx, not pip?** Most Python installs on macOS and Linux are now
+> marked externally-managed (PEP 668), so `pip install` into them fails
+> outright. And `pipx ensurepath` edits your shell config — it cannot change a
+> shell that's already running, which is why the `exec $SHELL` line is there.
+
+Then, optionally, add an OpenRouter key for free cloud models:
+
+```bash
+llm-sidecar config key sk-or-your-key --save
+```
+
+Without one it runs entirely on [Ollama](https://ollama.com). Check what it can
+see:
+
+```bash
+llm-sidecar status
+```
+
+## Run it as a service
+
+A sidecar you have to remember to start isn't one:
+
+```bash
+llm-sidecar service install     # launchd on macOS, systemd on Linux
+```
+
+Starts at login, restarts if it dies, logs to `~/Library/Logs/llm-sidecar.log`.
+`service status` and `service uninstall` do what they say. Or just
+`llm-sidecar serve` in a terminal when you want it.
+
+Now every tool on the machine can reach it:
+
+```bash
+export OPENAI_BASE_URL=http://localhost:4001/v1    # any OpenAI-compatible tool
+export OPENAI_API_KEY=unused                       # the format demands the field
+```
+
+...and the dashboard is at **http://localhost:4001**.
+
+## From source
 
 ```bash
 git clone https://github.com/awaistechnologist/llm-sidecar
-cd llm-sidecar
-./install.sh          # Windows: install.bat
-./run.sh              # Windows: run.bat
+cd llm-sidecar && ./install.sh && ./run.sh          # Windows: install.bat, run.bat
 ```
 
-`install.sh` builds a virtualenv, installs everything, then tells you what it
-can actually reach — whether Ollama is running and how many models you have,
-whether a key is set, whether Docker is available for SearXNG — and prints the
-MCP config with your real paths filled in. Safe to re-run.
+`install.sh` reports what your machine can actually reach — Ollama and how many
+models, whether a key is set, whether Docker is around for SearXNG — and prints
+the MCP config with your real paths filled in.
 
-`run.sh` starts the daemon and opens the dashboard once it's answering. It
-passes arguments through (`./run.sh --port 4100`, `./run.sh --no-ui`) and reads
-a `.env` in the project directory if you keep your key there.
-
-Open the dashboard: a chat window, every capability in a Tools tab, and a live
-view of what is being chosen and what it costs. **No key required.**
-
-### Using it as a library
-
-Inside your own project's virtualenv, `pip` is right — you want it importable,
-not on your PATH:
-
-```bash
-pip install llm-sidecar              # core only: complete, stream, routing
-pip install "llm-sidecar[search]"    # + search and read_url
-pip install "llm-sidecar[daemon]"    # + HTTP server and dashboard
-pip install "llm-sidecar[mcp]"       # + MCP server
-pip install "llm-sidecar[all]"
-```
-
-Python 3.11+. **The core needs only `httpx`** — `pip install llm-sidecar` is a
-seven-package install, because a program that only wants `Sidecar().complete()`
-should not be made to install a web framework.
-
----
+Note that a clone under `~/Documents` or `~/Desktop` **cannot** be run as a
+launchd service: macOS keeps those behind a privacy prompt that background
+processes never receive. `service install` detects this and tells you rather
+than leaving a crash loop behind.
 
 ## What it does
 

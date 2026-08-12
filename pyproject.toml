@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "llm-sidecar"
-version = "0.4.0"
+version = "0.5.0"
 description = "Local sidecar giving any tool grounded, cited, routed AI — Ollama or OpenRouter, no API key required."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -32,21 +32,30 @@ classifiers = [
     "Typing :: Typed",
 ]
 
-# The core library stays deliberately thin — a program that only wants
-# `Sidecar().complete()` should not be made to install a web framework.
+# Everything the `llm-sidecar` command needs, by default.
+#
+# An earlier version kept the core to httpx alone and put the daemon, search
+# and MCP behind extras. That optimised for the library case at the expense of
+# the primary one: `pip install llm-sidecar` produced a command whose main
+# subcommands died with a raw ModuleNotFoundError. Six saved packages is not
+# worth a broken first run.
 dependencies = [
     "httpx>=0.28.0",
+    "ddgs>=9.10.0",
+    "fastapi",
+    "uvicorn[standard]",
+    "pydantic",
+    "mcp>=1.0.0",
 ]
 
 [project.optional-dependencies]
-# Keyless web search.
-search = ["ddgs>=9.10.0"]
-# The OpenAI-compatible HTTP daemon.
-daemon = ["fastapi", "uvicorn[standard]", "pydantic"]
-# The MCP server.
-mcp = ["mcp>=1.0.0"]
-all = ["ddgs>=9.10.0", "fastapi", "uvicorn[standard]", "pydantic", "mcp>=1.0.0"]
-dev = ["pytest", "openai"]
+# Kept so existing instructions and lockfiles keep working. They are now
+# no-ops: everything they used to add is installed by default.
+search = []
+daemon = []
+mcp = []
+all = []
+dev = ["pytest", "openai", "build", "twine"]
 
 [project.scripts]
 llm-sidecar = "llm_sidecar.cli:main"

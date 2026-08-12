@@ -39,7 +39,7 @@ jobs:
           fi
 
       # A release that fails its own tests is worse than no release.
-      - run: pip install --quiet -e ".[all]" pytest
+      - run: pip install --quiet -e ".[dev]"
       - run: pytest -q
 
       - run: pip install --quiet build && python -m build
