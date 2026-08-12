@@ -1823,3 +1823,57 @@ def test_web_calls_are_not_cached(cfg, monkeypatch):
     sc.complete("q", temperature=0.0, web=True)
     sc.complete("q", temperature=0.0, web=True)
     assert len(calls) == 2
+
+
+# ── tier and budget as separate axes ──────────────────────────────────────────
+
+def test_budget_is_its_own_field(api):
+    """`model` can only express one axis, so "powerful" and "best" together
+    was unsayable. A separate field beats inventing compound aliases."""
+    body = api.post("/v1/chat/completions", json={
+        "model": "powerful", "budget": "best",
+        "messages": [{"role": "user", "content": "hi"}],
+    }).json()
+    assert body["model"] == "auto/best"       # fixture names the model after the budget
+
+
+def test_budget_field_is_validated(api):
+    r = api.post("/v1/chat/completions", json={
+        "model": "fast", "budget": "lavish",
+        "messages": [{"role": "user", "content": "hi"}]})
+    assert r.status_code == 400
+
+
+def test_exact_model_ignores_budget(api):
+    """An explicit id is the caller's decision; a budget alongside it would be
+    ambiguous, so the id wins outright."""
+    body = api.post("/v1/chat/completions", json={
+        "model": "ollama/pinned", "budget": "best",
+        "messages": [{"role": "user", "content": "hi"}]}).json()
+    assert body["model"] == "ollama/pinned"
+
+
+def test_auto_means_defaults_and_nothing_else(api):
+    """Documenting the surprise: "auto" is not a mode. It is an unrecognised
+    string, and every unrecognised string means "use both defaults"."""
+    from llm_sidecar import daemon
+
+    app_target = daemon.create_app
+    a = api.post("/v1/chat/completions", json={
+        "model": "auto", "messages": [{"role": "user", "content": "hi"}]}).json()
+    b = api.post("/v1/chat/completions", json={
+        "model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]}).json()
+    assert a["model"] == b["model"] == "auto/free"
+
+
+def test_chat_panel_separates_the_axes():
+    """Regression on the UI, not the API: one dropdown mixing auto, tiers,
+    budgets and model ids made them look like peers when they are not."""
+    from pathlib import Path
+
+    import llm_sidecar
+
+    html = (Path(llm_sidecar.__file__).parent / "ui" / "index.html").read_text()
+    assert 'id="chat-tier"' in html
+    assert 'id="chat-budget"' in html
+    assert 'id="chat-resolved"' in html        # shows what it landed on

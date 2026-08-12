@@ -114,6 +114,10 @@ class VerifyRequest(BaseModel):
 class ChatRequest(BaseModel):
     # Required by the format, but often meaningless here — see resolve_target.
     model: str = "auto"
+    # Non-standard, additive. `model` can only express one axis at a time, so
+    # there was no way to ask for "powerful" and "best" together; a separate
+    # field is clearer than inventing a compound alias.
+    budget: str = ""
     messages: list[Message]
     stream: bool = False
     temperature: float = 0.7
@@ -396,6 +400,10 @@ def create_app(config: Config | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail="`messages` must not be empty.")
 
         target = resolve_target(req.model)
+        if req.budget and "model" not in target:
+            if req.budget not in BUDGET_ALIASES:
+                raise HTTPException(status_code=400, detail=f"Unknown budget {req.budget!r}.")
+            target["budget"] = req.budget
         msgs = [m.model_dump() for m in req.messages]
         created = int(time.time())
         rid = f"chatcmpl-{uuid.uuid4().hex[:24]}"

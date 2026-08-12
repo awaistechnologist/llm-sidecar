@@ -232,106 +232,113 @@ Swagger for the same API is at `/docs`.
 
 ## How a model gets chosen
 
-Four ways to say what you want, checked in this order. The first one that
-applies wins.
+Two questions, always. **Tier** = how capable. **Budget** = what it may cost.
+They are independent, and every capability answers both — most of them by
+taking the default.
+
+### 1 · What each capability asks for
 
 ```
-  your call
-      │
-      ├─ model="ollama/qwen2.5:32b" ─────────────────► that model. Full stop.
-      │     an explicit id, always obeyed, never rotated away from
-      │
-      ├─ tier="fast" and that tier is PINNED ────────► the pinned model
-      │     pinned in config, env, or by clicking F/B/P in the dashboard
-      │
-      ├─ tier + budget ──────────────► resolve, cache for 15 min, reuse
-      │     "fast|balanced|powerful" × "free|cheap|best"
-      │
-      └─ nothing at all ─────────────► default tier + default budget
-            balanced × free, unless you changed them
+  verify · fact_check · summarise · classify        ┐
+  extract · extract_claims · delegate               ├──► tier "fast"
+                                                    ┘    bulk work, cheap
+
+  answer · chat · complete()                        ───► tier "balanced"
+                                                         the default tier
+
+  budget is the configured default ("free") unless you pass one.
 ```
 
-**Resolving** is the interesting case:
+Override per call: `sc.summarise(text)` uses fast; `sc.complete(tier="powerful",
+budget="best")` uses neither default.
+
+### 2 · Tier + budget ──► an actual model
+
+Four checks, first match wins. Same path for every capability above.
 
 ```
-  budget=free
-      │
-      ├─ API key set?  yes ─► free OpenRouter models first, Ollama as backup
-      │                no  ─► Ollama only  (cloud models can't work anyway)
-      │
-      ▼
-  candidate list, best first
-      │
-      ├─ probe 3 at once ── all fail ──► probe the next 3 ──► … 
-      │       │
-      │       └─ one answers "OK" ──► that's your model, cached 15 min
-      │             highest-priority success wins, not whichever
-      │             happened to reply first
-      ▼
-  every candidate failed ─► NoWorkingModel, listing what was tried
+  ① model="ollama/qwen2.5:32b" given?  ──yes──►  use it. never rotated.
+                    │ no
+  ② is this tier pinned?               ──yes──►  use the pin.
+     (config, env, or the F·B·P buttons)
+                    │ no
+  ③ resolved this tier+budget < 15 min ago? ─yes──►  reuse it.
+                    │ no
+  ④ resolve ▼
 ```
 
-Two things this buys you. A model in the catalogue is not a working model —
-free tiers throttle and checkpoints get retired — so nothing is returned
-without a live probe proving it answers *now*. And if a model passes the probe
-but then fails the real call, it's marked dead for the process and the next
-request routes elsewhere.
+### 3 · Resolving
 
-### Tier vs budget
+```
+  budget decides who is eligible
+  ────────────────────────────────────────────────
+   free  + API key   free cloud models, Ollama as backup
+   free  + no key    Ollama only
+   cheap             paid, under $1 per M tokens
+   best              paid, over $5 per M tokens
+                    │
+                    ▼
+        candidates, best first
+                    │
+         probe 3 at once: "Reply OK"
+                    │
+        ┌───────────┴───────────┐
+   one answers              all 3 fail
+        │                        │
+   use it, cache 15 min    probe the next 3 …
+                                 │
+                          nothing left ──► NoWorkingModel
+```
 
-They answer different questions and are often confused:
+A catalogue entry is not a working model — free tiers throttle, checkpoints
+get retired — so nothing is handed back without a live probe. If a model
+passes the probe and then fails the real call, it is marked dead for the
+process and the next request routes elsewhere.
 
-| | question | values |
+### The `model` field over HTTP, and why "auto" is a trap
+
+`model` can only carry **one** axis at a time:
+
+| value | sets | leaves alone |
 |---|---|---|
-| **tier** | how capable does this need to be? | `fast` `balanced` `powerful` |
-| **budget** | what is it allowed to cost? | `free` `cheap` `best` |
+| `fast` `balanced` `powerful` | tier | budget |
+| `free` `cheap` `best` | budget | tier |
+| anything with a `/` | the exact model | overrides both |
+| `auto`, `gpt-4o`, any other string | **nothing** | both stay default |
 
-A tier is a *role*, not a model. `fast` is whatever currently fills the fast
-slot — which on a laptop with no key is a local 3B, and with a key might be a
-free 31B in the cloud. The resolution cache is keyed on **both**, so asking
-for `best` never gets served the model a previous `free` request settled on.
+`auto` is not a mode. It is an unrecognised string, and every unrecognised
+string means "use both defaults" — which is exactly the behaviour that lets a
+tool hardcoding `gpt-4o` get a working model without knowing it.
 
-### `auto`, and the daemon's `model` field
+Because one field can't say "powerful **and** best", the daemon also accepts a
+separate `budget` field, and the dashboard's chat panel has two selectors
+rather than one dropdown mixing all of the above together.
 
-Over HTTP the `model` field is a *request*, not an instruction:
+### Worked examples
 
-```
-"model": "fast" | "balanced" | "powerful"  ─► route by that tier
-"model": "free" | "cheap" | "best"         ─► route by that budget
-"model": "anything/with-a-slash"           ─► used verbatim
-"model": "auto" | "gpt-4o" | anything else ─► ignored; use the defaults
-```
+| you do | tier | budget | lands on |
+|---|---|---|---|
+| chat, defaults | balanced | free | best local model, or a free cloud one |
+| `sc.verify([...])` | fast | free | the fast slot |
+| `{"model":"powerful","budget":"best"}` | powerful | best | a top-tier paid model |
+| `{"model":"ollama/llama3.2:1b"}` | — | — | exactly that, budget ignored |
+| pinned `fast` → `gemma3:27b` | fast | any | the pin, always |
 
-That last line is the point of the daemon. A tool that hardcodes `gpt-4o` gets
-a verified working model and never finds out.
+### One picker, everything
+
+There is no separate chat model. Setting a key, changing the budget, or
+pinning a tier changes **every** capability at once.
 
 ### What answered, and what it cost
 
-Every path reports back, so you never have to guess:
-
 | where | how |
 |---|---|
-| library | `completion.model`, `.usage.cost_usd`, `.cached`, `.latency_s` |
-| HTTP | `model` in the response, plus an `x_sidecar` block |
-| streaming | a final frame carrying usage and cost |
-| dashboard chat | under each reply: `ollama/llama3.2:3b · 0.3s · 37 tok · free` |
-| MCP `delegate` | `model`, `cost_usd`, `local` in the result |
-| CLI | a receipt line on stderr |
-| all of it | appended to the ledger — `llm-sidecar usage` |
-
-### It is the same everywhere
-
-Verification, summarising, classification, extraction and answering all route
-through the same picker. They differ only in which tier they ask for:
-
-```
-  verify / summarise / classify / extract   ─► tier "fast"    (bulk, cheap)
-  answer / chat / anything unspecified      ─► tier "balanced"
-  you, explicitly                           ─► whatever you pass
-```
-
-So setting a key, pinning a tier, or changing the budget changes every
-capability at once — not just chat.
+| dashboard chat | `ollama/llama3.2:3b · 0.3s · 37 tok · free` under each reply |
+| library | `.model` `.usage.cost_usd` `.cached` `.latency_s` |
+| HTTP | `model`, plus an `x_sidecar` block |
+| streaming | a final frame with usage and cost |
+| CLI | a receipt on stderr |
+| all of it | the ledger — `llm-sidecar usage` |
 
 ## Configuration
 
@@ -468,7 +475,7 @@ one directly and never touches the config file.
 ## Tests
 
 ```bash
-pytest                                    # 138 passing, fully offline
+pytest                                    # 143 passing, fully offline
 ```
 
 Fully offline — every network path is stubbed. Live-provider behaviour is

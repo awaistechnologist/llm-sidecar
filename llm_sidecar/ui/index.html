@@ -264,8 +264,33 @@
   <!-- ── Chat ──────────────────────────────────────────────────────────── -->
   <div class="tab" id="tab-chat" hidden>
     <section class="panel">
+      <!-- Two axes, two controls. They used to be one dropdown mixing "auto",
+           tier names, budget names and 400 model ids as if they were peers —
+           which made it impossible to see that tier and budget are separate
+           questions, or to ask for "powerful" and "best" together. -->
+      <div class="row" style="margin:0 0 10px">
+        <span class="muted" style="font-size:12px">How capable</span>
+        <select id="chat-tier" title="Which slot to use. A role, not a model.">
+          <option value="fast">fast</option>
+          <option value="balanced" selected>balanced</option>
+          <option value="powerful">powerful</option>
+        </select>
+
+        <span class="muted" style="font-size:12px">Budget</span>
+        <select id="chat-budget" title="What it's allowed to cost">
+          <option value="free" selected>free</option>
+          <option value="cheap">cheap</option>
+          <option value="best">best</option>
+        </select>
+
+        <span class="muted" style="font-size:12px">or exact model</span>
+        <select id="chat-model" title="Overrides both of the above">
+          <option value="">— let it choose —</option>
+        </select>
+
+        <span class="muted mono" id="chat-resolved" style="font-size:11.5px"></span>
+      </div>
       <div class="row" style="margin:0 0 12px">
-        <select id="chat-model" title="What to route this conversation to"></select>
         <input id="chat-system" class="short" style="flex:1;min-width:220px"
                placeholder="System prompt (optional)">
         <label class="muted" style="display:flex;align-items:center;gap:5px;font-size:12px">
@@ -622,6 +647,17 @@ async function refresh() {
 
 let history = [];   // client-side only; the daemon keeps no session
 
+async function showResolved() {
+  const exact = $("chat-model").value;
+  if (exact) { $("chat-resolved").textContent = "→ " + exact; return; }
+  try {
+    const s = await api("/status");
+    const key = `${$("chat-tier").value}:${$("chat-budget").value}`;
+    const hit = (s.pinned_tiers || {})[$("chat-tier").value] || (s.resolved_tiers || {})[key];
+    $("chat-resolved").textContent = hit ? "→ " + hit : "→ resolved on first message";
+  } catch (_) { $("chat-resolved").textContent = ""; }
+}
+
 async function loadChatModels() {
   try {
     const { data } = await api("/v1/models");
@@ -629,7 +665,8 @@ async function loadChatModels() {
     const keep = sel.value;
     // Aliases first — "let it route" is the point, a specific model is the
     // exception. The rest are grouped so the list is navigable.
-    const aliases = data.filter((m) => m.owned_by === "llm-sidecar");
+    // Only real model ids belong here now. The aliases became the two
+    // selectors beside it, where their meaning is visible.
     const local = data.filter((m) => m.owned_by === "ollama");
     const cloud = data.filter((m) => m.owned_by === "openrouter");
     const group = (label, items) => items.length
@@ -637,10 +674,10 @@ async function loadChatModels() {
         items.map((m) => `<option value="${esc(m.id)}">${esc(m.id)}</option>`).join("") +
         "</optgroup>"
       : "";
-    sel.innerHTML = group("route automatically", aliases)
-                  + group("local", local)
-                  + group("cloud", cloud.slice(0, 120));
-    sel.value = keep || "auto";
+    sel.innerHTML = '<option value="">— let it choose —</option>'
+                  + group("local (Ollama)", local)
+                  + group("cloud (OpenRouter)", cloud.slice(0, 120));
+    sel.value = keep || "";
   } catch (_) { /* the selector is a convenience; chat still works without it */ }
 }
 
@@ -669,7 +706,10 @@ async function sendChat() {
   const text = $("chat-in").value.trim();
   if (!text) return;
 
-  const model = $("chat-model").value || "auto";
+  // An exact model wins; otherwise send the tier and let budget ride along.
+  const exact = $("chat-model").value;
+  const model = exact || $("chat-tier").value;
+  const budget = exact ? "" : $("chat-budget").value;
   const system = $("chat-system").value.trim();
   const streaming = $("chat-stream").checked;
 
@@ -687,7 +727,7 @@ async function sendChat() {
     if (streaming) {
       const res = await raw("/v1/chat/completions", {
         method: "POST",
-        body: JSON.stringify({ model, messages, stream: true, max_tokens: 1200 }),
+        body: JSON.stringify({ model, budget, messages, stream: true, max_tokens: 1200 }),
       });
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
@@ -722,13 +762,14 @@ async function sendChat() {
         : esc(used + " · streamed");
       history.push({ role: "assistant", content: answer });
     } else {
-      const r = await post("/v1/chat/completions", { model, messages, max_tokens: 1200 });
+      const r = await post("/v1/chat/completions", { model, budget, messages, max_tokens: 1200 });
       const answer = r.choices[0].message.content;
       body.textContent = answer;
       receipt.innerHTML = receiptFor(Object.assign({ model: r.model }, r.x_sidecar || {}));
       history.push({ role: "assistant", content: answer });
     }
     loadUsage();
+    showResolved();
   } catch (e) {
     body.textContent = "";
     receipt.innerHTML = `<span class="pill bad">failed</span> ${esc(e.message)}`;
@@ -740,6 +781,10 @@ async function sendChat() {
     $("chat-in").focus();
   }
 }
+
+["chat-tier", "chat-budget", "chat-model"].forEach((id) => {
+  $(id).onchange = showResolved;
+});
 
 $("chat-send").onclick = sendChat;
 $("chat-in").onkeydown = (e) => {
@@ -920,7 +965,7 @@ $("clear-cache").onclick = async () => {
 };
 
 refresh();
-loadChatModels();
+loadChatModels().then(showResolved);
 // Slow poll. The interesting numbers move when *you* do something, and a
 // dashboard that hammers its own daemon would mostly be measuring itself.
 setInterval(refresh, 30000);
