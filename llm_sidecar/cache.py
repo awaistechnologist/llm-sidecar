@@ -32,6 +32,7 @@ logger = logging.getLogger("llm_sidecar.cache")
 
 _COMPLETIONS = CACHE_DIR / "completions"
 _SEARCHES = CACHE_DIR / "searches"
+_PAGES = CACHE_DIR / "pages"
 
 
 def _key(*parts) -> str:
@@ -88,6 +89,7 @@ def put_completion(config: Config, messages: list[dict], model: str,
         return
     k = _key("completion", messages, model, max_tokens, temperature)
     _write(_COMPLETIONS / f"{k}.json", value)
+    _maybe_evict(config)
 
 
 # ── searches ──────────────────────────────────────────────────────────────────
@@ -106,6 +108,39 @@ def put_search(config: Config, query: str, provider: str, max_results: int, news
     _write(_SEARCHES / f"{k}.json", value)
 
 
+_writes_since_evict = 0
+_EVICT_EVERY = 50
+
+
+def _maybe_evict(config: Config) -> None:
+    """Check the size budget every so often rather than on every write —
+    walking the tree costs more than the write it would be guarding."""
+    global _writes_since_evict
+    _writes_since_evict += 1
+    if _writes_since_evict < _EVICT_EVERY:
+        return
+    _writes_since_evict = 0
+    try:
+        evict(config.cache_max_bytes)
+    except OSError:
+        pass
+
+
+# ── fetched pages ─────────────────────────────────────────────────────────────
+
+def get_page(config: Config, url: str, max_chars: int):
+    if not config.cache_enabled:
+        return None
+    return _read(_PAGES / f"{_key('page', url, max_chars)}.json", config.page_cache_ttl_seconds)
+
+
+def put_page(config: Config, url: str, max_chars: int, text: str) -> None:
+    if not config.cache_enabled:
+        return
+    _write(_PAGES / f"{_key('page', url, max_chars)}.json", text)
+    _maybe_evict(config)
+
+
 # ── maintenance ───────────────────────────────────────────────────────────────
 
 def stats() -> dict:
@@ -117,10 +152,12 @@ def stats() -> dict:
 
     c_n, c_b = measure(_COMPLETIONS)
     s_n, s_b = measure(_SEARCHES)
+    p_n, p_b = measure(_PAGES)
     return {
         "completions": c_n,
         "searches": s_n,
-        "bytes": c_b + s_b,
+        "pages": p_n,
+        "bytes": c_b + s_b + p_b,
         "path": str(CACHE_DIR),
     }
 
@@ -128,7 +165,7 @@ def stats() -> dict:
 def clear() -> int:
     """Delete every cached entry. Returns how many files were removed."""
     removed = 0
-    for d in (_COMPLETIONS, _SEARCHES):
+    for d in (_COMPLETIONS, _SEARCHES, _PAGES):
         if not d.exists():
             continue
         for f in d.glob("*.json"):
@@ -138,3 +175,31 @@ def clear() -> int:
             except OSError:
                 pass
     return removed
+
+
+def evict(max_bytes: int) -> int:
+    """Trim the cache to a size budget, oldest first. Returns bytes freed.
+
+    Called opportunistically after writes rather than on a timer — there is no
+    daemon guaranteed to be running, and an unbounded cache in the user's home
+    directory is the kind of thing that is only noticed when a disk fills."""
+    files = []
+    for d in (_COMPLETIONS, _SEARCHES, _PAGES):
+        if d.exists():
+            files.extend(d.glob("*.json"))
+    total = sum(f.stat().st_size for f in files)
+    if total <= max_bytes:
+        return 0
+
+    files.sort(key=lambda f: f.stat().st_mtime)
+    freed = 0
+    for f in files:
+        if total - freed <= max_bytes:
+            break
+        try:
+            freed += f.stat().st_size
+            f.unlink()
+        except OSError:
+            pass
+    logger.debug(f"cache evicted {freed} bytes")
+    return freed

@@ -24,6 +24,12 @@ OLLAMA_PREFIX = "ollama/"
 
 _CACHE_FILE = CACHE_DIR / "openrouter-models.json"
 
+# Process-local memo on top of the disk cache. Re-reading and re-parsing a
+# 400-model JSON file cost ~3ms, and pick_pool() was doing it six times per
+# call for data that cannot change mid-process.
+_memo: tuple[list[ModelInfo], float] | None = None
+_MEMO_TTL = 300.0
+
 # Substrings marking a model as specialised (OCR, vision-only, embeddings,
 # audio, image-gen). These are excluded from general-purpose routing — they
 # make poor text reasoners and waste pretest budget.
@@ -102,10 +108,16 @@ def openrouter_models(config: Config, force_refresh: bool = False) -> list[Model
     On a network failure we return whatever stale cache exists rather than
     raising — a day-old catalogue still routes fine, and failing here would
     take down inference for a reason that has nothing to do with inference."""
+    global _memo
+
+    if not force_refresh and _memo and (time.time() - _memo[1]) < _MEMO_TTL:
+        return _memo[0]
+
     cached = _read_cache()
     if cached and not force_refresh:
         models, fetched_at = cached
         if time.time() - fetched_at < CATALOGUE_TTL_SECONDS:
+            _memo = (models, time.time())
             return models
 
     try:
@@ -114,10 +126,13 @@ def openrouter_models(config: Config, force_refresh: bool = False) -> list[Model
         r.raise_for_status()
         raw = r.json().get("data") or []
         _write_cache(raw)
-        return _parse(raw)
+        models = _parse(raw)
+        _memo = (models, time.time())
+        return models
     except Exception as e:
         if cached:
             logger.warning(f"Catalogue refresh failed ({e}); using stale cache.")
+            _memo = (cached[0], time.time())
             return cached[0]
         logger.warning(f"Catalogue fetch failed and no cache available: {e}")
         return []
@@ -141,3 +156,9 @@ def ollama_models(config: Config) -> list[ModelInfo]:
         ModelInfo(id=f"{OLLAMA_PREFIX}{m['name']}", name=f"{m['name']} (local)")
         for m in keep
     ]
+
+
+def forget() -> None:
+    """Drop the in-process memo. Tests and long-lived daemons want this."""
+    global _memo
+    _memo = None

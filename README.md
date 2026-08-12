@@ -4,7 +4,7 @@ A local capability sidecar for AI tooling. One dependency that any program on
 the machine can lean on for inference, search, and grounded fact-checking —
 without hardcoding a provider, an API key, or a model name.
 
-> **Status: early (0.2.0).** The API may still move. Extracted from
+> **Status: early (0.3.0).** The API may still move. Extracted from
 > [Agora](https://github.com/awaistechnologist/agora), where the routing and
 > verification logic was originally built and proven; Agora will become a
 > consumer rather than the owner.
@@ -82,6 +82,10 @@ sc.fact_check(article_text)        # extract every claim, then verify each
 sc.summarise(long_text, style="bullets", focus="security implications")
 sc.classify(tickets, labels=["bug", "feature", "question"])
 sc.extract(invoice, {"total": "amount with currency", "due_date": "ISO date"})
+
+# Concurrency — batched, or off the event loop
+sc.complete_many([p1, p2, p3])            # results in input order
+await sc.acomplete("...")
 
 # Introspection
 sc.local_models()   # installed Ollama models scored against this machine
@@ -203,6 +207,10 @@ money on request; on `0.0.0.0` that capability belongs to anything on the
 network. `LLM_SIDECAR_TOKEN` adds a shared secret on top, worth setting on a
 shared machine.
 
+The cache is trimmed oldest-first to `cache_max_bytes` (256 MiB by default),
+and the usage ledger rotates at 8 MiB keeping one previous generation —
+neither grows without bound in your home directory.
+
 `config.save()` deliberately **does not write the API key** to disk. Pass
 `include_api_key=True` if you really want it in a plaintext file in `$HOME`.
 
@@ -278,7 +286,7 @@ of the above; `status` reports any reachable instance, not just ours.
 | `ops.py` | `summarise` / `classify` / `extract` with pinned schemas |
 | `daemon.py` | HTTP server, chat-completions format |
 | `mcp_server.py` | MCP tools |
-| `services.py` | SearXNG container lifecycle |
+| `services.py` | Container lifecycle (Docker or Podman) |
 | `deploy/searxng/` | Compose file and settings shipped with the package |
 | `cli.py` | `serve` / `mcp` / `status` / `models` / `usage` / `ask` / `verify` / `sum` / `cache` / `searxng` |
 
@@ -291,7 +299,7 @@ one directly and never touches the config file.
 ## Tests
 
 ```bash
-pytest                                    # 72 passing, fully offline
+pytest                                    # 88 passing, fully offline
 ```
 
 Fully offline — every network path is stubbed. Live-provider behaviour is
@@ -310,11 +318,33 @@ Every call is appended to a usage ledger (`~/.local/share/llm-sidecar/`), so
 `llm-sidecar usage` can tell you what you actually spent and on which models.
 Both are opt-out via `LLM_SIDECAR_NO_CACHE` / `LLM_SIDECAR_NO_LEDGER`.
 
+## Performance
+
+Measured on this machine, not estimated:
+
+| | before | after |
+|---|---|---|
+| Evidence gathering, 8 claims | 11.3s sequential | 2.3s parallel |
+| Model probing, 4 dead candidates ahead | ~10s | 4.0s |
+| Batch of 5 completions | 2.6s | 0.3s |
+| Repeat deterministic completion | 8.4s | cached |
+| Catalogue reads per `pick_pool()` | 6 disk reads | memoised |
+
+Probing runs in waves rather than one candidate at a time: a cold start used
+to pay the full timeout for every stale entry ahead of the live model.
+Priority order still decides *which* model wins — concurrency only changes how
+fast it is found.
+
+Judge batches also run concurrently, which helps against cloud models. It does
+not help much against a single local Ollama model, since those requests queue
+server-side anyway.
+
 ## Not built yet
 
 - Streaming does not consult the cache (it would have to replay stored tokens)
 - No embeddings, vector store, or cross-session memory — different product
-- The daemon is single-process; no request queue or concurrency limit
+- The daemon has no request queue or admission control; concurrency is
+  whatever the ASGI worker allows
 
 ## Known rough edges
 
@@ -324,9 +354,11 @@ Both are opt-out via `LLM_SIDECAR_NO_CACHE` / `LLM_SIDECAR_NO_LEDGER`.
   grade what the search returned. Ambiguous evidence — a namesake, a replica,
   a stale page — produces a wrong verdict. SearXNG helps by covering more
   engines, but it is not a fix.
-- `llm-sidecar searxng` shells out to `docker compose`. There is no rootless
-  or Podman path yet; if you use those, run the compose file yourself and set
-  `SEARXNG_URL`.
+- `llm-sidecar searxng` drives Docker or Podman via their compose plugins. Any
+  other runtime: run the compose file yourself and set `SEARXNG_URL`.
+- `read_url` extracts the main content region and drops `<nav>`/`<header>`/
+  `<footer>`/`<aside>`, which handles most pages. It is still regex-based, not
+  a readability port, so unusual markup degrades to the whole page.
 - The `PREFERRED` model lists in `picker.py` go stale as the catalogue churns.
   Missing entries are skipped silently, so staleness degrades ranking rather
   than breaking anything.

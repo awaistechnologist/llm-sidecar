@@ -23,6 +23,17 @@ logger = logging.getLogger("llm_sidecar.ledger")
 
 DATA_DIR = Path(os.getenv("LLM_SIDECAR_DATA", Path.home() / ".local" / "share" / "llm-sidecar"))
 LEDGER_FILE = DATA_DIR / "usage.jsonl"
+# Rotated once past this, keeping one previous generation. Append-only files
+# are fine until they aren't; a busy daemon writes a line per call forever.
+MAX_LEDGER_BYTES = 8 * 1024 * 1024
+
+
+def _rotate_if_large() -> None:
+    try:
+        if LEDGER_FILE.exists() and LEDGER_FILE.stat().st_size > MAX_LEDGER_BYTES:
+            LEDGER_FILE.replace(LEDGER_FILE.with_suffix(".jsonl.1"))
+    except OSError:
+        pass
 
 
 def record(
@@ -49,6 +60,7 @@ def record(
             "cached": cached,
             "latency_s": round(latency_s, 3),
         }
+        _rotate_if_large()
         with LEDGER_FILE.open("a") as f:
             f.write(json.dumps(entry) + "\n")
     except OSError as e:

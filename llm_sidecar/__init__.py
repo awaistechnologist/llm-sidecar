@@ -19,7 +19,11 @@ Typical use:
 
 from __future__ import annotations
 
+import asyncio
+import logging
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import AsyncIterator, Iterable
 
 from . import (
@@ -45,7 +49,9 @@ from .types import (
     Usage,
 )
 
-__version__ = "0.2.0"
+logger = logging.getLogger("llm_sidecar")
+
+__version__ = "0.3.0"
 
 __all__ = [
     "Sidecar",
@@ -79,13 +85,20 @@ class Sidecar:
         # *then*. Free tiers do not stay working, so entries expire.
         self._resolved: dict[str, tuple[str, float]] = {}
         self._failed: set[str] = set()
+        # The daemon shares one Sidecar across FastAPI's threadpool, so this
+        # state is touched concurrently. Only the bookkeeping is guarded —
+        # the pick itself happens outside the lock, because it makes network
+        # calls and holding a lock across those would serialise every request
+        # behind the slowest cold start.
+        self._lock = threading.Lock()
 
     # ── model resolution ──────────────────────────────────────────────────
 
     @property
     def resolved(self) -> dict[str, str]:
         """What each tier:budget combination has resolved to so far."""
-        return {k: v[0] for k, v in self._resolved.items()}
+        with self._lock:
+            return {k: v[0] for k, v in self._resolved.items()}
 
     def model_for(self, tier: str | None = None, budget: str | None = None) -> str:
         """The model id this tier resolves to — a pin if configured, else a
@@ -97,26 +110,41 @@ class Sidecar:
             return pinned
 
         key = f"{tier}:{budget}"
-        hit = self._resolved.get(key)
-        if hit and (time.time() - hit[1]) < self.config.resolution_ttl_seconds:
-            return hit[0]
+        with self._lock:
+            hit = self._resolved.get(key)
+            if hit and (time.time() - hit[1]) < self.config.resolution_ttl_seconds:
+                return hit[0]
+            excluded = set(self._failed)
 
-        chosen = picker.pick(self.config, budget, exclude=self._failed).model_id
-        self._resolved[key] = (chosen, time.time())
+        chosen = picker.pick(self.config, budget, exclude=excluded).model_id
+
+        with self._lock:
+            # Another thread may have resolved this key while we were probing.
+            # Defer to it rather than overwriting: both models were verified,
+            # and churning the choice would scatter requests across models for
+            # no benefit.
+            existing = self._resolved.get(key)
+            if existing and (time.time() - existing[1]) < self.config.resolution_ttl_seconds:
+                return existing[0]
+            self._resolved[key] = (chosen, time.time())
         return chosen
 
     def pool(self, budget: str | None = None) -> dict[str, Pick]:
         """Three distinct verified models mapped to tiers, for parallel work."""
         budget = budget or self.config.default_budget
-        picks = picker.pick_pool(self.config, budget, exclude=self._failed)
+        with self._lock:
+            excluded = set(self._failed)
+        picks = picker.pick_pool(self.config, budget, exclude=excluded)
         now = time.time()
-        self._resolved.update({f"{t}:{budget}": (p.model_id, now) for t, p in picks.items()})
+        with self._lock:
+            self._resolved.update({f"{t}:{budget}": (p.model_id, now) for t, p in picks.items()})
         return picks
 
     def _rotate(self, model: str) -> None:
         """Mark a model dead for this process so the next pick skips it."""
-        self._failed.add(model)
-        self._resolved = {k: v for k, v in self._resolved.items() if v[0] != model}
+        with self._lock:
+            self._failed.add(model)
+            self._resolved = {k: v for k, v in self._resolved.items() if v[0] != model}
 
     # ── inference ─────────────────────────────────────────────────────────
 
@@ -186,6 +214,41 @@ class Sidecar:
         chosen = model or self.model_for(tier, budget)
         return client.stream(msgs, chosen, self.config,
                              max_tokens=max_tokens, temperature=temperature)
+
+    async def acomplete(self, prompt: str | None = None, **kwargs) -> Completion:
+        """`complete` off the event loop.
+
+        The underlying call is blocking httpx, so this hands it to a thread
+        rather than pretending to be async. That's still the right primitive:
+        it means an async caller can gather() a hundred completions without
+        blocking the loop, which is the case that actually matters."""
+        return await asyncio.to_thread(self.complete, prompt, **kwargs)
+
+    def complete_many(
+        self,
+        prompts: list[str],
+        *,
+        max_workers: int | None = None,
+        **kwargs,
+    ) -> list[Completion]:
+        """Several completions concurrently, results in input order.
+
+        A failed prompt yields a Completion with empty text rather than
+        sinking the batch — with twenty prompts in flight you want the
+        nineteen that worked."""
+        if not prompts:
+            return []
+        workers = max_workers or min(len(prompts), self.config.max_completion_workers)
+
+        def one(p: str) -> Completion:
+            try:
+                return self.complete(p, **kwargs)
+            except Exception as e:
+                logger.warning(f"complete_many: {str(e)[:120]}")
+                return Completion(text="", model="", usage=Usage())
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            return list(pool.map(one, prompts))
 
     def _record(self, done: Completion, operation: str) -> None:
         if self.config.ledger_enabled:

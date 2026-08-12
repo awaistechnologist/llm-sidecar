@@ -36,26 +36,49 @@ CONTAINER = "llm-sidecar-searxng"
 STARTUP_TIMEOUT = 90
 
 
-def _docker() -> list[str]:
-    """The docker compose invocation, or a useful error explaining why not."""
-    if not shutil.which("docker"):
+# Runtimes we know how to drive, in preference order. Podman is included
+# because rootless containers are a reasonable thing to prefer, and its
+# compose subcommand is close enough to Docker's for our four verbs.
+RUNTIMES = (
+    (["docker", "compose"], ["docker", "info"]),
+    (["podman", "compose"], ["podman", "info"]),
+    (["podman-compose"], ["podman", "info"]),
+)
+
+
+def _runtime() -> list[str]:
+    """The compose invocation to use, or an error explaining what's missing."""
+    installed = [(cmd, probe) for cmd, probe in RUNTIMES if shutil.which(cmd[0])]
+    if not installed:
         raise SidecarError(
-            "Docker is not installed. Install Docker Desktop (https://docker.com/products/docker-desktop) "
-            "or run SearXNG yourself and point SEARXNG_URL at it."
+            "No container runtime found. Install Docker Desktop "
+            "(https://docker.com/products/docker-desktop) or Podman — or run SearXNG "
+            "however you like and point SEARXNG_URL at it."
         )
-    probe = subprocess.run(["docker", "info"], capture_output=True, text=True, timeout=20)
-    if probe.returncode != 0:
-        raise SidecarError(
-            "Docker is installed but the daemon isn't running. Start Docker Desktop and try again."
-        )
-    if subprocess.run(["docker", "compose", "version"],
-                      capture_output=True, timeout=20).returncode != 0:
-        raise SidecarError(
-            "`docker compose` is unavailable — you may be on the old standalone docker-compose. "
-            "Upgrade Docker, or run the compose file at "
-            f"{INSTANCE_DIR} yourself."
-        )
-    return ["docker", "compose"]
+
+    not_running = []
+    for cmd, probe in installed:
+        try:
+            if subprocess.run(probe, capture_output=True, timeout=20).returncode != 0:
+                not_running.append(cmd[0])
+                continue
+            # The binary exists and its daemon answers; does compose work?
+            if subprocess.run(cmd + ["version"], capture_output=True, timeout=20).returncode == 0:
+                return cmd
+        except (OSError, subprocess.SubprocessError):
+            continue
+
+    if not_running:
+        name = "Docker Desktop" if "docker" in not_running else not_running[0]
+        raise SidecarError(f"{name} is installed but not running. Start it and try again.")
+    raise SidecarError(
+        f"A container runtime is installed but its compose plugin is not. Upgrade it, or run "
+        f"the compose file at {INSTANCE_DIR} yourself."
+    )
+
+
+# Kept as an alias: the name reads better in the errors above than in callers.
+_docker = _runtime
 
 
 def install(port: int = 8888, force: bool = False) -> Path:
@@ -85,7 +108,7 @@ def install(port: int = 8888, force: bool = False) -> Path:
 
 def _compose(args: list[str], timeout: int = 300) -> subprocess.CompletedProcess:
     return subprocess.run(
-        _docker() + args, cwd=INSTANCE_DIR,
+        _runtime() + args, cwd=INSTANCE_DIR,
         capture_output=True, text=True, timeout=timeout,
     )
 
@@ -180,13 +203,15 @@ def status(config: Config) -> dict:
         "docker": None,
     }
 
-    if not shutil.which("docker"):
+    runtime = next((c[0][0] for c in RUNTIMES if shutil.which(c[0][0])), None)
+    if runtime is None:
         info["docker"] = "not installed"
         return info
+    info["runtime"] = runtime
 
     try:
         r = subprocess.run(
-            ["docker", "ps", "-a", "--filter", f"name={CONTAINER}",
+            [runtime, "ps", "-a", "--filter", f"name={CONTAINER}",
              "--format", "{{.State}}\t{{.Status}}"],
             capture_output=True, text=True, timeout=20,
         )

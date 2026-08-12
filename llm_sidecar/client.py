@@ -31,6 +31,28 @@ logger = logging.getLogger("llm_sidecar.client")
 OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
 OLLAMA_PREFIX = "ollama/"
 RETRYABLE_STATUS = (429, 503)
+# Never sleep longer than this on a provider's say-so. Some hand out
+# Retry-After values in the hundreds of seconds, which is a hang as far as
+# the caller is concerned — better to rotate to another model.
+MAX_RETRY_AFTER = 60.0
+
+
+def _retry_delay(response, fallback: float) -> float:
+    """Respect Retry-After when the provider sends one — it knows when the
+    window reopens and we're guessing. Clamped, and only when it beats our
+    own backoff, so a provider can't shorten a delay we chose deliberately."""
+    if response is None:
+        return fallback
+    raw = response.headers.get("retry-after")
+    if not raw:
+        return fallback
+    try:
+        seconds = float(raw)
+    except ValueError:
+        return fallback   # HTTP-date form; not worth parsing for a retry
+    if seconds <= 0:
+        return fallback
+    return min(max(seconds, fallback), MAX_RETRY_AFTER)
 
 Messages = list[dict]
 
@@ -121,7 +143,7 @@ def complete(
         except httpx.HTTPStatusError as e:
             status = e.response.status_code if e.response is not None else 0
             if status in RETRYABLE_STATUS and attempt < len(delays):
-                wait = delays[attempt]
+                wait = _retry_delay(e.response, delays[attempt])
                 logger.warning(f"{model} → HTTP {status}, retrying in {wait}s")
                 time.sleep(wait)
                 continue
@@ -189,7 +211,7 @@ async def stream(
             except httpx.HTTPStatusError as e:
                 status = e.response.status_code if e.response is not None else 0
                 if status in RETRYABLE_STATUS and attempt < len(delays) and not emitted:
-                    wait = delays[attempt]
+                    wait = _retry_delay(e.response, delays[attempt])
                     logger.warning(f"{model} → HTTP {status}, retrying stream in {wait}s")
                     await asyncio.sleep(wait)
                     continue

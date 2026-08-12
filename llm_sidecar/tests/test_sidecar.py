@@ -10,11 +10,16 @@ live providers, but they don't belong in a suite that has to pass on a plane.
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 
-from llm_sidecar import Sidecar
+from llm_sidecar import Sidecar, catalogue as _catalogue
 from llm_sidecar.config import Config
+
+# Captured before the autouse no-network fixture replaces it, so the test that
+# measures memoisation can exercise the real implementation.
+_REAL_CATALOGUE = _catalogue.openrouter_models
 from llm_sidecar.types import ModelInfo, NoWorkingModel, SidecarError
 
 
@@ -332,22 +337,52 @@ def test_searxng_empty_falls_back_to_ddg(cfg, monkeypatch):
     assert len(search_mod.search("q", cfg)) == 1
 
 
-def test_read_url_strips_markup(cfg, monkeypatch):
-    import httpx
+def test_extract_text_strips_markup():
+    from llm_sidecar.search import extract_text
 
-    from llm_sidecar import search as search_mod
-
-    html_doc = "<html><head><style>b{}</style></head><body><p>Hello</p><script>x()</script><p>World &amp; co</p></body></html>"
-    monkeypatch.setattr(
-        httpx, "get",
-        lambda url, *a, **k: httpx.Response(
-            200, text=html_doc, headers={"content-type": "text/html"},
-            request=httpx.Request("GET", url),
-        ),
-    )
-    text = search_mod.read_url("http://example.com", cfg)
+    doc = ("<html><head><style>b{}</style></head><body>"
+           "<p>Hello</p><script>x()</script><p>World &amp; co</p></body></html>")
+    text = extract_text(doc)
     assert "Hello" in text and "World & co" in text
     assert "<p>" not in text and "x()" not in text
+
+
+def test_extract_text_drops_page_furniture():
+    """Regression: reading a Wikipedia article returned its navigation menu
+    and 170-language switcher before the first sentence of content."""
+    from llm_sidecar.search import extract_text
+
+    doc = ("<body><nav><a>Main page</a><a>Random article</a></nav>"
+           "<header>Site header</header>"
+           "<main><p>The actual content of the article goes here.</p></main>"
+           "<footer>Privacy policy</footer></body>")
+    text = extract_text(doc)
+    assert "actual content" in text
+    for chrome in ("Main page", "Random article", "Site header", "Privacy policy"):
+        assert chrome not in text
+
+
+def test_extract_text_prefers_the_content_region():
+    from llm_sidecar.search import extract_text
+
+    body = "Real article body. " * 40
+    doc = f"<body><div>sidebar junk</div><article><p>{body}</p></article></body>"
+    assert "sidebar junk" not in extract_text(doc)
+
+
+def test_tiny_content_region_is_not_trusted():
+    """A stray <main> must not throw the page away — keeping everything is a
+    far better failure than returning an empty string."""
+    from llm_sidecar.search import extract_text
+
+    doc = "<body><main>x</main><p>" + ("The real content. " * 40) + "</p></body>"
+    assert "The real content" in extract_text(doc)
+
+
+def test_extract_text_truncates():
+    from llm_sidecar.search import extract_text
+
+    assert extract_text("<p>" + "a" * 500 + "</p>", max_chars=100).endswith("[truncated]")
 
 
 def test_read_url_rejects_binary(cfg, monkeypatch):
@@ -355,13 +390,14 @@ def test_read_url_rejects_binary(cfg, monkeypatch):
 
     from llm_sidecar import search as search_mod
 
-    monkeypatch.setattr(
-        httpx, "get",
-        lambda url, *a, **k: httpx.Response(
-            200, content=b"\x00", headers={"content-type": "image/png"},
-            request=httpx.Request("GET", url),
-        ),
-    )
+    class FakeStream:
+        def __init__(self, *a, **k): pass
+        def __enter__(self):
+            return httpx.Response(200, content=b"\x00", headers={"content-type": "image/png"},
+                                  request=httpx.Request("GET", "http://x"))
+        def __exit__(self, *a): return False
+
+    monkeypatch.setattr(httpx, "stream", FakeStream)
     with pytest.raises(SidecarError):
         search_mod.read_url("http://example.com/x.png", cfg)
 
@@ -877,3 +913,190 @@ def test_missing_docker_gives_an_actionable_error(monkeypatch):
     with pytest.raises(SidecarError) as e:
         services._docker()
     assert "SEARXNG_URL" in str(e.value)   # tells you the no-Docker way out
+
+
+# ── efficiency: memoisation, parallel probing, concurrency ────────────────────
+
+def test_catalogue_is_memoised(cfg, monkeypatch):
+    """pick_pool() read and re-parsed a 400-model JSON file six times per call
+    for data that cannot change mid-process."""
+    from llm_sidecar import catalogue
+
+    catalogue.forget()
+    monkeypatch.setattr(catalogue, "openrouter_models", _REAL_CATALOGUE)
+    reads = []
+    monkeypatch.setattr(catalogue, "_read_cache",
+                        lambda: (reads.append(1), ([ModelInfo("a/b", "b")], time.time()))[1])
+    for _ in range(10):
+        catalogue.openrouter_models(cfg)
+    assert len(reads) == 1
+    catalogue.forget()
+
+
+def test_probing_is_parallel_but_keeps_priority_order(cfg, monkeypatch):
+    """Concurrency must speed up the search, not change which model wins."""
+    from llm_sidecar import picker
+
+    order = picker.candidates(cfg, "free")
+    winner = order[2]
+
+    def slow(model_id, config):
+        time.sleep(0.4)
+        return (model_id == winner, None if model_id == winner else "HTTP 429")
+
+    monkeypatch.setattr(picker, "pretest", slow)
+    started = time.time()
+    p = picker.pick(cfg, "free")
+    elapsed = time.time() - started
+
+    assert p.model_id == winner            # highest-priority working model
+    assert elapsed < 1.0                   # one wave, not three sequential probes
+    assert len(p.attempts) == 3            # every probe still recorded
+
+
+def test_concurrent_resolution_picks_once(cfg, monkeypatch):
+    """The daemon shares one Sidecar across a threadpool; twelve simultaneous
+    requests must not each trigger their own pretest round."""
+    import threading
+
+    from llm_sidecar import picker
+    from llm_sidecar.types import Pick
+
+    calls = []
+
+    def slow_pick(config, budget=None, **k):
+        calls.append(1)
+        time.sleep(0.2)
+        return Pick("model/one", "m")
+
+    monkeypatch.setattr(picker, "pick", slow_pick)
+    sc = Sidecar(cfg)
+    seen = []
+    threads = [threading.Thread(target=lambda: seen.append(sc.model_for())) for _ in range(12)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert set(seen) == {"model/one"}      # everyone agrees
+    assert len(sc.resolved) == 1           # and the map didn't get corrupted
+
+
+def test_complete_many_preserves_order_and_survives_failures(cfg, monkeypatch):
+    from llm_sidecar import client, picker
+    from llm_sidecar.types import Completion, Pick
+
+    monkeypatch.setattr(picker, "pick", lambda *a, **k: Pick("m/1", "m"))
+
+    def flaky(messages, model, config, **k):
+        text = messages[-1]["content"]
+        if text == "boom":
+            raise RuntimeError("nope")
+        return Completion(text=text.upper(), model=model)
+
+    monkeypatch.setattr(client, "complete", flaky)
+    out = Sidecar(cfg).complete_many(["a", "boom", "c"], temperature=0.5)
+    assert [c.text for c in out] == ["A", "", "C"]
+
+
+def test_complete_many_empty():
+    assert Sidecar(Config()).complete_many([]) == []
+
+
+# ── retry-after ───────────────────────────────────────────────────────────────
+
+def test_retry_after_is_honoured_and_clamped():
+    import httpx
+
+    from llm_sidecar.client import MAX_RETRY_AFTER, _retry_delay
+
+    def resp(headers):
+        return httpx.Response(429, headers=headers, request=httpx.Request("GET", "http://x"))
+
+    assert _retry_delay(resp({}), 5.0) == 5.0
+    assert _retry_delay(resp({"retry-after": "30"}), 5.0) == 30.0
+    # A provider must not be able to shorten a backoff we chose.
+    assert _retry_delay(resp({"retry-after": "1"}), 5.0) == 5.0
+    # Nor stall us indefinitely.
+    assert _retry_delay(resp({"retry-after": "9999"}), 5.0) == MAX_RETRY_AFTER
+    # HTTP-date form falls back rather than crashing.
+    assert _retry_delay(resp({"retry-after": "Wed, 21 Oct 2026 07:28:00 GMT"}), 5.0) == 5.0
+    assert _retry_delay(None, 5.0) == 5.0
+
+
+# ── cache eviction and page cache ─────────────────────────────────────────────
+
+def test_evict_trims_oldest_first(cfg, tmp_path, monkeypatch):
+    from llm_sidecar import cache
+
+    d = tmp_path / "completions"
+    d.mkdir(parents=True)
+    monkeypatch.setattr(cache, "_COMPLETIONS", d)
+    monkeypatch.setattr(cache, "_SEARCHES", tmp_path / "nope")
+    monkeypatch.setattr(cache, "_PAGES", tmp_path / "nope2")
+
+    for i in range(5):
+        f = d / f"{i}.json"
+        f.write_text("x" * 1000)
+        import os
+        os.utime(f, (1000 + i, 1000 + i))     # oldest first
+
+    freed = cache.evict(max_bytes=2500)
+    assert freed > 0
+    survivors = sorted(f.name for f in d.glob("*.json"))
+    assert "0.json" not in survivors          # oldest went
+    assert "4.json" in survivors              # newest stayed
+
+
+def test_evict_noop_under_budget(cfg, tmp_path, monkeypatch):
+    from llm_sidecar import cache
+
+    monkeypatch.setattr(cache, "_COMPLETIONS", tmp_path / "a")
+    monkeypatch.setattr(cache, "_SEARCHES", tmp_path / "b")
+    monkeypatch.setattr(cache, "_PAGES", tmp_path / "c")
+    assert cache.evict(max_bytes=10_000_000) == 0
+
+
+def test_page_cache_round_trip(cfg, tmp_path, monkeypatch):
+    from llm_sidecar import cache
+
+    monkeypatch.setattr(cache, "_PAGES", tmp_path / "pages")
+    assert cache.get_page(cfg, "http://x", 100) is None
+    cache.put_page(cfg, "http://x", 100, "hello")
+    assert cache.get_page(cfg, "http://x", 100) == "hello"
+    # Different truncation is a different entry — it yields different text.
+    assert cache.get_page(cfg, "http://x", 200) is None
+
+
+# ── ledger rotation ───────────────────────────────────────────────────────────
+
+def test_ledger_rotates_when_large(cfg, monkeypatch):
+    from llm_sidecar import ledger
+
+    monkeypatch.setattr(ledger, "MAX_LEDGER_BYTES", 200)
+    for _ in range(30):
+        ledger.record("m/a", 1, 1, 0.0)
+    assert ledger.LEDGER_FILE.with_suffix(".jsonl.1").exists()
+    assert ledger.LEDGER_FILE.stat().st_size <= 400
+
+
+# ── container runtime selection ───────────────────────────────────────────────
+
+def test_podman_is_accepted_when_docker_is_absent(monkeypatch):
+    from llm_sidecar import services
+
+    monkeypatch.setattr(services.shutil, "which", lambda n: "/usr/bin/podman" if n == "podman" else None)
+    monkeypatch.setattr(services.subprocess, "run",
+                        lambda *a, **k: type("R", (), {"returncode": 0})())
+    assert services._runtime() == ["podman", "compose"]
+
+
+def test_runtime_installed_but_stopped_says_so(monkeypatch):
+    from llm_sidecar import services
+
+    monkeypatch.setattr(services.shutil, "which", lambda n: "/usr/bin/docker" if n == "docker" else None)
+    monkeypatch.setattr(services.subprocess, "run",
+                        lambda *a, **k: type("R", (), {"returncode": 1})())
+    with pytest.raises(SidecarError) as e:
+        services._runtime()
+    assert "not running" in str(e.value)

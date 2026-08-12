@@ -169,16 +169,26 @@ def verify_claims(
 
     evidence_by_claim = gather_all(claims, config)
 
-    verdicts: list[ClaimVerdict] = []
-    for start in range(0, len(claims), BATCH_SIZE):
-        chunk = claims[start:start + BATCH_SIZE]
-        batch = [(c, evidence_by_claim[c]) for c in chunk]
-        try:
-            graded = _judge_batch(batch, sidecar, model)
-        except Exception as e:
-            logger.warning(f"Judge call failed for batch at {start}: {e}")
-            graded = []
+    chunks = [claims[i:i + BATCH_SIZE] for i in range(0, len(claims), BATCH_SIZE)]
 
+    def grade(chunk: list[str]) -> list[dict]:
+        try:
+            return _judge_batch([(c, evidence_by_claim[c]) for c in chunk], sidecar, model)
+        except Exception as e:
+            logger.warning(f"Judge call failed: {e}")
+            return []
+
+    # Batches are independent, so a 20-claim check is four judge calls that can
+    # overlap rather than four that queue. Capped: they all hit one model, and
+    # stampeding a free tier is how you turn four calls into four 429s.
+    if len(chunks) == 1:
+        graded_batches = [grade(chunks[0])]
+    else:
+        with ThreadPoolExecutor(max_workers=min(len(chunks), config.max_judge_workers)) as pool:
+            graded_batches = list(pool.map(grade, chunks))
+
+    verdicts: list[ClaimVerdict] = []
+    for chunk, graded in zip(chunks, graded_batches):
         by_index = {}
         for g in graded:
             try:

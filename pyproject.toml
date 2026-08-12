@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "llm-sidecar"
-version = "0.2.0"
+version = "0.3.0"
 description = "A local capability sidecar for AI tooling: routed inference, web search, and grounded fact-checking."
 readme = "README.md"
 requires-python = ">=3.11"

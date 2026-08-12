@@ -16,6 +16,7 @@ session dependency removed.
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
 
 import httpx
 
@@ -28,6 +29,13 @@ logger = logging.getLogger("llm_sidecar.picker")
 OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
 OLLAMA_PREFIX = "ollama/"
 BUDGETS = ("free", "cheap", "best")
+
+# Candidates are probed in waves rather than one at a time. Sequential walking
+# meant a cold start paid the full timeout for every dead model in front of
+# the live one — with a 15s timeout and four stale entries, over a minute
+# before the first token. A wave costs a few extra tiny calls (free models,
+# ten tokens each) in exchange for bounding that to one timeout.
+PROBE_WAVE = 3
 
 # Curated first choices per budget. Order is preference. Anything not in the
 # live catalogue is skipped silently — the model landscape churns constantly,
@@ -180,17 +188,28 @@ def pick(
                else "Try a different budget or refresh the catalogue.")
         )
 
+    cand = cand[:max_attempts]
     names = {m.id: m.name for m in catalogue.openrouter_models(config)}
     attempts: list[dict] = []
-    for model_id in cand[:max_attempts]:
-        ok, reason = pretest(model_id, config)
-        attempts.append({"id": model_id, "ok": ok, "reason": reason})
-        if ok:
-            if model_id.startswith(OLLAMA_PREFIX):
-                friendly = f"{model_id[len(OLLAMA_PREFIX):]} (local)"
-            else:
-                friendly = names.get(model_id, model_id)
-            return Pick(model_id=model_id, model_name=friendly, attempts=attempts)
+
+    def friendly(model_id: str) -> str:
+        if model_id.startswith(OLLAMA_PREFIX):
+            return f"{model_id[len(OLLAMA_PREFIX):]} (local)"
+        return names.get(model_id, model_id)
+
+    for i in range(0, len(cand), PROBE_WAVE):
+        wave = cand[i:i + PROBE_WAVE]
+        with ThreadPoolExecutor(max_workers=len(wave)) as pool:
+            results = list(pool.map(lambda m: (m, *pretest(m, config)), wave))
+
+        for model_id, ok, reason in results:
+            attempts.append({"id": model_id, "ok": ok, "reason": reason})
+
+        # Priority order within the wave still wins — probing concurrently
+        # must not change *which* model gets chosen, only how fast we find it.
+        for model_id, ok, _ in results:
+            if ok:
+                return Pick(model_id=model_id, model_name=friendly(model_id), attempts=attempts)
 
     raise NoWorkingModel(
         f"Tried {len(attempts)} candidate model(s) for budget {budget!r}; none responded.",

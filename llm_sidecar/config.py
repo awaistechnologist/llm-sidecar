@@ -49,6 +49,11 @@ class Config:
     cache_ttl_seconds: float = 7 * 24 * 60 * 60
     # Searches expire faster: the point of a live search is that it's live.
     search_cache_ttl_seconds: float = 60 * 60
+    # Fetched pages sit between the two: more stable than a search ranking,
+    # less stable than a model's answer to a fixed prompt.
+    page_cache_ttl_seconds: float = 6 * 60 * 60
+    # Size budget for the whole cache directory, trimmed oldest-first.
+    cache_max_bytes: int = 256 * 1024 * 1024
 
     # ── ledger ────────────────────────────────────────────────────────────
     ledger_enabled: bool = True
@@ -58,6 +63,10 @@ class Config:
     # Higher finishes sooner but is likelier to trip a provider's rate limit;
     # DuckDuckGo in particular does not enjoy this.
     max_search_workers: int = 4
+    # Judge batches run concurrently against one model; keep this modest.
+    max_judge_workers: int = 3
+    # Concurrency ceiling for Sidecar.complete_many().
+    max_completion_workers: int = 5
 
     # ── resolution ────────────────────────────────────────────────────────
     # How long a tier keeps its resolved model before being re-verified. The
