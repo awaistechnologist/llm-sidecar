@@ -90,7 +90,25 @@ def _matches_budget(m: ModelInfo, budget: str) -> bool:
     return False
 
 
-def candidates(config: Config, budget: str) -> list[str]:
+def _local_for_tier(models: list, tier: str | None) -> list[str]:
+    """Order local models to match what the tier word actually promises.
+
+    Without this, every tier took the largest installed model — so "fast" on a
+    laptop meant a 19 GB 32B, the slowest thing available. The label said the
+    opposite of what it did.
+
+    balanced and powerful both take the biggest that fits, deliberately: RAM,
+    not preference, is the ceiling locally, and pretending otherwise would
+    just mean two names for one model."""
+    by_size = sorted(models, key=lambda m: m.size_bytes)
+    if tier == "fast":
+        # Smallest first — the point of the tier is latency. Anything tiny
+        # enough to be useless is still better here than a 30-second load.
+        return [m.id for m in by_size]
+    return [m.id for m in reversed(by_size)]
+
+
+def candidates(config: Config, budget: str, tier: str | None = None) -> list[str]:
     """Ordered candidate model ids for a budget.
 
     Sorted by model family first (see PREFERRED_FAMILIES), then by whatever
@@ -119,7 +137,7 @@ def candidates(config: Config, budget: str) -> list[str]:
     if budget != "free":
         return cloud_candidates
 
-    local = [m.id for m in catalogue.ollama_models(config)]
+    local = _local_for_tier(catalogue.ollama_models(config), tier)
     return cloud_candidates + local if config.has_cloud else local + cloud_candidates
 
 
@@ -171,6 +189,7 @@ def pick(
     budget: str | None = None,
     max_attempts: int = 6,
     exclude: set[str] | None = None,
+    tier: str | None = None,
 ) -> Pick:
     """Return the first candidate that passes a live pretest.
 
@@ -182,7 +201,7 @@ def pick(
     if budget not in BUDGETS:
         raise NoWorkingModel(f"Unknown budget: {budget!r}. Expected one of {BUDGETS}.")
 
-    cand = [c for c in candidates(config, budget) if not exclude or c not in exclude]
+    cand = [c for c in candidates(config, budget, tier) if not exclude or c not in exclude]
 
     # Without a key, cloud candidates can only fail — drop them so we don't
     # burn the attempt allowance discovering that one at a time.

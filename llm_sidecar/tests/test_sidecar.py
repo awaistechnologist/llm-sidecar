@@ -2282,3 +2282,62 @@ def test_readme_bash_blocks_survive_a_paste():
         if r.returncode != 0:
             broken.append(f"{block.strip().splitlines()[0]!r}: {r.stderr.strip()}")
     assert not broken, "README bash blocks that break when pasted:\n" + "\n".join(broken)
+
+
+# ── tier must mean something locally ──────────────────────────────────────────
+
+def test_fast_tier_picks_a_small_local_model(cfg, monkeypatch):
+    """Regression: every tier took the first local candidate, and the local
+    list was sorted largest-first — so "fast" selected a 19 GB 32B, the
+    slowest model on the machine. The label promised the opposite of what it
+    delivered, and verify/summarise/classify all ask for the fast tier."""
+    from llm_sidecar import catalogue, picker
+
+    GIB = 1024 ** 3
+    monkeypatch.setattr(catalogue, "openrouter_models", lambda config, force_refresh=False: [])
+    monkeypatch.setattr(catalogue, "ollama_models", lambda config: [
+        ModelInfo("ollama/big", "big", size_bytes=19 * GIB),
+        ModelInfo("ollama/mid", "mid", size_bytes=8 * GIB),
+        ModelInfo("ollama/small", "small", size_bytes=1 * GIB),
+    ])
+    monkeypatch.setattr(picker, "pretest", lambda m, c: (True, None))
+    local = Config(openrouter_api_key=None)
+
+    assert picker.pick(local, "free", tier="fast").model_id == "ollama/small"
+    assert picker.pick(local, "free", tier="powerful").model_id == "ollama/big"
+    assert picker.pick(local, "free", tier="balanced").model_id == "ollama/big"
+
+
+def test_tier_reaches_the_picker_from_the_facade(cfg, monkeypatch):
+    """The facade knew the tier and was dropping it on the floor."""
+    from llm_sidecar import picker
+    from llm_sidecar.types import Pick
+
+    seen = {}
+    monkeypatch.setattr(picker, "pick", lambda config, budget=None, tier=None, **k: (
+        seen.update(tier=tier), Pick("m/1", "m"))[1])
+    Sidecar(cfg).model_for("fast")
+    assert seen["tier"] == "fast"
+
+
+# ── suggesting what to pull ───────────────────────────────────────────────────
+
+def test_suggestions_respect_available_memory():
+    """Answers what the advisor could not: it scores models you have, which is
+    no help when you have none."""
+    from llm_sidecar import hardware
+
+    small = hardware.suggest({"total_ram_gib": 8.0})
+    big = hardware.suggest({"total_ram_gib": 64.0})
+
+    assert small, "an 8 GiB machine should still get some suggestion"
+    assert max(r["size_gib"] for r in small) < max(r["size_gib"] for r in big)
+    assert all(r["verdict"] in ("fits", "tight") for r in small + big)
+    # Best first, so the printed `ollama pull` line is the strongest option.
+    assert big[0]["size_gib"] == max(r["size_gib"] for r in big)
+
+
+def test_suggestions_are_empty_when_memory_is_unknown():
+    from llm_sidecar import hardware
+
+    assert hardware.suggest({}) == []

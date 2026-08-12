@@ -145,6 +145,25 @@ def assess(size_bytes: int, hw: dict | None = None, context_tokens: int = 8000) 
     }
 
 
+def loaded_models(config: Config) -> set[str]:
+    """Models Ollama currently holds in memory.
+
+    Distinct from installed, and the distinction confuses people: `ollama list`
+    shows what is on disk, `ollama ps` what is in RAM, and Ollama unloads a
+    model roughly five minutes after its last use. Every installed model is
+    usable — it just costs a load first, which for a 19 GB model is not
+    nothing."""
+    import httpx
+
+    try:
+        r = httpx.get(f"{config.ollama_host}/api/ps", timeout=2.0)
+        if r.status_code != 200:
+            return set()
+        return {m["name"] for m in (r.json().get("models") or []) if m.get("name")}
+    except Exception:
+        return set()
+
+
 def advise(config: Config, context_tokens: int = 8000) -> list[dict]:
     """Every installed Ollama model, scored against this machine.
 
@@ -159,6 +178,7 @@ def advise(config: Config, context_tokens: int = 8000) -> list[dict]:
         return []
 
     hw = probe()
+    loaded = loaded_models(config)
     rows = []
     for m in raw:
         name = m.get("name")
@@ -172,12 +192,47 @@ def advise(config: Config, context_tokens: int = 8000) -> list[dict]:
             "size_gib": round(size / GIB, 1),
             "parameter_size": (m.get("details") or {}).get("parameter_size", ""),
             "quantization": (m.get("details") or {}).get("quantization_level", ""),
+            # In memory now, so it answers immediately rather than paying a
+            # cold load first.
+            "loaded": name in loaded,
             **a,
         })
 
     rank = {"fits": 0, "tight": 1, "unknown": 2, "too_big": 3}
     rows.sort(key=lambda r: (rank[r["verdict"]], -r["size_gib"]))
     return rows
+
+
+# Ollama models worth suggesting to someone with none, smallest first.
+# Sizes are the default quantisation, in GiB, and approximate.
+#
+# Hardcoded lists rot — the OpenRouter one lost eight of nine entries in
+# months. Ollama tags move far more slowly, but this is still a starting
+# point rather than a ranking, and `ollama pull` will say if a tag has moved.
+SUGGESTIONS = [
+    ("llama3.2:1b", 1.3, "tiny; fine for the fast tier and bulk work"),
+    ("llama3.2:3b", 2.0, "good speed/quality trade for summarising and classifying"),
+    ("qwen2.5-coder:7b", 4.7, "code-focused"),
+    ("llama3.1:8b", 4.9, "solid general-purpose default"),
+    ("gemma3:12b", 8.1, "stronger reasoning, still comfortable"),
+    ("gemma3:27b", 17.0, "strong reasoning; needs real memory"),
+    ("qwen2.5:32b", 19.0, "the best of these if it fits"),
+]
+
+
+def suggest(hw: dict | None = None, context_tokens: int = 8000) -> list[dict]:
+    """Models worth pulling on this machine, best first.
+
+    Answers the question the advisor could not: it scores what you have
+    installed, which is no help when you have nothing."""
+    hw = hw if hw is not None else probe()
+    out = []
+    for name, gib, why in SUGGESTIONS:
+        a = assess(int(gib * GIB), hw, context_tokens)
+        if a["verdict"] in ("fits", "tight"):
+            out.append({"name": name, "size_gib": gib, "why": why, **a})
+    out.sort(key=lambda r: -r["size_gib"])
+    return out
 
 
 def best_local(config: Config, context_tokens: int = 8000) -> ModelInfo | None:

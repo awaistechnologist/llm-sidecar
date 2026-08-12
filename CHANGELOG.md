@@ -2,6 +2,23 @@
 
 Notable changes per release. Dates are release dates.
 
+## [0.5.2] — 2026-08-12
+
+### Fixed
+- **`fast` was picking the largest local model.** The local candidate list is
+  sorted largest-first and every tier took the first entry, so tier was
+  ignored entirely for Ollama — "fast" selected a 19 GB 32B, the slowest model
+  on the machine. Since `verify`, `summarise`, `classify` and `extract` all
+  ask for the fast tier, every bulk operation was running on the biggest model
+  available. Tier now maps to size locally.
+
+### Added
+- `llm-sidecar models --suggest` — what to pull, scored against your memory.
+  The advisor could only rank models you already had, which is no help when
+  you have none; that path now prints suggestions and an `ollama pull` line.
+- `llm-sidecar models` shows which models are loaded in RAM. `ollama list` and
+  `ollama ps` answer different questions and the difference confuses people.
+
 ## [0.5.1] — 2026-08-12
 
 ### Fixed

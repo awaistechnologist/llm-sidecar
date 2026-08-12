@@ -38,6 +38,8 @@ class ModelInfo:
     context_length: int = 0
     prompt_price_per_million: float = 0.0
     completion_price_per_million: float = 0.0
+    # On-disk size, for local models only. Cloud entries leave it at zero.
+    size_bytes: int = 0
 
     @property
     def is_free(self) -> bool:

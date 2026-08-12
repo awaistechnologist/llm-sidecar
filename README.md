@@ -32,7 +32,7 @@ It is not instant: a grounded answer means a search, two or three page fetches
 and a model call, so expect tens of seconds — more on free models, which are
 slow and sometimes have to be rotated past.
 
-> **Status: early (0.5.1).** The API may still move. Extracted from
+> **Status: early (0.5.2).** The API may still move. Extracted from
 > [Agora](https://github.com/awaistechnologist/agora), where the routing and
 > verification were originally built and proven.
 
@@ -316,6 +316,29 @@ Exactly one combination reaches them. **Tier is irrelevant to free-vs-paid.**
 With a key and `budget=free`, the three tiers get three *different* free
 models — pushing parallel work through one free endpoint is how you collect
 429s.
+
+### Tiers on a laptop
+
+With local models, tier maps to size: `fast` takes the smallest installed
+model, `balanced` and `powerful` the largest that fits. Those last two land on
+the same model deliberately — locally your ceiling is memory, and two names
+for one model would be pretending otherwise.
+
+This matters more than it sounds, because `verify`, `summarise`, `classify`
+and `extract` all ask for the fast tier. Bulk work should not be running on
+your biggest model.
+
+**Models are yours to install.** llm-sidecar never downloads weights. It reads
+what Ollama has and scores it against your actual memory:
+
+```bash
+llm-sidecar models              # what you have, and whether it fits
+llm-sidecar models --suggest    # what to pull, given your RAM
+```
+
+`models` also shows which are loaded in memory right now. All installed models
+are usable — "loaded" just means it answers immediately instead of paying a
+cold load first, and Ollama unloads after about five idle minutes.
 
 ### Locking a tier
 

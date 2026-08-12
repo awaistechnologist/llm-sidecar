@@ -165,7 +165,8 @@ def ollama_models(config: Config) -> list[ModelInfo]:
     keep = [m for m in raw if m.get("name") and not is_specialised(m["name"])]
     keep.sort(key=lambda m: m.get("size", 0), reverse=True)
     return [
-        ModelInfo(id=f"{OLLAMA_PREFIX}{m['name']}", name=f"{m['name']} (local)")
+        ModelInfo(id=f"{OLLAMA_PREFIX}{m['name']}", name=f"{m['name']} (local)",
+                  size_bytes=m.get("size", 0))
         for m in keep
     ]
 

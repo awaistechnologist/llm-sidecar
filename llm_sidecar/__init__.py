@@ -53,7 +53,7 @@ from .types import (
 
 logger = logging.getLogger("llm_sidecar")
 
-__version__ = "0.5.1"
+__version__ = "0.5.2"
 
 __all__ = [
     "Sidecar",
@@ -119,7 +119,7 @@ class Sidecar:
                 return hit[0]
             excluded = set(self._failed)
 
-        chosen = picker.pick(self.config, budget, exclude=excluded).model_id
+        chosen = picker.pick(self.config, budget, exclude=excluded, tier=tier).model_id
 
         with self._lock:
             # Another thread may have resolved this key while we were probing.

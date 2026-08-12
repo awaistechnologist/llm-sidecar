@@ -58,15 +58,34 @@ def _models(args) -> int:
     from . import Sidecar
 
     rows = Sidecar().local_models(context_tokens=args.context)
-    if not rows:
-        print("No local models found. Is Ollama running?", file=sys.stderr)
-        return 1
+
+    if not rows or args.suggest:
+        from . import hardware
+
+        if not rows:
+            print("No local models installed.\n")
+        picks = hardware.suggest(context_tokens=args.context)
+        if not picks:
+            print("Could not read this machine's memory, so no suggestions.", file=sys.stderr)
+            return 1
+        hw = hardware.probe()
+        print(f"Your machine ({hw.get('chip') or hw['system']}, "
+              f"{hw.get('total_ram_gib', '?')} GiB) could run:\n")
+        mark = {"fits": "✓", "tight": "~"}
+        for r in picks:
+            print(f"  {mark.get(r['verdict'], '?')} {r['name']:<20} {r['size_gib']:5.1f}G  {r['why']}")
+        print(f"\n  ollama pull {picks[0]['name']}")
+        print("\n✓ comfortable   ~ tight, will be slow under memory pressure")
+        return 0 if rows else 1
     mark = {"fits": "✓", "tight": "~", "too_big": "✗", "unknown": "?"}
-    print(f"{'':2} {'MODEL':<26} {'SIZE':>7} {'NEEDS':>7}  PARAMS  QUANT")
+    print(f"{'':2} {'MODEL':<26} {'SIZE':>7} {'NEEDS':>7}  {'PARAMS':>6}  {'QUANT':<8} STATE")
     for r in rows:
+        state = "loaded" if r.get("loaded") else ""
         print(f"{mark[r['verdict']]:2} {r['name']:<26} {r['size_gib']:6.1f}G {r['needs_gib']:6.1f}G"
-              f"  {r['parameter_size']:>6}  {r['quantization']}")
+              f"  {r['parameter_size']:>6}  {r['quantization']:<8} {state}")
     print(f"\n✓ fits  ~ tight  ✗ too big   (at {args.context:,} token context)")
+    print("All of them are usable. \"loaded\" means it is in memory now and answers")
+    print("immediately; the rest cost a load first. Ollama unloads after ~5 idle minutes.")
     return 0
 
 
@@ -320,6 +339,8 @@ def main(argv: list[str] | None = None) -> int:
 
     mods = sub.add_parser("models", help="local models scored against this machine's memory")
     mods.add_argument("--context", type=int, default=8000, help="context length to budget for")
+    mods.add_argument("--suggest", action="store_true",
+                      help="what to pull, based on your memory, rather than what you have")
 
     use = sub.add_parser("usage", help="what you have spent, by model")
     use.add_argument("--days", type=int, default=30, help="0 for all time")
