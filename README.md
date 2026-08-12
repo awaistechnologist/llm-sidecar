@@ -41,9 +41,15 @@ slow and sometimes have to be rotated past.
 ## Sixty seconds
 
 ```bash
-pip install "llm-sidecar[all]"
+pipx install "llm-sidecar[all]"
 llm-sidecar serve            # dashboard at http://localhost:4001
 ```
+
+**Use `pipx`, not `pip`, for the command-line tool.** Most Python installs on
+macOS and Linux are now marked externally-managed (PEP 668), so a bare
+`pip install` into them fails outright. `pipx` puts it in its own environment
+and on your PATH, which is what you want for something you run rather than
+import. If you don't have it: `brew install pipx` or `apt install pipx`.
 
 Or clone it, which also gets you the setup scripts:
 
@@ -66,16 +72,22 @@ a `.env` in the project directory if you keep your key there.
 Open the dashboard: a chat window, every capability in a Tools tab, and a live
 view of what is being chosen and what it costs. **No key required.**
 
-Python 3.11+. **The core needs only `httpx`** — `llm-sidecar` on its own is a
-seven-package install. The extras add what each door needs:
+### Using it as a library
+
+Inside your own project's virtualenv, `pip` is right — you want it importable,
+not on your PATH:
 
 ```bash
-pip install llm-sidecar              # library only: complete, stream
-pip install "llm-sidecar[search]"    # + web search and read_url
+pip install llm-sidecar              # core only: complete, stream, routing
+pip install "llm-sidecar[search]"    # + search and read_url
 pip install "llm-sidecar[daemon]"    # + HTTP server and dashboard
 pip install "llm-sidecar[mcp]"       # + MCP server
 pip install "llm-sidecar[all]"
 ```
+
+Python 3.11+. **The core needs only `httpx`** — `pip install llm-sidecar` is a
+seven-package install, because a program that only wants `Sidecar().complete()`
+should not be made to install a web framework.
 
 ---
 
