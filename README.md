@@ -27,7 +27,7 @@ It is not instant: a grounded answer means a search, two or three page fetches
 and a model call, so expect tens of seconds — more on free models, which are
 slow and sometimes have to be rotated past.
 
-> **Status: early (0.3.0).** The API may still move. Extracted from
+> **Status: early (0.4.0).** The API may still move. Extracted from
 > [Agora](https://github.com/awaistechnologist/agora), where the routing and
 > verification were originally built and proven.
 
