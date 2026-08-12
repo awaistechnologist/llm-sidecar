@@ -10,6 +10,7 @@ live providers, but they don't belong in a suite that has to pass on a plane.
 from __future__ import annotations
 
 import json
+import re
 import time
 
 import pytest
@@ -2124,3 +2125,45 @@ def test_dashboard_does_not_still_say_pin():
     visible = html[html.index("<body>"):]
     assert "Pins apply" not in visible
     assert "Pin to tier" not in visible
+
+
+# ── the Windows setup scripts ─────────────────────────────────────────────────
+
+def test_install_bat_avoids_delayed_expansion_hazards():
+    """CI caught this: with `enabledelayedexpansion`, cmd treats !...! as a
+    variable reference, so "[!] No Ollama ... https://ollama.com" printed as
+    "[//ollama.com" — everything between the two ! was swallowed."""
+    from pathlib import Path
+
+    bat = (Path(__file__).parent.parent.parent / "install.bat")
+    if not bat.exists():          # not shipped inside the wheel
+        pytest.skip("install.bat is only present in a source checkout")
+
+    for n, line in enumerate(bat.read_text(encoding="utf-8").splitlines(), 1):
+        if line.strip().lower().startswith("echo") and "!" in line:
+            # !VAR! references are fine; a bare ! in prose is not.
+            assert re.fullmatch(r"[^!]*(![A-Za-z_][A-Za-z0-9_]*![^!]*)*", line), \
+                f"install.bat:{n} has an unpaired ! in echoed text: {line.strip()}"
+
+
+def test_install_bat_upgrades_pip_through_python():
+    """pip.exe cannot replace its own running executable on Windows."""
+    from pathlib import Path
+
+    bat = (Path(__file__).parent.parent.parent / "install.bat")
+    if not bat.exists():
+        pytest.skip("install.bat is only present in a source checkout")
+    text = bat.read_text(encoding="utf-8")
+    assert "-m pip install --quiet --upgrade pip" in text
+    assert "pip.exe install --quiet --upgrade" not in text
+
+
+def test_install_bat_exits_zero_on_success():
+    """A failing `where ollama` used to leak its errorlevel, so a perfectly
+    good install ended in exit code 1."""
+    from pathlib import Path
+
+    bat = (Path(__file__).parent.parent.parent / "install.bat")
+    if not bat.exists():
+        pytest.skip("install.bat is only present in a source checkout")
+    assert bat.read_text(encoding="utf-8").rstrip().endswith("exit /b 0")
