@@ -62,3 +62,31 @@ jobs:
           name: dist
           path: dist/
       - uses: pypa/gh-action-pypi-publish@release/v1
+
+  # PyPI is not the only place people look. Without this the Releases page
+  # stays empty while versions quietly appear on PyPI — which is exactly what
+  # happened for 0.5.0 through 0.5.2.
+  release:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Notes for this version, from the changelog
+        id: notes
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          # The section for this version, up to the next "## [" heading.
+          awk -v v="## [$VERSION]" '
+            index($0, v) == 1 {found=1; next}
+            found && /^## \[/ {exit}
+            found {print}
+          ' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then
+            echo "No changelog entry for $VERSION." > notes.md
+          fi
+          echo "Install with: pipx install llm-sidecar" >> notes.md
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file notes.md
