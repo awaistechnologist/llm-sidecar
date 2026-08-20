@@ -32,7 +32,7 @@ It is not instant: a grounded answer means a search, two or three page fetches
 and a model call, so expect tens of seconds — more on free models, which are
 slow and sometimes have to be rotated past.
 
-> **Status: early (0.5.2).** The API may still move. Extracted from
+> **Status: early (0.6.0).** The API may still move. Extracted from
 > [Agora](https://github.com/awaistechnologist/agora), where the routing and
 > verification were originally built and proven.
 
@@ -136,6 +136,7 @@ than leaving a crash loop behind.
 | **`fact_check`** | Pull every claim out of a document and verify each one. |
 | **`complete` / `stream`** | Routed inference. Local, free cloud, or paid — you don't name a model. |
 | **`search` / `read_url`** | Keyless web search, and full page text with the navigation stripped. |
+| **`embed` / `rank`** | Text to vectors, and candidates ordered by similarity. Real semantic matching instead of substring matching. |
 | **`summarise` / `classify` / `extract`** | Bounded structured work at temperature 0, so it's repeatable and cached. |
 | **hardware advisor** | Which of your Ollama models actually fit in RAM, before one crawls in swap. |
 | **usage ledger** | What you spent, on which model, over time. |
@@ -178,6 +179,18 @@ sc.complete("Explain CRDTs")                       # routes itself
 sc.complete(messages=[...])                        # real multi-turn
 sc.complete_many([p1, p2, p3])                     # concurrent, ordered
 await sc.acomplete("...")
+
+# Semantic similarity — vectors, not substring matching
+sc.rank("senior python backend engineer", [cv_a, cv_b, cv_c])   # ordered, scored
+sc.similarity("a golden retriever", "a puppy")                   # 0.86
+sc.embed(["one", "two"])                                         # raw vectors
+
+# Guaranteed-shape output, enforced by the provider rather than parsed and hoped
+sc.complete("Rate this candidate", schema={
+    "type": "object",
+    "properties": {"score": {"type": "integer"}, "reason": {"type": "string"}},
+    "required": ["score", "reason"],
+})
 
 sc.local_models()   # your Ollama models, scored against this machine
 sc.usage(days=30)   # what you spent
@@ -456,6 +469,21 @@ installing — the page is a ~40 KB file in the package either way.
 
 ---
 
+### Browser clients
+
+The daemon sends no CORS headers by default, so a page cannot call it. That is
+deliberate: it is unauthenticated on loopback, so a permissive
+`Access-Control-Allow-Origin` would let any site you happen to visit spend your
+OpenRouter credit and read whatever the daemon can reach.
+
+Name the origins you actually want:
+
+```bash
+export LLM_SIDECAR_CORS_ORIGINS="chrome-extension://your-id,http://localhost:3000"
+```
+
+`*` is accepted and logs a warning. If you use it, set `LLM_SIDECAR_TOKEN` too.
+
 ## Configuration
 
 Precedence: defaults < `~/.config/llm-sidecar/config.json` < environment <
@@ -516,7 +544,14 @@ Measured on an M3 Max, not estimated.
   wrong for anything shared.
 - Parallel verification helps against cloud models, not against a single local
   Ollama model — those queue server-side anyway.
-- No embeddings, vector store, or cross-session memory. Different product.
+- **Embeddings are local-only.** OpenRouter proxies chat completions and
+  lists no embedding models at all, so `embed`/`rank` need
+  `ollama pull nomic-embed-text`. They refuse rather than falling back to a
+  chat model, because chat-model vectors rank wrongly — measured: asked to
+  rank for "python backend developer", one put "C++ embedded engineer" above
+  "5 years Django and FastAPI". Pass `allow_chat_model=True` to override.
+- No vector store or cross-session memory. Storing and retrieving embeddings
+  is a different product; producing them is not.
 - `searxng` drives Docker or Podman compose. Anything else: run the compose
   file yourself and set `SEARXNG_URL`.
 

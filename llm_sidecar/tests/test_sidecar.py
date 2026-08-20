@@ -2341,3 +2341,155 @@ def test_suggestions_are_empty_when_memory_is_unknown():
     from llm_sidecar import hardware
 
     assert hardware.suggest({}) == []
+
+
+# ── embeddings ────────────────────────────────────────────────────────────────
+
+def test_embedding_picker_can_see_embedding_models(cfg, monkeypatch):
+    """Regression: catalogue.ollama_models() drops anything matching "embed"
+    as specialised — right when choosing a chat model, exactly wrong here. The
+    picker could never find nomic-embed-text even with it installed."""
+    from llm_sidecar import catalogue, embed
+
+    monkeypatch.setattr(catalogue, "ollama_models_raw", lambda config: [
+        {"name": "llama3.2:1b"}, {"name": "nomic-embed-text:latest"},
+    ])
+    model, dedicated = embed.pick_model(cfg)
+    assert model == "ollama/nomic-embed-text:latest"
+    assert dedicated is True
+
+
+def test_embedding_refuses_rather_than_returning_bad_vectors(cfg, monkeypatch):
+    """A chat model produces vectors that rank wrongly — measured: asked to
+    rank for "python backend developer", llama3.2:1b put "C++ embedded
+    engineer" above "5 years Django and FastAPI". Silently wrong rankings are
+    worse than an error, since nothing downstream can detect them."""
+    from llm_sidecar import catalogue, embed
+
+    monkeypatch.setattr(catalogue, "ollama_models_raw", lambda config: [{"name": "llama3.2:1b"}])
+    with pytest.raises(SidecarError) as e:
+        embed.pick_model(cfg)
+    assert "ollama pull" in str(e.value)
+
+    model, dedicated = embed.pick_model(cfg, allow_chat_model=True)
+    assert dedicated is False
+
+
+def test_task_prefixes_are_applied_per_family():
+    """nomic ranks badly without them; this is not a detail a consumer should
+    have to know."""
+    from llm_sidecar.embed import prefix_for
+
+    assert prefix_for("ollama/nomic-embed-text:latest", "query") == "search_query: "
+    assert prefix_for("ollama/nomic-embed-text:latest", "document") == "search_document: "
+    assert prefix_for("ollama/mystery-model", "query") == ""
+
+
+def test_rank_embeds_query_and_documents_differently(cfg, monkeypatch):
+    from llm_sidecar import embed
+
+    seen = []
+    monkeypatch.setattr(embed, "pick_model", lambda c, allow_chat_model=False: ("ollama/nomic-embed-text", True))
+
+    def fake(texts, config, model=None, allow_chat_model=False, task="symmetric"):
+        seen.append(task)
+        from llm_sidecar.types import Embedding
+        return Embedding(vectors=[[1.0, 0.0]] * len(texts), model=model or "m")
+
+    monkeypatch.setattr(embed, "embed", fake)
+    embed.rank("q", ["a", "b"], cfg)
+    assert seen == ["query", "document"]
+
+
+def test_cosine_rejects_mismatched_dimensions():
+    """Vectors from different models are not comparable, and a silent wrong
+    number is worse than a refusal."""
+    from llm_sidecar.embed import cosine
+
+    assert cosine([1, 0], [1, 0]) == pytest.approx(1.0)
+    assert cosine([1, 0], [0, 1]) == pytest.approx(0.0)
+    assert cosine([0, 0], [1, 1]) == 0.0          # no NaN
+    with pytest.raises(SidecarError):
+        cosine([1, 0], [1, 0, 0])
+
+
+# ── schema-constrained output ─────────────────────────────────────────────────
+
+def test_schema_is_sent_to_the_provider(cfg, monkeypatch):
+    """Routed through, not invented: both Ollama's shim and OpenRouter enforce
+    response_format at decode time."""
+    import httpx
+
+    from llm_sidecar import client
+
+    sent = {}
+    monkeypatch.setattr(httpx, "post", lambda url, json=None, **k: (
+        sent.update(json or {}),
+        httpx.Response(200, json={"choices": [{"message": {"content": "{}"}}]},
+                       request=httpx.Request("POST", url)))[1])
+
+    client.complete([{"role": "user", "content": "q"}], "m/1", cfg,
+                    response_format={"type": "json_object"})
+    assert sent["response_format"] == {"type": "json_object"}
+
+
+def test_facade_accepts_bare_schema_and_wire_format(cfg, monkeypatch):
+    from llm_sidecar import client, picker
+    from llm_sidecar.types import Completion, Pick
+
+    monkeypatch.setattr(picker, "pick", lambda *a, **k: Pick("m/1", "m"))
+    seen = {}
+    monkeypatch.setattr(client, "complete", lambda msgs, model, config, **k: (
+        seen.update(k), Completion(text="{}", model=model))[1])
+
+    sc = Sidecar(cfg)
+    sc.complete("q", schema={"type": "object"})
+    assert seen["response_format"]["json_schema"]["schema"] == {"type": "object"}
+
+    sc.complete("q", response_format={"type": "json_object"})
+    assert seen["response_format"] == {"type": "json_object"}
+
+
+# ── CORS ──────────────────────────────────────────────────────────────────────
+
+def test_cors_is_closed_by_default(cfg):
+    """The daemon is unauthenticated on loopback. A permissive
+    Access-Control-Allow-Origin would let any page you visit spend your
+    OpenRouter credit."""
+    from fastapi.testclient import TestClient
+
+    from llm_sidecar import daemon
+
+    assert cfg.cors_origins == []
+    c = TestClient(daemon.create_app(cfg))
+    r = c.get("/v1/models", headers={"Origin": "https://evil.example"})
+    assert "access-control-allow-origin" not in {k.lower() for k in r.headers}
+
+
+def test_cors_allows_only_named_origins(cfg):
+    from fastapi.testclient import TestClient
+
+    from llm_sidecar import daemon
+
+    cfg.cors_origins = ["chrome-extension://abc123"]
+    c = TestClient(daemon.create_app(cfg))
+
+    ok = c.get("/v1/models", headers={"Origin": "chrome-extension://abc123"})
+    assert ok.headers.get("access-control-allow-origin") == "chrome-extension://abc123"
+
+    nope = c.get("/v1/models", headers={"Origin": "https://evil.example"})
+    assert "access-control-allow-origin" not in {k.lower() for k in nope.headers}
+
+
+def test_embeddings_endpoint_shape(api, monkeypatch):
+    """OpenAI's response shape, so existing clients work unchanged."""
+    from llm_sidecar import Sidecar
+    from llm_sidecar.types import Embedding
+
+    monkeypatch.setattr(Sidecar, "embed_batch",
+                        lambda self, texts, **k: Embedding(vectors=[[0.1, 0.2]] * len(texts),
+                                                           model="ollama/nomic-embed-text"))
+    body = api.post("/v1/embeddings", json={"input": ["a", "b"]}).json()
+    assert body["object"] == "list"
+    assert [d["index"] for d in body["data"]] == [0, 1]
+    assert body["x_sidecar"]["dimensions"] == 2

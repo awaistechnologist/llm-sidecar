@@ -35,6 +35,9 @@ class Config:
     models: dict[str, str] = field(default_factory=dict)  # {fast,balanced,powerful}
     default_budget: str = "free"  # free | cheap | best
     default_tier: str = "balanced"
+    # Pin an embedding model. Unset means: prefer a purpose-built local one,
+    # then a cloud one, then fall back to a chat model with a warning.
+    embed_model: str | None = None
 
     # ── search ────────────────────────────────────────────────────────────
     # "auto" probes for a local SearXNG and falls back to DuckDuckGo, so a
@@ -86,6 +89,15 @@ class Config:
     # Off by default — on a loopback socket the OS is already the boundary —
     # but worth setting on a shared machine.
     daemon_token: str | None = None
+    # Browser origins allowed to call the daemon.
+    #
+    # Empty by default, and that is a security decision rather than laziness:
+    # the daemon is unauthenticated on loopback, so a permissive
+    # Access-Control-Allow-Origin would let any page you happen to visit spend
+    # your OpenRouter credit and read anything the daemon can reach. Name the
+    # origins you actually want — a Chrome extension is
+    # "chrome-extension://<id>" — or set "*" if you have decided that is fine.
+    cors_origins: list[str] = field(default_factory=list)
     # The dashboard is served by the daemon. Turn it off for a headless
     # deployment, or if you'd rather not have an unauthenticated page on the
     # port at all.
@@ -147,6 +159,11 @@ def _from_env() -> dict:
             pass
     if os.getenv("LLM_SIDECAR_TOKEN"):
         out["daemon_token"] = os.environ["LLM_SIDECAR_TOKEN"]
+    if os.getenv("LLM_SIDECAR_CORS_ORIGINS"):
+        out["cors_origins"] = [o.strip() for o in
+                               os.environ["LLM_SIDECAR_CORS_ORIGINS"].split(",") if o.strip()]
+    if os.getenv("LLM_SIDECAR_EMBED_MODEL"):
+        out["embed_model"] = os.environ["LLM_SIDECAR_EMBED_MODEL"]
     if os.getenv("LLM_SIDECAR_NO_UI"):
         out["ui_enabled"] = False
     if os.getenv("LLM_SIDECAR_NO_CACHE"):

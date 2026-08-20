@@ -42,6 +42,7 @@ from .config import Config
 from .types import (
     Answer,
     ClaimVerdict,
+    Embedding,
     Completion,
     ModelInfo,
     NoWorkingModel,
@@ -53,11 +54,12 @@ from .types import (
 
 logger = logging.getLogger("llm_sidecar")
 
-__version__ = "0.5.2"
+__version__ = "0.6.0"
 
 __all__ = [
     "Sidecar",
     "Answer",
+    "Embedding",
     "Config",
     "Completion",
     "Usage",
@@ -69,6 +71,15 @@ __all__ = [
     "NoWorkingModel",
     "__version__",
 ]
+
+
+def _json_schema(schema: dict) -> dict:
+    """Wrap a bare JSON schema in the response_format envelope both providers
+    expect. Callers pass the schema they care about, not the boilerplate."""
+    return {
+        "type": "json_schema",
+        "json_schema": {"name": "response", "strict": True, "schema": schema},
+    }
 
 
 class Sidecar:
@@ -165,6 +176,8 @@ class Sidecar:
         operation: str = "complete",
         web: bool = False,
         web_results: int = 5,
+        schema: dict | None = None,
+        response_format: dict | None = None,
     ) -> Completion:
         """A completion. Pass `messages` for a real conversation, or
         `prompt`/`system` for the one-shot case. Give a `model` to pin one, or
@@ -174,6 +187,11 @@ class Sidecar:
         verified model and try once more — the client has already exhausted
         its own backoff by then, so the model itself is the problem."""
         msgs = client.build_messages(prompt, system, messages)
+        # `schema` is the convenience form — a bare JSON schema, wrapped here.
+        # `response_format` is the wire form, which the HTTP layer already has
+        # from the client and should not have to unwrap and rebuild.
+        if response_format is None and schema:
+            response_format = _json_schema(schema)
 
         chosen = model or self.model_for(tier, budget)
         # Web-retrieving calls are never cached: the whole reason to pay for
@@ -192,6 +210,7 @@ class Sidecar:
             done = client.complete(
                 msgs, chosen, self.config, max_tokens=max_tokens,
                 temperature=temperature, web=web, web_results=web_results,
+                response_format=response_format,
                 # An explicitly named model is the only one we can't replace.
                 retry_on_throttle=bool(model),
             )
@@ -201,7 +220,8 @@ class Sidecar:
             self._rotate(chosen)
             fallback = self.model_for(tier, budget)
             done = client.complete(msgs, fallback, self.config, max_tokens=max_tokens,
-                                   temperature=temperature, web=web, web_results=web_results)
+                                   temperature=temperature, web=web, web_results=web_results,
+                                   response_format=response_format)
 
         if web:
             self._record(done, operation)
@@ -269,6 +289,7 @@ class Sidecar:
         max_tokens: int = 2000,
         operation: str = "complete",
         attempts: int = 2,
+        schema: dict | None = None,
     ) -> tuple[dict, Completion]:
         """A completion that must parse as a JSON object.
 
@@ -288,6 +309,7 @@ class Sidecar:
             done = self.complete(
                 prompt, system=system, tier=tier, budget=budget, model=model,
                 temperature=0.0, max_tokens=max_tokens, operation=operation,
+                schema=schema,
             )
             try:
                 return parse_json_response(done.text), done
@@ -383,6 +405,32 @@ class Sidecar:
             question, self.config, sidecar=self, query=query, model=model,
             tier=tier, max_sources=max_sources, read_pages=read_pages, via=via,
         )
+
+    def embed(self, texts: list[str] | str, model: str | None = None) -> Embedding:
+        """Vectors for text, from a purpose-built embedding model when one is
+        available. Check `.dedicated` — False means it fell back to a chat
+        model and the vectors are weaker."""
+        from . import embed as embed_mod
+        return embed_mod.embed([texts] if isinstance(texts, str) else texts,
+                               self.config, model=model)
+
+    def embed_batch(self, texts: list[str], model: str | None = None,
+                    task: str = "symmetric") -> Embedding:
+        """embed() with explicit task control, for the HTTP layer."""
+        from . import embed as embed_mod
+        return embed_mod.embed(texts, self.config, model=model, task=task)
+
+    def similarity(self, a: str, b: str, model: str | None = None) -> float:
+        """Cosine similarity between two texts, -1 to 1."""
+        from . import embed as embed_mod
+        r = self.embed([a, b], model=model)
+        return embed_mod.cosine(r.vectors[0], r.vectors[1])
+
+    def rank(self, query: str, candidates: list[str], model: str | None = None,
+             top_k: int | None = None) -> list[dict]:
+        """Candidates ordered by similarity to the query, best first."""
+        from . import embed as embed_mod
+        return embed_mod.rank(query, candidates, self.config, model=model, top_k=top_k)
 
     def verify(self, claims: list[str], model: str | None = None) -> list[ClaimVerdict]:
         return verify_mod.verify_claims(claims, self.config, model=model, sidecar=self)

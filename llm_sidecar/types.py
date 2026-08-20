@@ -68,6 +68,23 @@ class SearchResult:
 
 
 @dataclass
+class Embedding:
+    """Vectors for a batch of texts, in the order they were given.
+
+    `dedicated` is False when no purpose-built embedding model was available
+    and a chat model was used instead. The vectors are still self-consistent
+    and still rank correctly against each other — they are just weaker, and
+    the caller deserves to know which it got."""
+    vectors: list[list[float]]
+    model: str
+    dedicated: bool = True
+
+    @property
+    def dimensions(self) -> int:
+        return len(self.vectors[0]) if self.vectors else 0
+
+
+@dataclass
 class Answer:
     """A question answered from retrieved sources.
 

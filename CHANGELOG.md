@@ -2,6 +2,38 @@
 
 Notable changes per release. Dates are release dates.
 
+## [0.6.0] — 2026-08-20
+
+Four gaps reported by a consumer building against it, all confirmed against
+real code before being acted on.
+
+### Added
+- **Embeddings.** `sc.embed()`, `sc.similarity()`, `sc.rank()`, and
+  `POST /v1/embeddings` in OpenAI's response shape plus `POST /v1/rank`. The
+  motivating case was a suitability score implemented as
+  `text.includes(keyword)` — substring matching is not similarity.
+- **Schema-constrained output.** `sc.complete(schema=...)` and a
+  `response_format` passthrough on the daemon. Routed to the provider, which
+  enforces it at decode time, rather than asking a model nicely and parsing
+  whatever comes back.
+- **CORS**, configurable via `LLM_SIDECAR_CORS_ORIGINS`, closed by default.
+
+### Fixed
+- The embedding picker could never see an embedding model:
+  `catalogue.ollama_models()` filters anything matching "embed" as
+  specialised, which is right for chat routing and exactly wrong here.
+
+### Notes
+- Task prefixes are applied automatically per model family. nomic-embed-text
+  ranks *wrongly* without them — measured, same texts, same model: "C++
+  embedded engineer" 0.460 above "5 years Django and FastAPI" 0.419 without,
+  Django leading at 0.470 with.
+- Embeddings refuse rather than falling back to a chat model, for the same
+  reason: wrong rankings are undetectable downstream.
+- A quality/speed hint already exists and needed no new API — `tier`
+  (fast/balanced/powerful) and `budget` (free/cheap/best) are separate axes,
+  both settable per call and over HTTP.
+
 ## [0.5.2] — 2026-08-12
 
 ### Fixed

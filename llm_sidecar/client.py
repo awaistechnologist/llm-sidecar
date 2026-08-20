@@ -167,6 +167,7 @@ def complete(
     web: bool = False,
     web_results: int = DEFAULT_WEB_RESULTS,
     retry_on_throttle: bool = True,
+    response_format: dict | None = None,
 ) -> Completion:
     """One blocking completion, retrying transient throttling with backoff.
 
@@ -182,6 +183,12 @@ def complete(
         "temperature": temperature,
         "max_tokens": max_tokens,
     }
+    if response_format:
+        # Routed through rather than invented: Ollama's OpenAI-compatible shim
+        # and OpenRouter both accept response_format, including a full
+        # json_schema, and enforce it at decode time. That is strictly better
+        # than asking a model nicely and parsing whatever comes back.
+        payload["response_format"] = response_format
     if web and not is_local:
         payload["plugins"] = [{"id": WEB_PLUGIN_ID, "max_results": web_results}]
     elif web and is_local:

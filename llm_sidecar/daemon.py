@@ -69,6 +69,23 @@ class BudgetRequest(BaseModel):
     budget: str
 
 
+class EmbedRequest(BaseModel):
+    # Named `input` to match the OpenAI embeddings shape, so existing clients
+    # work unchanged. Accepts a string or a list, as that API does.
+    input: str | list[str]
+    model: str = ""
+    # "query" | "document" | "symmetric" — selects the task prefix the model
+    # was trained with. Retrieval means embedding these differently.
+    task: str = "symmetric"
+
+
+class RankRequest(BaseModel):
+    query: str
+    candidates: list[str]
+    model: str = ""
+    top_k: int | None = None
+
+
 class AskRequest(BaseModel):
     question: str
     # Override the search query when the question itself searches badly.
@@ -118,6 +135,9 @@ class ChatRequest(BaseModel):
     # there was no way to ask for "powerful" and "best" together; a separate
     # field is clearer than inventing a compound alias.
     budget: str = ""
+    # Passed straight through to the provider, which enforces it at decode
+    # time. Both Ollama's shim and OpenRouter accept a full json_schema.
+    response_format: dict | None = None
     messages: list[Message]
     stream: bool = False
     temperature: float = 0.7
@@ -130,6 +150,29 @@ def create_app(config: Config | None = None) -> FastAPI:
     cfg = config or config_mod.load()
     sidecar = Sidecar(cfg)
     app = FastAPI(title="llm-sidecar", version=__version__)
+
+    if cfg.cors_origins:
+        # Opt-in only. The daemon is unauthenticated on loopback, so a
+        # permissive Access-Control-Allow-Origin would let any page you happen
+        # to visit spend your OpenRouter credit and read whatever the daemon
+        # can reach. Naming the origins keeps that decision explicit.
+        from fastapi.middleware.cors import CORSMiddleware
+
+        wildcard = "*" in cfg.cors_origins
+        if wildcard:
+            logger.warning(
+                "CORS is open to every origin. Any website you visit can now "
+                "call this daemon. Set LLM_SIDECAR_TOKEN, or name specific "
+                "origins instead."
+            )
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=cfg.cors_origins,
+            allow_methods=["GET", "POST", "OPTIONS"],
+            allow_headers=["*"],
+            # Meaningless with a wildcard origin, and we do not use cookies.
+            allow_credentials=False,
+        )
 
     def require_token(authorization: str | None = Header(default=None)) -> None:
         """Optional shared-secret gate.
@@ -209,6 +252,33 @@ def create_app(config: Config | None = None) -> FastAPI:
         except Exception as e:
             logger.exception("operation failed")
             raise HTTPException(status_code=502, detail=str(e)) from e
+
+    @app.post("/v1/embeddings")
+    def embeddings(req: EmbedRequest, _: None = Depends(require_token)) -> dict:
+        """Embeddings, in the OpenAI response shape so existing clients work.
+
+        Local-only today: OpenRouter proxies chat completions and lists no
+        embedding models at all."""
+        texts = [req.input] if isinstance(req.input, str) else req.input
+        result = _op(sidecar.embed_batch, texts, model=req.model or None, task=req.task)
+        return {
+            "object": "list",
+            "model": result.model,
+            "data": [{"object": "embedding", "index": i, "embedding": v}
+                     for i, v in enumerate(result.vectors)],
+            "usage": {"prompt_tokens": 0, "total_tokens": 0},
+            "x_sidecar": {"dimensions": result.dimensions,
+                          "dedicated_model": result.dedicated},
+        }
+
+    @app.post("/v1/rank")
+    def rank(req: RankRequest, _: None = Depends(require_token)) -> dict:
+        """Order candidates by similarity to a query. Not an OpenAI endpoint —
+        it exists because ranking is what people actually want embeddings for,
+        and doing it correctly needs the query and documents embedded with
+        different task prefixes."""
+        return {"results": _op(sidecar.rank, req.query, req.candidates,
+                               model=req.model or None, top_k=req.top_k)}
 
     @app.post("/v1/answer")
     def op_answer(req: AskRequest, _: None = Depends(require_token)) -> dict:
@@ -470,6 +540,7 @@ def create_app(config: Config | None = None) -> FastAPI:
                 max_tokens=req.max_tokens,
                 temperature=req.temperature,
                 operation="daemon",
+                response_format=req.response_format,
                 **target,
             )
         except NoWorkingModel as e:

@@ -150,6 +150,21 @@ def openrouter_models(config: Config, force_refresh: bool = False) -> list[Model
         return []
 
 
+def ollama_models_raw(config: Config) -> list[dict]:
+    """Every installed Ollama model, unfiltered.
+
+    ollama_models() drops anything matching SPECIALISED_KEYWORDS, which
+    includes "embed" — correct when choosing a chat model, and exactly wrong
+    when choosing an embedding one. The embedding picker needs this view."""
+    try:
+        r = httpx.get(f"{config.ollama_host}/api/tags", timeout=2.0)
+        if r.status_code != 200:
+            return []
+        return r.json().get("models") or []
+    except Exception:
+        return []
+
+
 def ollama_models(config: Config) -> list[ModelInfo]:
     """Locally-installed Ollama models, largest first (bigger local models
     generally reason better, and being installed means they already fit).
