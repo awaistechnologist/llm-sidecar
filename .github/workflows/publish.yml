@@ -45,7 +45,7 @@ jobs:
       - run: pip install --quiet build && python -m build
       - run: pip install --quiet twine && twine check dist/*
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dist
           path: dist/
