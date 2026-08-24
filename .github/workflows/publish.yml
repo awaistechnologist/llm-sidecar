@@ -27,7 +27,12 @@ jobs:
         with:
           python-version: "3.13"
 
+      # Only meaningful for a tag push. A manual dispatch has no version in
+      # its ref, and should still be able to rehearse the build and the
+      # artifact hand-off without being blocked by a comparison that cannot
+      # apply.
       - name: Refuse to publish a tag that disagrees with the package
+        if: github.event_name == 'push'
         run: |
           python -m pip install --quiet tomli
           TAG="${GITHUB_REF_NAME#v}"
@@ -52,6 +57,10 @@ jobs:
 
   publish:
     needs: build
+    # Dispatch is a rehearsal: it proves build, upload and download work
+    # together, which nothing else exercises because artifacts appear only in
+    # this workflow. Actually uploading happens on a tag.
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -68,6 +77,7 @@ jobs:
   # happened for 0.5.0 through 0.5.2.
   release:
     needs: publish
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: write
