@@ -114,8 +114,11 @@ PROFILES: dict[str, Profile] = {p.name: p for p in [
     Profile(
         name="zimage-negprompt", model="z-image-turbo", variant="z-image-turbo",
         steps=8, quantize=8, width=1024, height=768, supports_negative=True,
-        licence="Apache-2.0", commercial_ok=True, gated=False, peak_gib=28.0, measured_s=100.8,
-        note="Z-Image-Turbo, and the only profile with a negative prompt that "
+        licence="Apache-2.0", commercial_ok=True, gated=False, peak_gib=28.0, measured_s=76.5,
+        note="Measured 117s cold and 76s warm at 1024x768, 27.9 GiB peak — the "
+             "one profile where keeping the model resident clearly pays, "
+             "because it is much the biggest thing here to load. "
+             "Z-Image-Turbo, and the only profile with a negative prompt that "
              "actually does something — klein at guidance 1.0 cannot exclude "
              "anything, so work that depends on keeping subjects *out* of an "
              "image has to ask for this by name. Named for what it is rather "
