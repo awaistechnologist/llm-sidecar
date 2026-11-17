@@ -10,6 +10,7 @@ live providers, but they don't belong in a suite that has to pass on a plane.
 from __future__ import annotations
 
 import json
+import pathlib
 import re
 import time
 
@@ -3090,7 +3091,12 @@ def test_claude_binary_found_without_path(monkeypatch, tmp_path):
     monkeypatch.setattr(claude_cli.os.path, "expanduser",
                         lambda p: p.replace("~", str(home), 1))
 
-    assert claude_cli.binary(Config()) == str(exe)
+    # Compared as paths, not strings: the lookup joins a POSIX-style
+    # well-known suffix onto the home directory, so on Windows the result is
+    # a mix of separators that is the same file and a different string.
+    found = claude_cli.binary(Config())
+    assert found is not None
+    assert pathlib.Path(found) == exe
 
     # An explicit path still wins outright, and a bad one is not silently
     # replaced by a guess — that would hide a typo.
