@@ -659,28 +659,36 @@ The first version of this module had a real bug, found by benchmarking
 rather than by reading the code. Driving mflux's Python classes directly —
 which is what every project on this machine did — leaves **MLX's buffer
 cache uncapped**. It grew to 16.2 GiB beside 3.2 GiB of live weights, and
-then:
+generation times became unpredictable.
 
-| 1024x1024, q8, M3 Max | run 1 | run 2 | run 3 | run 4 | cache |
-|---|---|---|---|---|---|
-| uncapped | 23.9s | 22.5s | **77.6s** | — | 16.2 GiB |
-| capped at 8 GiB | 32.8s | 31.8s | 32.9s | 40.3s | 8.0 GiB |
+M3 Max, FLUX.2 klein-4b q8 at 1024x1024, four runs per setting, on a
+machine that started 92% free. Peak allocation during a generation: 11.9 GiB.
 
-The machine started 92% free. A two-run benchmark would have called the
-uncapped version faster and missed the cliff entirely.
+| MLX cache cap | times | spread |
+|---|---|---|
+| uncapped (grew to 16.2 GiB) | 22.5 – 77.6s | **3.4x** |
+| 4 GiB | 35.8 – 48.7s | 1.4x |
+| 8 GiB | 31.8 – 40.3s | 1.3x |
+| **12 GiB** | **23.1 – 23.9s** | **1.03x** |
 
-`cap_mlx_cache` sets the limit to a quarter of usable memory, so it is 8 GiB
-on a 36 GiB Mac and proportionally less on a smaller one.
+The pattern is not "smaller is safer". A cap *below* the working set makes
+MLX release and re-acquire memory mid-generation, and that churn is what
+costs the time — 4 GiB was the slowest setting tested. A cap just above the
+working set holds it without churning and still refuses to balloon.
 
-**Why not mflux's own `MemorySaver`**, which the CLI always installs and
-which also caps the cache: it additionally evicts the text encoder after
-encoding, and FLUX.2 keeps no prompt cache, so the model has to be rebuilt
-for every prompt. Measured, that costs about 20s on *every* image — 43s
-steady against 32s. It trades the cliff for a permanent tax. The cap alone
-buys the stability without it.
+So the cap is sized to the profile's peak plus 15%, not to a fraction of
+RAM, and `retune_mlx_cache` raises it if a generation actually peaks higher
+than the profile estimated — ask for 2048x2048 and it will.
 
-A smaller cache is not better, either: capped at 4 GiB the worst run was
-48.7s against 8 GiB's 32.9s. Starving the allocator costs real time.
+Two things that looked right and were not:
+
+- **Clearing the cache after each image.** That is a zero cap, and the table
+  above shows where zero caps land. Removed.
+- **mflux's own `MemorySaver`**, which the CLI always installs and which does
+  cap the cache. It also evicts the text encoder after encoding, and FLUX.2
+  keeps no prompt cache, so the model is rebuilt per prompt: 43.1 – 65.9s,
+  about 20s of tax on every image. It trades unpredictability for a
+  permanent cost.
 
 ### Quality is why this runs at q8
 

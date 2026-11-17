@@ -3133,35 +3133,57 @@ def test_spent_model_is_rebuilt_not_reused():
     assert _encoder_evicted(None) is False
 
 
-def test_mlx_cache_is_capped_and_scales_to_the_machine(monkeypatch):
-    """The fix for the degradation, and the reason it is a cap rather than
-    mflux's MemorySaver.
+def test_mlx_cache_is_capped_just_above_the_working_set(monkeypatch):
+    """The fix for the image slowdown, and the size is the whole point.
 
-    Unbounded, MLX's buffer cache reached 16.2 GiB beside 3.2 GiB of live
-    weights, and the third 1024x1024 image took 77.6s after two at ~23s.
-    Capping it removed the cliff (31.8-40.3s over four runs) while keeping
-    the weights resident. MemorySaver also caps the cache, but evicts the
-    text encoder too, which forces a rebuild per prompt and cost ~20s on
-    every image instead."""
+    Uncapped, MLX's buffer cache reached 16.2 GiB and 1024x1024 images ran
+    22.5s to 77.6s. Capped, four runs each, with the generation peaking at
+    11.9 GiB: 4 GiB gave 35.8-48.7s, 8 GiB gave 31.8-40.3s, 12 GiB gave
+    23.1-23.9s. A cap below the working set makes MLX release and re-acquire
+    memory mid-generation, and that churn is the cost — so this sizes to the
+    peak, not to a fraction of RAM."""
     from llm_sidecar.images import engine
 
     seen = []
 
     class FakeMx:
         @staticmethod
-        def set_cache_limit(n): seen.append(n)
+        def set_cache_limit(n): seen.append(round(n / 1024 ** 3, 2))
 
     monkeypatch.setitem(__import__("sys").modules, "mlx.core", FakeMx)
 
-    # A quarter of usable memory, so the cap is not itself the problem on a
-    # small machine.
-    assert engine.cap_mlx_cache(36.0) == 8.0      # clamped at the ceiling
-    assert engine.cap_mlx_cache(13.0) == 3.25
-    assert engine.cap_mlx_cache(5.0) == 2.0       # clamped at the floor
-    assert len(seen) == 3
+    # 15% above the peak: comfortably over 11.9, nothing like 16.
+    assert engine.cap_mlx_cache(12.0, usable_gib=33.0) == 13.8
+    assert seen[-1] == 13.8
 
-    # Unknown memory must not mean an unbounded cache by accident — it means
-    # we leave MLX's default alone rather than guessing a number.
-    seen.clear()
-    assert engine.cap_mlx_cache(0) is None
-    assert seen == []
+    # Never more than the machine can actually give, however big the profile.
+    assert engine.cap_mlx_cache(40.0, usable_gib=33.0) == 26.4
+
+    # And never so small that the cap is itself the problem.
+    assert engine.cap_mlx_cache(0.1, usable_gib=33.0) == 2.0
+
+
+def test_cache_cap_follows_an_unexpectedly_large_generation(monkeypatch):
+    """A profile's peak_gib describes its usual size. Ask for 2048x2048 and
+    the real peak is higher, which would leave the cap under the working set
+    — the slow case."""
+    from llm_sidecar.images import engine, profiles as pf
+
+    caps = []
+    monkeypatch.setattr(engine, "cap_mlx_cache", lambda peak, **k: caps.append(peak))
+
+    class FakeMx:
+        @staticmethod
+        def get_peak_memory(): return int(20.0 * 1024 ** 3)
+
+    monkeypatch.setitem(__import__("sys").modules, "mlx.core", FakeMx)
+
+    profile = pf.get("characters-txt2img")          # nominal peak 12 GiB
+    engine.retune_mlx_cache(profile)
+    assert caps == [20.0]
+
+    # A generation that stayed within the estimate changes nothing.
+    caps.clear()
+    FakeMx.get_peak_memory = staticmethod(lambda: int(5.0 * 1024 ** 3))
+    engine.retune_mlx_cache(profile)
+    assert caps == []

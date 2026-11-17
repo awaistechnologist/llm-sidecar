@@ -66,8 +66,13 @@ class Profile:
     commercial_ok: bool = False
     # Weights that need a Hugging Face token and an accepted agreement.
     gated: bool = False
-    # Peak resident memory, GiB, approximate. Checked against this machine
-    # before loading — see engine.guard.
+    # Peak memory for one generation, GiB. Two jobs depend on it: the guard
+    # refuses a profile this machine cannot hold, and engine.cap_mlx_cache
+    # sizes MLX's buffer cache just above it — a cap *below* the working set
+    # is the slow case, so this figure being roughly right matters.
+    #
+    # The klein entries are measured (mx.get_peak_memory at 1024x1024); the
+    # rest are estimates until `llm-sidecar image bench` replaces them.
     peak_gib: float = 16.0
     # Set by `bench`, not guessed.
     measured_s: float | None = None
@@ -102,14 +107,15 @@ PROFILES: dict[str, Profile] = {p.name: p for p in [
     Profile(
         name="characters-txt2img", model="flux2-klein-4b", variant="klein", steps=4,
         quantize=8, guidance=1.0,
-        licence="Apache-2.0", commercial_ok=True, peak_gib=10.0,
+        licence="Apache-2.0", commercial_ok=True, peak_gib=12.0,
+        measured_s=23.4,
         note="Character sheets. Never q4 or q5 — lower quantisations put "
              "fake signatures in the output.",
     ),
     Profile(
         name="characters-consistent", model="flux2-klein-4b", variant="klein-edit", steps=4,
         quantize=8, guidance=1.0, max_refs=3, requires_refs=True,
-        licence="Apache-2.0", commercial_ok=True, peak_gib=10.0,
+        licence="Apache-2.0", commercial_ok=True, peak_gib=12.0,
         note="The same character across frames, from up to 3 reference "
              "images. The one capability no other profile has.",
     ),
@@ -123,7 +129,7 @@ PROFILES: dict[str, Profile] = {p.name: p for p in [
     Profile(
         name="lineart", model="flux2-klein-4b", variant="klein-edit", steps=4, quantize=8,
         guidance=1.0, max_refs=3, requires_refs=True, post="lineart",
-        licence="Apache-2.0", commercial_ok=True, peak_gib=10.0,
+        licence="Apache-2.0", commercial_ok=True, peak_gib=12.0,
         note="Colouring pages: klein edit, then threshold and dilate.",
     ),
     Profile(

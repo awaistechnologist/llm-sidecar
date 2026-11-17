@@ -142,6 +142,11 @@ def headroom(profile: Profile) -> dict:
     }
 
 
+def _fitting_profiles() -> list[str]:
+    from .profiles import PROFILES
+    return [n for n, p in PROFILES.items() if headroom(p)["verdict"] == "fits"]
+
+
 def guard(profile: Profile, allow_tight: bool = True) -> dict:
     """Refuse before loading, rather than swapping for ten minutes.
 
@@ -149,6 +154,17 @@ def guard(profile: Profile, allow_tight: bool = True) -> dict:
     does not fit is not refused, it is loaded and then crawls, which reads as
     a hang rather than an error."""
     h = headroom(profile)
+    if h["verdict"] == "tight" and allow_tight:
+        # Allowed, because "tight" still works and the ceiling is the
+        # machine's, not a preference. Said out loud, because the symptom
+        # otherwise is just an image that took three times as long, and the
+        # cache cap cannot help when the working set alone nearly fills RAM.
+        fits = ", ".join(n for n in _fitting_profiles()) or "none"
+        logger.warning(
+            "profile %s needs ~%.0f GiB and this machine has ~%.0f usable: it "
+            "will run, slowly, and may swap. Profiles that fit comfortably: %s",
+            profile.name, profile.peak_gib, h["usable_gib"] or 0, fits,
+        )
     if h["verdict"] == "too_big" or (h["verdict"] == "tight" and not allow_tight):
         raise OutOfMemory(
             f"Profile {profile.name!r} peaks around {profile.peak_gib} GiB and this "
@@ -161,25 +177,31 @@ def guard(profile: Profile, allow_tight: bool = True) -> dict:
 # ── the one resident model ────────────────────────────────────────────────
 
 
-def cap_mlx_cache(usable_gib: float | None = None) -> float | None:
-    """Bound MLX's buffer cache. The single most important call in here.
+def cap_mlx_cache(peak_gib: float, usable_gib: float | None = None) -> float | None:
+    """Bound MLX's buffer cache, just above the working set.
 
-    MLX keeps freed buffers for reuse and, left alone, will hold as many as
-    it likes. Measured on an M3 Max generating 1024x1024: it reached 16.2
-    GiB beside 3.2 GiB of live weights, and the third image took 77.6s after
-    two at ~23s. The machine had started 92% free. Capping the cache removed
-    the cliff outright — four runs at 31.8-40.3s with the weights still
-    resident.
+    The single most important call in here, and the size matters more than
+    the fact of capping. MLX keeps freed buffers for reuse; left alone it
+    grew to 16.2 GiB beside 3.2 GiB of live weights, and 1024x1024 images
+    ran anywhere from 22.5s to 77.6s on a machine that started 92% free.
 
-    Why not mflux's own MemorySaver, which also caps the cache: it evicts
-    the text encoder after encoding, and Flux2 keeps no prompt cache, so the
-    model has to be rebuilt for every prompt. Measured, that cost about 20s
-    on *every* image (43s steady against 32s) — it trades the cliff for a
-    permanent tax. The cap alone buys the stability without the tax.
+    But capping too tightly is its own tax. Measured on an M3 Max, four runs
+    each, where the generation's peak allocation was 11.9 GiB:
 
-    Scaled to the machine rather than fixed: a quarter of usable memory,
-    which is 8 GiB on a 36 GiB Mac and proportionally less on a smaller one,
-    where an 8 GiB cache would be the whole problem."""
+        uncapped   22.5 - 77.6s    unpredictable
+        4 GiB      35.8 - 48.7s
+        8 GiB      31.8 - 40.3s
+        12 GiB     23.1 - 23.9s    fastest and steadiest
+
+    The pattern is not "smaller is safer". A cap below the peak working set
+    forces MLX to release and re-acquire memory in the middle of a
+    generation, and that churn is what costs the time. A cap just above it
+    holds the working set without churning, and still refuses to balloon.
+
+    So: size the cap to the profile's peak, not to a fraction of RAM. The
+    headroom is 15%, and `observed` lets a caller feed back what a real
+    generation actually peaked at, since a larger image needs more than the
+    profile's nominal figure."""
     try:
         import mlx.core as mx
     except ImportError:
@@ -188,13 +210,29 @@ def cap_mlx_cache(usable_gib: float | None = None) -> float | None:
     if usable_gib is None:
         from .. import hardware
         usable_gib = hardware.usable_gib()
-    if not usable_gib:
-        return None
 
-    limit_gib = max(2.0, min(8.0, usable_gib * 0.25))
-    mx.set_cache_limit(int(limit_gib * GIB))
-    logger.debug("MLX cache capped at %.1f GiB", limit_gib)
-    return limit_gib
+    limit = max(peak_gib * 1.15, 2.0)
+    if usable_gib:
+        # Never promise the allocator more than the machine can give.
+        limit = min(limit, usable_gib * 0.8)
+    mx.set_cache_limit(int(limit * GIB))
+    logger.debug("MLX cache capped at %.1f GiB (peak %.1f)", limit, peak_gib)
+    return round(limit, 1)
+
+
+def retune_mlx_cache(profile: Profile) -> None:
+    """Raise the cap if a generation actually peaked above the estimate.
+
+    A profile's peak_gib is a figure for its usual size; ask for 2048x2048
+    and the real peak is higher. Left alone the cap would then sit under the
+    working set, which the numbers above show is the slow case."""
+    try:
+        import mlx.core as mx
+        observed = mx.get_peak_memory() / GIB
+    except Exception:
+        return
+    if observed > profile.peak_gib:
+        cap_mlx_cache(observed)
 
 
 def _encoder_evicted(model) -> bool:
@@ -277,7 +315,7 @@ class _Resident:
             if profile.quantize is not None:
                 kwargs["quantize"] = profile.quantize
             self.model = cls(**kwargs)
-            cap_mlx_cache()
+            cap_mlx_cache(profile.peak_gib)
             self.load_s = round(time.time() - t, 2)
             self.key = key
             self.loaded_at = self.last_used = time.time()
@@ -399,6 +437,7 @@ def run(profile: Profile, *, prompt: str, negative: str | None, seed: int,
         out.parent.mkdir(parents=True, exist_ok=True)
         image.save(path=str(out))
         RESIDENT.last_used = time.time()
+        retune_mlx_cache(profile)
 
     if profile.post == "lineart":
         _lineart(out)
