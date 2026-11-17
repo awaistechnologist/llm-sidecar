@@ -330,6 +330,108 @@ def sidecar_status() -> dict:
         return {"error": f"Status failed: {e}"}
 
 
+# ── images ────────────────────────────────────────────────────────────────
+#
+# These let Claude Code make images from *any* repo on this machine without
+# that repo carrying mflux, a model choice, or generation code of its own.
+
+
+@mcp.tool()
+def list_image_profiles() -> dict:
+    """
+    The image profiles available, with licence, memory peak and reference
+    limit for each.
+
+    Call this before generate_image if you are unsure which to use. Profiles
+    are named for intent (draft, fast, cinematic, characters-consistent)
+    rather than for a model, so you never need to know a model id.
+    """
+    try:
+        from .images import profiles as p
+        from .images import engine
+        return {"available": engine.available(), "mflux": engine.mflux_version(),
+                "profiles": p.describe()}
+    except Exception as e:
+        return {"error": f"Could not list profiles: {e}"}
+
+
+@mcp.tool()
+def generate_image(prompt: str, out_dir: str, profile: str = "draft",
+                   stem: str = "image", negative: str = "",
+                   width: int = 0, height: int = 0, seed: int = 0,
+                   project: str = "", commercial: bool = True) -> dict:
+    """
+    Generate an image locally and write it to out_dir, with a manifest
+    recording exactly how it was made.
+
+    Takes 20s to several minutes depending on profile. Generation is
+    serialised across this whole machine, so a second call waits rather than
+    competing for memory.
+
+    `commercial` defaults to true, which REFUSES non-commercial profiles
+    (cinematic, kontext-edit). Pass false only if the output genuinely is not
+    commercial. Leave width/height/seed at 0 for the profile's defaults and
+    a random seed.
+    """
+    try:
+        from . import images as im
+        r = im.generate(im.ImageRequest(
+            prompt=prompt, profile=profile, out_dir=out_dir, stem=stem,
+            negative=negative or None,
+            width=width or None, height=height or None, seed=seed or None,
+            project=project, commercial=commercial,
+        ))
+        return {"path": r.path, "manifest": r.manifest_path, "seed": r.seed,
+                "profile": r.profile, "model": r.model, "seconds": r.seconds,
+                "warm_model": r.warm, "skipped": r.skipped}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+def edit_with_references(prompt: str, refs: list, out_dir: str,
+                         stem: str = "image", profile: str = "characters-consistent",
+                         seed: int = 0, project: str = "") -> dict:
+    """
+    Generate an image that keeps the same character or object as the
+    reference images — the same face, clothes and colours rather than a fresh
+    interpretation of a description.
+
+    `refs` is up to 3 image paths. This is the only way to get consistency
+    across frames; describing a character in words produces a different one
+    every time.
+    """
+    try:
+        from . import images as im
+        r = im.generate(im.ImageRequest(
+            prompt=prompt, profile=profile, refs=list(refs), out_dir=out_dir,
+            stem=stem, seed=seed or None, project=project,
+        ))
+        return {"path": r.path, "manifest": r.manifest_path, "seed": r.seed,
+                "refs": len(refs), "seconds": r.seconds, "warm_model": r.warm}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+def upscale_image(image_path: str, out_dir: str, resolution: int = 2048,
+                  stem: str = "upscaled", project: str = "") -> dict:
+    """
+    Upscale an existing image with SeedVR2. `resolution` is the target long
+    edge in pixels. Roughly 130s to 2400px on an M3 Max.
+    """
+    try:
+        from . import images as im
+        r = im.generate(im.ImageRequest(
+            prompt="", profile="upscale", refs=[image_path], out_dir=out_dir,
+            stem=stem, resolution=resolution, project=project,
+        ))
+        return {"path": r.path, "manifest": r.manifest_path,
+                "seconds": r.seconds, "warm_model": r.warm}
+    except Exception as e:
+        return {"error": str(e)}
+
+
 def main() -> None:
     mcp.run(transport="stdio")
 

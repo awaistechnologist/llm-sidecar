@@ -2872,3 +2872,201 @@ def test_claude_always_sends_a_system_prompt(cc):
                           "claude/sonnet", _cc_cfg())
     argv = cc["calls"][1]["argv"]
     assert argv[argv.index("--system-prompt") + 1] == "Be a pirate."
+
+
+# ── images ────────────────────────────────────────────────────────────────
+#
+# mflux is an Apple-Silicon-only optional extra, so every test here runs
+# without it: the engine is the seam, and what matters above it is the
+# licence gate, the naming rule, the digest and the memory guard. Those are
+# the parts that were wrong, or absent, in five separate repos.
+
+
+def test_image_profiles_are_self_consistent():
+    from llm_sidecar.images import profiles as pf
+
+    for name, p in pf.PROFILES.items():
+        assert p.name == name
+        assert p.variant in __import__(
+            "llm_sidecar.images.engine", fromlist=["VARIANTS"]).VARIANTS
+        # A profile that edits needs somewhere to put the references.
+        if p.requires_refs:
+            assert p.max_refs >= 1, name
+        # q4/q5 put fake signatures in klein output — measured in the
+        # inspiring-kids test, and the reason quantize is pinned per profile.
+        if p.quantize is not None:
+            assert p.quantize >= 8, name
+
+
+def test_non_commercial_profile_refused_by_default():
+    """The default is `commercial=True`, so a caller who never thought about
+    licensing is refused rather than quietly handed FLUX.1-dev output."""
+    from llm_sidecar.images import profiles as pf
+
+    with pytest.raises(pf.LicenceError) as e:
+        pf.check(pf.get("cinematic"), commercial=True, refs=[])
+    # The message has to name the alternatives, or it just blocks the user.
+    assert "draft" in str(e.value)
+
+    pf.check(pf.get("cinematic"), commercial=False, refs=[])   # allowed
+    pf.check(pf.get("draft"), commercial=True, refs=[])        # always fine
+
+
+def test_edit_profile_requires_references():
+    from llm_sidecar.images import profiles as pf
+
+    with pytest.raises(pf.ProfileError):
+        pf.check(pf.get("characters-consistent"), commercial=True, refs=[])
+    with pytest.raises(pf.ProfileError):
+        pf.check(pf.get("characters-consistent"), commercial=True,
+                 refs=["a", "b", "c", "d"])        # max_refs is 3
+    pf.check(pf.get("characters-consistent"), commercial=True, refs=["a", "b"])
+
+
+def test_image_never_overwrites(tmp_path):
+    """mflux refuses to overwrite and writes alongside instead, which three
+    repos each worked around differently. The service owns naming."""
+    from llm_sidecar.images import manifest
+
+    first = manifest.output_path(tmp_path, "scene", 7)
+    assert first.name == "scene_7.png"
+    first.write_bytes(b"x")
+
+    second = manifest.output_path(tmp_path, "scene", 7)
+    assert second.name == "scene_7-2.png"
+    assert first.exists() and first.read_bytes() == b"x"
+
+
+def test_digest_tracks_content_not_paths(tmp_path):
+    """Renaming a reference must not invalidate an image; editing one must."""
+    from llm_sidecar.images import manifest
+
+    ref = tmp_path / "hero.png"
+    ref.write_bytes(b"original")
+    base = dict(profile="characters-consistent", model="flux2-klein-4b",
+                prompt="p", negative=None, steps=4, width=512, height=512, seed=1)
+
+    d1 = manifest.digest(**base, ref_hashes=[manifest.sha256_file(ref)])
+
+    renamed = tmp_path / "protagonist.png"
+    ref.rename(renamed)
+    assert manifest.digest(**base, ref_hashes=[manifest.sha256_file(renamed)]) == d1
+
+    renamed.write_bytes(b"edited")
+    assert manifest.digest(**base, ref_hashes=[manifest.sha256_file(renamed)]) != d1
+
+    # And the prompt still matters.
+    assert manifest.digest(**{**base, "prompt": "other"}, ref_hashes=[]) != d1
+
+
+def test_manifest_round_trip_and_currency(tmp_path):
+    from llm_sidecar.images import manifest, profiles as pf
+
+    img = tmp_path / "scene_1.png"
+    img.write_bytes(b"png")
+    payload = manifest.build(
+        request={"prompt": "p"}, profile=pf.get("draft"), digest_value="abc123",
+        seed=1, ref_hashes=[], timing={"generate_s": 9.5, "warm": True},
+        mflux_version="0.24.0",
+    )
+    path = manifest.write(img, payload)
+    assert path.name == "scene_1.png.json"
+    assert manifest.is_current(img, "abc123")
+    assert not manifest.is_current(img, "different")
+    # Licence travels with the image, so provenance survives a copy.
+    assert manifest.read(img)["licence"] == "Apache-2.0"
+
+
+def test_image_memory_guard_refuses_rather_than_swaps(monkeypatch):
+    """Ollama's lesson, applied to diffusion: a model that does not fit is
+    not refused by the runtime, it is loaded and then crawls — which reads as
+    a hang rather than an error."""
+    from llm_sidecar import hardware
+    from llm_sidecar.images import engine, profiles as pf
+
+    monkeypatch.setattr(hardware, "usable_gib", lambda hw=None: 8.0)
+    with pytest.raises(engine.OutOfMemory) as e:
+        engine.guard(pf.get("draft"))            # needs ~31 GiB
+    assert "swap" in str(e.value).lower()
+
+    monkeypatch.setattr(hardware, "usable_gib", lambda hw=None: 40.0)
+    assert engine.guard(pf.get("draft"))["verdict"] == "fits"
+
+
+def test_images_import_without_mflux(monkeypatch):
+    """The package must install, import and test on Linux and Windows, where
+    mflux cannot be installed at all."""
+    import builtins
+
+    from llm_sidecar.images import engine
+
+    real_import = builtins.__import__
+
+    def no_mflux(name, *a, **k):
+        if name == "mflux" or name.startswith("mflux."):
+            raise ImportError("no mflux here")
+        return real_import(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", no_mflux)
+    assert engine.available() is False
+    with pytest.raises(engine.ImageUnavailable) as e:
+        engine.require()
+    assert "llm-sidecar[images]" in str(e.value)
+
+
+def test_image_endpoints_report_unavailable_not_500(api, monkeypatch):
+    """A Linux caller should get a clear 501 telling them why, not a stack
+    trace from an import error."""
+    from llm_sidecar import images as im
+
+    def unavailable(*a, **k):
+        raise im.ImageUnavailable('pip install "llm-sidecar[images]"')
+
+    monkeypatch.setattr(im, "generate", unavailable)
+    r = api.post("/v1/images/generate", json={"prompt": "x", "out_dir": "/tmp"})
+    assert r.status_code == 501
+    assert "images" in r.json()["detail"]
+
+
+def test_image_licence_refusal_is_a_400(api, monkeypatch):
+    from llm_sidecar import images as im
+
+    def refuse(*a, **k):
+        raise im.LicenceError("non-commercial")
+
+    monkeypatch.setattr(im, "generate", refuse)
+    r = api.post("/v1/images/generate",
+                 json={"prompt": "x", "out_dir": "/tmp", "profile": "cinematic"})
+    assert r.status_code == 400
+
+
+def test_image_profiles_endpoint(api):
+    rows = {p["name"]: p for p in api.get("/v1/images/profiles").json()["profiles"]}
+    assert rows["characters-consistent"]["max_refs"] == 3
+    assert rows["cinematic"]["commercial_ok"] is False
+
+
+def test_saving_another_setting_keeps_a_persisted_key(monkeypatch, tmp_path):
+    """"Don't write the key" is not "delete the key".
+
+    Saving any unrelated setting — a budget change, a provider toggle —
+    rewrote the file without the key and silently deauthenticated anyone who
+    had deliberately persisted one. Found by doing exactly that on a real
+    machine."""
+    from llm_sidecar import config as config_mod
+
+    monkeypatch.setattr(config_mod, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(config_mod, "CONFIG_FILE", tmp_path / "config.json")
+
+    config_mod.save(Config(openrouter_api_key="sk-or-secret"), include_api_key=True)
+
+    # A later, unrelated save must not disturb it.
+    config_mod.save(Config(default_budget="best", claude_cli_enabled=True))
+    data = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+    assert data["openrouter_api_key"] == "sk-or-secret"
+    assert data["default_budget"] == "best"
+
+    # Clearing still has to work, but only when asked for.
+    config_mod.save(Config(), clear_api_key=True)
+    data = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+    assert "openrouter_api_key" not in data

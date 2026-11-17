@@ -190,11 +190,110 @@ def _config(args) -> int:
 
     if args.action == "clear-key":
         cfg.openrouter_api_key = None
-        config_mod.save(cfg)
+        # Explicit, because save() now preserves an on-disk key by default —
+        # removing it has to be asked for, not implied.
+        config_mod.save(cfg, clear_api_key=True)
         print("Key removed from the config file. Local models only.")
         print("  An OPENROUTER_API_KEY in your environment still wins over this.")
         return 0
     return 2
+
+
+def _image(args) -> int:
+    from . import images as im
+    from .images import engine, profiles as pf
+
+    if args.action == "profiles":
+        print(f"{'PROFILE':<24} {'STEPS':>5} {'REFS':>4} {'PEAK':>6}  {'COMMERCIAL':<10} LICENCE")
+        for p in pf.describe():
+            print(f"{p['name']:<24} {p['steps']:>5} {p['max_refs']:>4} "
+                  f"{p['peak_gib']:>5.0f}G  {'yes' if p['commercial_ok'] else 'NO':<10} {p['licence']}")
+        print()
+        print("Ask for a profile, not a model. Each one fixes the model, steps,")
+        print("quantisation and licence together, so upgrading it upgrades every caller.")
+        return 0
+
+    if args.action == "status":
+        s = engine.status()
+        if not s["available"]:
+            print("Image generation is not installed.")
+            print('  pip install "llm-sidecar[images]"      (Apple Silicon only)')
+            return 1
+        print(f"mflux          : {s['mflux']}")
+        print(f"resident model : {s['loaded'] or 'none'}")
+        if s["loaded"]:
+            print(f"idle           : {s['idle_s']:.0f}s "
+                  f"(unloads after {engine.IDLE_UNLOAD_S // 60:.0f} min)")
+        print(f"usable memory  : {s['usable_gib']} GiB")
+        return 0
+
+    if args.action == "bench":
+        return _image_bench(args)
+
+    if not args.prompt and args.profile != "upscale":
+        print("Give a prompt: llm-sidecar image gen \"a red apple\" --out ./pics",
+              file=sys.stderr)
+        return 1
+
+    try:
+        r = im.generate(im.ImageRequest(
+            prompt=args.prompt, profile=args.profile, out_dir=args.out,
+            stem=args.stem, refs=args.refs, negative=args.negative or None,
+            width=args.width, height=args.height, steps=args.steps,
+            seed=args.seed, resolution=args.resolution, project=args.project,
+            commercial=not args.non_commercial,
+        ))
+    except im.ImageError as e:
+        print(str(e), file=sys.stderr)
+        return 1
+
+    if r.skipped:
+        print(f"up to date, skipped: {r.path}")
+        return 0
+    print(f"{r.path}")
+    print(f"  {r.profile} · {r.model} · seed {r.seed} · {r.seconds:.1f}s"
+          f"{'' if r.warm else '  (cold model — the next one is faster)'}")
+    print(f"  manifest: {r.manifest_path}")
+    return 0
+
+
+def _image_bench(args) -> int:
+    """Measure what keeping a model resident actually saves, on this machine.
+
+    The whole argument for a shared service over `mflux` per subprocess is
+    that reloading costs real time. That is a number, not an opinion, so it
+    gets measured rather than asserted."""
+    import tempfile
+
+    from . import images as im
+    from .images import engine
+
+    try:
+        engine.require()
+    except im.ImageError as e:
+        print(str(e), file=sys.stderr)
+        return 1
+
+    profile = args.profile
+    prompt = args.prompt or "a red apple on a wooden table, soft daylight"
+    with tempfile.TemporaryDirectory() as tmp:
+        engine.RESIDENT.unload()
+        rows = []
+        for i, label in enumerate(("cold", "warm", "warm")):
+            r = im.generate(im.ImageRequest(
+                prompt=prompt, profile=profile, out_dir=tmp, stem=f"bench{i}",
+                width=args.width or 512, height=args.height or 512,
+                seed=100 + i, project="bench",
+            ))
+            rows.append((label, r.seconds))
+            print(f"  {label:<5} {r.seconds:6.1f}s")
+
+    cold = rows[0][1]
+    warm = sum(s for l, s in rows[1:] if l == "warm") / max(1, len(rows) - 1)
+    print()
+    print(f"profile {profile}: cold {cold:.1f}s, warm {warm:.1f}s "
+          f"— keeping it resident saves {cold - warm:.1f}s per image.")
+    return 0
 
 
 def _service(args) -> int:
@@ -399,6 +498,25 @@ def main(argv: list[str] | None = None) -> int:
     cf.add_argument("--save", action="store_true",
                     help="write it to the config file (plain text) rather than this process only")
 
+    img = sub.add_parser("image", help="generate images locally (Apple Silicon)")
+    img.add_argument("action", nargs="?", default="status",
+                     choices=["gen", "profiles", "status", "bench"])
+    img.add_argument("prompt", nargs="?", default="")
+    img.add_argument("--profile", default="draft")
+    img.add_argument("--out", default=".", help="output directory")
+    img.add_argument("--stem", default="image", help="filename stem")
+    img.add_argument("--ref", action="append", dest="refs", default=[],
+                     help="reference image (repeatable, for consistency profiles)")
+    img.add_argument("--negative", default="")
+    img.add_argument("--width", type=int)
+    img.add_argument("--height", type=int)
+    img.add_argument("--steps", type=int)
+    img.add_argument("--seed", type=int)
+    img.add_argument("--resolution", type=int, help="upscale: target long edge")
+    img.add_argument("--project", default="", help="recorded in the manifest")
+    img.add_argument("--non-commercial", action="store_true",
+                     help="permit non-commercial profiles (cinematic, kontext-edit)")
+
     sv = sub.add_parser("service", help="run the daemon at login (launchd / systemd)")
     sv.add_argument("action", nargs="?", default="status",
                     choices=["install", "uninstall", "status"])
@@ -448,6 +566,8 @@ def main(argv: list[str] | None = None) -> int:
         return _usage(args)
     if args.cmd == "sum":
         return _summarise(args)
+    if args.cmd == "image":
+        return _image(args)
     if args.cmd == "config":
         return _config(args)
     if args.cmd == "service":

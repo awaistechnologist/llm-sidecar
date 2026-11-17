@@ -26,6 +26,40 @@ Notable changes per release. Dates are release dates.
 - `Usage.notional_cost_usd` — what a call would have cost on metered
   pricing, kept separate from what it actually cost.
 
+### Added — images
+- **Local image generation**, as the optional `[images]` extra. Profiles
+  rather than model names: `draft`, `fast`, `cinematic`,
+  `characters-txt2img`, `characters-consistent`, `kontext-edit`, `lineart`,
+  `upscale`. Available through the library, `llm-sidecar image gen`, the
+  daemon (`/v1/images/generate`, `/v1/images/profiles`, `/v1/images/status`)
+  and three MCP tools, so Claude Code can make images from any repo on the
+  machine without that repo carrying mflux.
+
+  Replaces five separate integrations that had drifted to three mflux
+  versions, two repos importing another repo's virtualenv, a model reload
+  per image, per-directory locks that could not stop two repos competing,
+  and five provenance formats.
+
+  - One model resident at a time, swapped on demand, dropped after 10 idle
+    minutes. `draft` peaks near 31 GiB, so holding two is what makes a 36 GiB
+    machine swap.
+  - A machine-wide lock taken through a file, because the daemon and a
+    library-mode caller in another repo are different processes.
+  - The service owns output naming — `<stem>_<seed>.png`, never overwriting.
+  - A manifest beside each image with the request, model, mflux version,
+    licence and a digest over everything that changes the pixels, including
+    the *contents* of reference images rather than their paths.
+  - Licences enforced before anything loads: `commercial` defaults to true,
+    so the non-commercial profiles are refused unless a caller opts out.
+  - A memory guard that refuses rather than swaps, reusing the same
+    `hardware` module the model picker uses.
+
+  `[images]` is deliberately not part of `[all]`: mflux is Apple-Silicon-only
+  and pulls several GB, and `install.sh` runs `pip install -e ".[all]"`.
+  Everything imports mflux lazily, so the package installs, imports and tests
+  cleanly on Linux and Windows, where the HTTP routes answer 501 with an
+  explanation.
+
 ### Fixed
 Three bugs found by running the thing rather than reasoning about it:
 - **2480 prompt tokens per call.** `--system-prompt` *replaces* Claude Code's

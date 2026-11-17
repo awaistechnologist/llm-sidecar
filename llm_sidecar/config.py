@@ -231,17 +231,29 @@ def load(**overrides) -> Config:
     return Config(**clean)
 
 
-def save(config: Config, include_api_key: bool = False) -> Path:
+def save(config: Config, include_api_key: bool = False,
+         clear_api_key: bool = False) -> Path:
     """Persist config to disk. Returns the path written.
 
-    The API key is dropped unless explicitly requested — this file is plain
-    JSON in the user's home directory, and a key belongs in the environment
-    or a keyring rather than sitting on disk in the clear."""
+    The API key is not *written* unless explicitly requested — this file is
+    plain JSON in the user's home directory, and a key belongs in the
+    environment or a keyring rather than sitting on disk in the clear.
+
+    "Don't write the key" is not the same as "delete the key", and conflating
+    them was a real bug: saving any unrelated setting — a budget change, a
+    provider toggle — rewrote the file without the key and silently
+    deauthenticated a user who had deliberately persisted one. So a key
+    already on disk is carried over untouched unless the caller is explicitly
+    setting or clearing it."""
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     data = asdict(config)
     data["retry_delays"] = list(config.retry_delays)
     if not include_api_key:
         data.pop("openrouter_api_key", None)
+        if not clear_api_key:
+            existing = _from_file(CONFIG_FILE).get("openrouter_api_key")
+            if existing:
+                data["openrouter_api_key"] = existing
     tmp = CONFIG_FILE.with_suffix(".json.tmp")
     with tmp.open("w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)

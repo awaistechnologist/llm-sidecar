@@ -594,6 +594,86 @@ Measured on an M3 Max, not estimated.
 
 ---
 
+## Images
+
+Local image generation on Apple Silicon, through mflux. One install, one
+warm model, one queue — so every project on the machine stops carrying its
+own copy.
+
+```bash
+pip install "llm-sidecar[images]"
+```
+
+```bash
+llm-sidecar image gen "a red apple on a wooden table" --out ./pics --profile draft
+```
+
+### Profiles, not models
+
+A caller asks for a **profile**. Each one fixes the model, steps,
+quantisation, licence, memory peak and reference limit together, so
+upgrading a profile upgrades every caller at once.
+
+| profile | for | refs | commercial |
+|---|---|---|---|
+| `draft` | bulk work; real negative prompt, ungated | 0 | yes |
+| `fast` | FLUX.1-schnell (gated: needs an HF token) | 0 | yes |
+| `cinematic` | best-looking FLUX.1-dev | 0 | **no** |
+| `characters-txt2img` | character sheets | 0 | yes |
+| `characters-consistent` | **the same character across frames** | 3 | yes |
+| `kontext-edit` | continuity edits to an existing frame | 1 | **no** |
+| `lineart` | colouring pages | 3 | yes |
+| `upscale` | SeedVR2 | 1 | yes |
+
+`llm-sidecar image profiles` prints the full table with memory peaks.
+
+### What it fixes
+
+Five projects on one machine each drove mflux themselves: three mflux
+versions, two repos importing another repo's virtualenv, the model reloaded
+on every image in the subprocess callers, per-directory locks that stopped a
+repo racing itself but not two repos racing each other, and five provenance
+formats.
+
+- **One model resident at a time**, swapped on demand, dropped after 10 idle
+  minutes. `draft` peaks near 31 GiB; holding two is how a 36 GiB machine
+  starts swapping.
+- **A machine-wide lock**, taken through a file so it holds across
+  processes. The daemon and a library-mode caller in another repo are not
+  the same process, and it is two repos at once that causes the problem.
+- **Never overwrite.** The service owns naming: `<stem>_<seed>.png`, with a
+  collision becoming `-2` rather than a clobber or a refusal.
+- **One manifest** beside each image, carrying the request, the model, the
+  mflux version, the licence and a digest. Beside the image rather than in
+  an index, so provenance survives a copy.
+- **Licences are enforced, not remembered.** `commercial` defaults to true,
+  so `cinematic` and `kontext-edit` are refused unless a caller says the
+  output is non-commercial. That check runs before 10 GiB loads.
+
+### Skipping work that is already done
+
+The manifest digest covers everything that changes the pixels — prompt,
+negative, model, steps, size, seed, and the *contents* of the reference
+images rather than their paths. Renaming a reference does not invalidate an
+image; editing one does. Regenerating a folder skips what has not changed.
+
+### Content policy stays in your project
+
+The Quran imagery gate, the modesty rules, the anachronism lists — those are
+editorial judgements belonging to the repo that holds them. This service
+never weakens a project's gate and does not try to own one.
+
+### Not installed by default
+
+`[images]` is deliberately outside `[all]`. mflux is built on MLX and runs on
+Apple Silicon only, and it pulls several GB of toolchain, so `install.sh`
+would otherwise impose it on every developer on every platform. Everything
+under `llm_sidecar/images` imports mflux lazily: the package installs,
+imports and tests cleanly without it, and the HTTP routes answer `501` with
+an explanation rather than a stack trace.
+
+---
+
 ## Honest limitations
 
 - **Verification is only as good as retrieval.** The verifier can only grade

@@ -134,6 +134,25 @@ class VerifyRequest(BaseModel):
     model: str = ""
 
 
+class ImageRequestBody(BaseModel):
+    prompt: str = ""
+    profile: str = "draft"
+    negative: str | None = None
+    refs: list[str] = []
+    width: int | None = None
+    height: int | None = None
+    steps: int | None = None
+    seed: int | None = None
+    out_dir: str = "."
+    stem: str = "image"
+    project: str = ""
+    # Defaults to True so a caller who never thought about licensing is
+    # refused a non-commercial profile rather than quietly handed one.
+    commercial: bool = True
+    skip_existing: bool = True
+    resolution: int | None = None
+
+
 class ChatRequest(BaseModel):
     # Required by the format, but often meaningless here — see resolve_target.
     model: str = "auto"
@@ -470,6 +489,44 @@ def create_app(config: Config | None = None) -> FastAPI:
             return services.status(cfg)
         except Exception as e:
             return {"error": str(e)}
+
+    @app.get("/v1/images/profiles")
+    def image_profiles(_: None = Depends(require_token)) -> dict:
+        """The profile table. A caller picks a name from here rather than
+        hardcoding a model, steps and quantisation of its own."""
+        from .images import profiles as image_profiles_mod
+        return {"profiles": image_profiles_mod.describe()}
+
+    @app.get("/v1/images/status")
+    def image_status(_: None = Depends(require_token)) -> dict:
+        from . import images as images_mod
+        try:
+            return images_mod.status()
+        except Exception as e:
+            return {"available": False, "detail": str(e)[:200]}
+
+    @app.post("/v1/images/generate")
+    def image_generate(req: ImageRequestBody, _: None = Depends(require_token)) -> dict:
+        """Generate one image.
+
+        Synchronous, and deliberately so for now: generation is serialised
+        machine-wide anyway, so a job id would hand back a ticket for a queue
+        of one. The honest shape is a slow request — callers should expect
+        20s to several minutes and set their timeouts accordingly."""
+        from . import images as images_mod
+
+        try:
+            result = images_mod.generate(images_mod.ImageRequest(**req.model_dump()))
+        except images_mod.ImageUnavailable as e:
+            raise HTTPException(status_code=501, detail=str(e)) from e
+        except (images_mod.LicenceError, images_mod.ProfileError) as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        except images_mod.OutOfMemory as e:
+            raise HTTPException(status_code=507, detail=str(e)) from e
+        except Exception as e:
+            logger.exception("image generation failed")
+            raise HTTPException(status_code=500, detail=str(e)) from e
+        return result.__dict__
 
     @app.get("/claude-cli/status")
     def claude_cli_status(_: None = Depends(require_token)) -> dict:
