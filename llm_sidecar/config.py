@@ -39,6 +39,23 @@ class Config:
     # then a cloud one, then fall back to a chat model with a warning.
     embed_model: str | None = None
 
+    # ── claude/ provider (Claude Code CLI) ────────────────────────────────
+    # Off by default even where the CLI is installed, and that is a
+    # deliberate asymmetry with Ollama. A local model costs nothing to call;
+    # a subscription has an allowance the user cannot see from here, and
+    # auto-routing would spend it on work they thought was free. So it has to
+    # be switched on, and then named — see claude_cli.models().
+    claude_cli_enabled: bool = False
+    # Explicit path, for a machine with more than one install.
+    claude_cli_path: str | None = None
+    # Strip ANTHROPIC_API_KEY and friends from the child process, so a call
+    # the user believes their subscription covers is not silently billed to
+    # an API key that happens to be in the environment.
+    claude_cli_use_subscription: bool = True
+    # Generous: a process spawn plus a cold model on a long prompt. The whole
+    # call is one subprocess, so there is no partial result to salvage.
+    claude_cli_timeout: float = 300.0
+
     # ── search ────────────────────────────────────────────────────────────
     # "auto" probes for a local SearXNG and falls back to DuckDuckGo, so a
     # fresh install works with no setup but transparently upgrades if the
@@ -135,6 +152,18 @@ def _from_file(path: Path) -> dict:
         return {}
 
 
+def _flag(name: str) -> bool | None:
+    """A tri-state env boolean: True, False, or unset.
+
+    The older LLM_SIDECAR_NO_* vars are presence-only, which cannot express
+    "off" for a setting whose default is off — `LLM_SIDECAR_CLAUDE_CLI=0`
+    has to mean no, not yes."""
+    raw = os.getenv(name)
+    if raw is None:
+        return None
+    return raw.strip().lower() not in ("", "0", "false", "no", "off")
+
+
 def _from_env() -> dict:
     out: dict = {}
     # OPENROUTER_API_KEY (rather than an LLM_SIDECAR_ prefix) so an existing
@@ -164,6 +193,10 @@ def _from_env() -> dict:
                                os.environ["LLM_SIDECAR_CORS_ORIGINS"].split(",") if o.strip()]
     if os.getenv("LLM_SIDECAR_EMBED_MODEL"):
         out["embed_model"] = os.environ["LLM_SIDECAR_EMBED_MODEL"]
+    if _flag("LLM_SIDECAR_CLAUDE_CLI") is not None:
+        out["claude_cli_enabled"] = _flag("LLM_SIDECAR_CLAUDE_CLI")
+    if os.getenv("LLM_SIDECAR_CLAUDE_CLI_PATH"):
+        out["claude_cli_path"] = os.environ["LLM_SIDECAR_CLAUDE_CLI_PATH"]
     if os.getenv("LLM_SIDECAR_NO_UI"):
         out["ui_enabled"] = False
     if os.getenv("LLM_SIDECAR_NO_CACHE"):
@@ -198,17 +231,29 @@ def load(**overrides) -> Config:
     return Config(**clean)
 
 
-def save(config: Config, include_api_key: bool = False) -> Path:
+def save(config: Config, include_api_key: bool = False,
+         clear_api_key: bool = False) -> Path:
     """Persist config to disk. Returns the path written.
 
-    The API key is dropped unless explicitly requested — this file is plain
-    JSON in the user's home directory, and a key belongs in the environment
-    or a keyring rather than sitting on disk in the clear."""
+    The API key is not *written* unless explicitly requested — this file is
+    plain JSON in the user's home directory, and a key belongs in the
+    environment or a keyring rather than sitting on disk in the clear.
+
+    "Don't write the key" is not the same as "delete the key", and conflating
+    them was a real bug: saving any unrelated setting — a budget change, a
+    provider toggle — rewrote the file without the key and silently
+    deauthenticated a user who had deliberately persisted one. So a key
+    already on disk is carried over untouched unless the caller is explicitly
+    setting or clearing it."""
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     data = asdict(config)
     data["retry_delays"] = list(config.retry_delays)
     if not include_api_key:
         data.pop("openrouter_api_key", None)
+        if not clear_api_key:
+            existing = _from_file(CONFIG_FILE).get("openrouter_api_key")
+            if existing:
+                data["openrouter_api_key"] = existing
     tmp = CONFIG_FILE.with_suffix(".json.tmp")
     with tmp.open("w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)

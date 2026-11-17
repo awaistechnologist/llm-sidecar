@@ -10,6 +10,7 @@ live providers, but they don't belong in a suite that has to pass on a plane.
 from __future__ import annotations
 
 import json
+import pathlib
 import re
 import time
 
@@ -2493,3 +2494,829 @@ def test_embeddings_endpoint_shape(api, monkeypatch):
     assert body["object"] == "list"
     assert [d["index"] for d in body["data"]] == [0, 1]
     assert body["x_sidecar"]["dimensions"] == 2
+
+
+# ── claude/ provider (Claude Code CLI) ────────────────────────────────────────
+#
+# Every test here is offline and spawns nothing: the subprocess boundary is
+# the seam, so _run / create_subprocess_exec is what gets replaced. Checking
+# the argv we would have passed is the point — those flags are the difference
+# between a text generator and an agent with filesystem access.
+
+
+def _cc_cfg(**kw):
+    base = dict(claude_cli_enabled=True, claude_cli_path=None)
+    base.update(kw)
+    return Config(**base)
+
+
+def _envelope(text="hello", **kw):
+    body = {
+        "type": "result", "subtype": "success", "is_error": False,
+        "result": text, "total_cost_usd": 0,
+        "usage": {"input_tokens": 11, "output_tokens": 4,
+                  "cache_read_input_tokens": 2},
+    }
+    body.update(kw)
+    return json.dumps(body)
+
+
+@pytest.fixture
+def cc(monkeypatch, tmp_path):
+    """The claude/ provider with a fake binary and a captured subprocess."""
+    from llm_sidecar import claude_cli
+
+    exe = tmp_path / "claude"
+    exe.write_text("#!/bin/sh\nexit 0\n")
+    exe.chmod(0o755)
+    monkeypatch.setattr(claude_cli.shutil, "which", lambda name: str(exe))
+    monkeypatch.setattr(claude_cli, "_workdir", lambda: str(tmp_path))
+
+    calls: list[dict] = []
+
+    def fake_run(argv, prompt, config, timeout):
+        calls.append({"argv": argv, "prompt": prompt, "timeout": timeout})
+        return _envelope()
+
+    monkeypatch.setattr(claude_cli, "_run", fake_run)
+    return {"module": claude_cli, "calls": calls, "exe": str(exe)}
+
+
+def test_claude_cli_off_by_default():
+    """It spends a subscription allowance, so it has to be switched on.
+
+    The asymmetry with Ollama is deliberate: a local model costs nothing to
+    call, an allowance is invisible from here until it runs out."""
+    assert Config().claude_cli_enabled is False
+
+
+def test_claude_cli_refuses_when_disabled(cc):
+    from llm_sidecar.claude_cli import ClaudeCliUnavailable
+
+    with pytest.raises(ClaudeCliUnavailable):
+        cc["module"].complete([{"role": "user", "content": "hi"}],
+                              "claude/sonnet", Config())
+
+
+def test_claude_cli_strips_capabilities(cc):
+    """A completion backend must not be able to read the filesystem."""
+    cc["module"].complete([{"role": "user", "content": "hi"}],
+                          "claude/sonnet", _cc_cfg())
+    argv = cc["calls"][0]["argv"]
+
+    assert argv[0] == cc["exe"]
+    assert "-p" in argv
+    # --tools "" removes Bash, Edit, Read, WebFetch and the rest.
+    assert argv[argv.index("--tools") + 1] == ""
+    # No CLAUDE.md, skills, hooks, plugins or MCP servers leaking in.
+    assert "--safe-mode" in argv
+    assert "--strict-mcp-config" in argv
+    assert "--no-session-persistence" in argv
+    assert argv[argv.index("--permission-prompts") + 1] == "none"
+    # Never --bare: it forces ANTHROPIC_API_KEY auth and would bill the API
+    # for calls the user believes their subscription covers.
+    assert "--bare" not in argv
+
+
+def test_claude_cli_prompt_goes_on_stdin_not_argv(cc):
+    """argv is world-readable through `ps`; the prompt is not."""
+    secret = "my private question about salary negotiation"
+    cc["module"].complete([{"role": "user", "content": secret}],
+                          "claude/sonnet", _cc_cfg())
+    call = cc["calls"][0]
+    assert call["prompt"] == secret
+    assert not any(secret in a for a in call["argv"])
+
+
+def test_claude_cli_alias_passes_through(cc):
+    """Unknown model names are forwarded, so a model released after this
+    version still works without a release of ours."""
+    cc["module"].complete([{"role": "user", "content": "hi"}],
+                          "claude/claude-something-6", _cc_cfg())
+    argv = cc["calls"][0]["argv"]
+    assert argv[argv.index("--model") + 1] == "claude-something-6"
+
+
+def test_claude_cli_system_prompt_split(cc):
+    cc["module"].complete(
+        [{"role": "system", "content": "Be terse."},
+         {"role": "user", "content": "hi"}],
+        "claude/sonnet", _cc_cfg(),
+    )
+    argv = cc["calls"][0]["argv"]
+    assert argv[argv.index("--system-prompt") + 1] == "Be terse."
+    assert cc["calls"][0]["prompt"] == "hi"
+
+
+def test_claude_cli_multi_turn_becomes_transcript():
+    """Lossy, and honestly so: the CLI takes one prompt, not a conversation."""
+    from llm_sidecar.claude_cli import split_messages
+
+    system, prompt = split_messages([
+        {"role": "system", "content": "S"},
+        {"role": "user", "content": "first"},
+        {"role": "assistant", "content": "reply"},
+        {"role": "user", "content": "second"},
+    ])
+    assert system == "S"
+    assert prompt == "User: first\n\nAssistant: reply\n\nUser: second\n\nAssistant:"
+
+
+def test_claude_cli_single_message_is_exact():
+    """The common case must not be mangled by transcript rendering."""
+    from llm_sidecar.claude_cli import split_messages
+
+    assert split_messages([{"role": "user", "content": "just this"}]) == (None, "just this")
+
+
+def test_claude_cli_schema_unwrapped(cc):
+    """response_format is the wire form two HTTP providers want; the CLI
+    wants the bare schema."""
+    schema = {"type": "object", "properties": {"n": {"type": "integer"}}}
+    cc["module"].complete(
+        [{"role": "user", "content": "hi"}], "claude/sonnet", _cc_cfg(),
+        response_format={"type": "json_schema",
+                         "json_schema": {"name": "response", "schema": schema}},
+    )
+    argv = cc["calls"][0]["argv"]
+    assert json.loads(argv[argv.index("--json-schema") + 1]) == schema
+
+
+def test_claude_cli_json_object_mode_sends_no_schema(cc):
+    """"must be JSON" has no CLI equivalent; ops.parse_json_response already
+    salvages fenced output, so sending nothing is right."""
+    cc["module"].complete([{"role": "user", "content": "hi"}], "claude/sonnet",
+                          _cc_cfg(), response_format={"type": "json_object"})
+    assert "--json-schema" not in cc["calls"][0]["argv"]
+
+
+def test_claude_cli_usage_and_cost(cc):
+    done = cc["module"].complete([{"role": "user", "content": "hi"}],
+                                 "claude/sonnet", _cc_cfg())
+    assert done.text == "hello"
+    assert done.model == "claude/sonnet"
+    # Cache reads are input tokens the user was served, so they count.
+    assert done.usage.prompt_tokens == 13
+    assert done.usage.completion_tokens == 4
+    # Zero under a subscription, and that is the truth rather than a stand-in.
+    assert done.usage.cost_usd == 0.0
+
+
+def test_claude_cli_error_inside_success_envelope(monkeypatch, cc):
+    """The trap UpstreamError exists for, on the subprocess side: the CLI
+    reports failure in a well-formed envelope, not by exiting non-zero."""
+    from llm_sidecar.claude_cli import ClaudeCliAuthError
+
+    monkeypatch.setattr(
+        cc["module"], "_run",
+        lambda *a, **k: _envelope(
+            "Failed to authenticate: OAuth session expired and could not be refreshed",
+            is_error=True),
+    )
+    with pytest.raises(ClaudeCliAuthError):
+        cc["module"].complete([{"role": "user", "content": "hi"}],
+                              "claude/sonnet", _cc_cfg())
+
+
+def test_claude_cli_limit_is_not_an_auth_error(monkeypatch, cc):
+    """A limit means rotate to another provider; auth means stop and sign in.
+    Conflating them would make the sidecar retry something unfixable."""
+    from llm_sidecar.claude_cli import ClaudeCliLimitError
+
+    monkeypatch.setattr(
+        cc["module"], "_run",
+        lambda *a, **k: _envelope("Claude usage limit reached", is_error=True),
+    )
+    with pytest.raises(ClaudeCliLimitError):
+        cc["module"].complete([{"role": "user", "content": "hi"}],
+                              "claude/sonnet", _cc_cfg())
+
+
+def test_claude_cli_non_json_output(monkeypatch, cc):
+    from llm_sidecar.claude_cli import ClaudeCliError
+
+    monkeypatch.setattr(cc["module"], "_run", lambda *a, **k: "not json at all")
+    with pytest.raises(ClaudeCliError):
+        cc["module"].complete([{"role": "user", "content": "hi"}],
+                              "claude/sonnet", _cc_cfg())
+
+
+def test_claude_cli_env_strips_api_key(monkeypatch, cc):
+    """Otherwise a key sitting in the environment silently bills the API for
+    work the user believed their subscription covered."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-should-not-reach-the-child")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://gateway.example")
+
+    env = cc["module"]._child_env(_cc_cfg())
+    assert "ANTHROPIC_API_KEY" not in env
+    assert "ANTHROPIC_BASE_URL" not in env
+
+    kept = cc["module"]._child_env(_cc_cfg(claude_cli_use_subscription=False))
+    assert kept["ANTHROPIC_API_KEY"] == "sk-ant-should-not-reach-the-child"
+
+
+def test_claude_models_hidden_unless_enabled(cc):
+    assert cc["module"].models(Config()) == []
+    ids = [m.id for m in cc["module"].models(_cc_cfg())]
+    assert ids == ["claude/haiku", "claude/sonnet", "claude/opus"]
+
+
+def test_claude_models_priced_zero_but_not_in_free_budget(cfg, cc):
+    """Priced at zero because a subscription call costs no money — which is
+    exactly why they must stay out of the `free` candidate pool. `free` means
+    "costs nothing"; these cost an allowance."""
+    from llm_sidecar import picker
+
+    cfg.claude_cli_enabled = True
+    for budget in ("free", "cheap", "best"):
+        assert not any(c.startswith("claude/")
+                       for c in picker.candidates(cfg, budget))
+
+
+def test_claude_completions_are_not_cached(cfg, monkeypatch, cc):
+    """The cache stores only deterministic requests and decides that from
+    temperature — which the CLI has no flag for. Caching these would also
+    keep serving answers after a subscription expired."""
+    from llm_sidecar import cache, client
+
+    from llm_sidecar.types import Completion
+
+    cfg.claude_cli_enabled = True
+    sc = Sidecar(cfg)
+    puts: list = []
+    monkeypatch.setattr(cache, "put_completion", lambda *a, **k: puts.append(a[2]))
+    monkeypatch.setattr(
+        client, "complete",
+        lambda msgs, model, *a, **k: Completion(text="fresh", model=model),
+    )
+
+    sc.complete("hi", model="claude/sonnet", temperature=0.0)
+    assert puts == []
+
+    # The same call on an HTTP model *is* cached — otherwise this test would
+    # pass just as well with caching broken everywhere.
+    sc.complete("hi", model="free/a:free", temperature=0.0)
+    assert puts == ["free/a:free"]
+
+
+def test_claude_stream_delta_and_whole_message_stay_separate():
+    """The CLI emits deltas *and* the finished assistant message carrying the
+    same text. A parser that read text from either shape duplicated every
+    answer: "12345" arrived as "1234512345" in a live run. Deltas win; the
+    whole message is only a fallback for a version that sends no deltas."""
+    from llm_sidecar.claude_cli import _delta_text, _message_text
+
+    delta = {"type": "stream_event",
+             "event": {"type": "content_block_delta",
+                       "delta": {"type": "text_delta", "text": "tok"}}}
+    message = {"type": "assistant",
+               "message": {"content": [{"type": "text", "text": "whole"},
+                                       {"type": "thinking", "thinking": "hidden"}]}}
+
+    assert _delta_text(delta) == "tok"
+    assert _message_text(delta) == ""
+    assert _delta_text(message) == ""
+    # Thinking blocks excluded: a scratchpad is not the answer.
+    assert _message_text(message) == "whole"
+    assert _delta_text({"type": "system", "subtype": "init"}) == ""
+    assert _message_text({"type": "system", "subtype": "init"}) == ""
+
+
+def test_claude_models_listed_as_their_own_owner(api, monkeypatch):
+    """A dropdown built from /v1/models should not claim OpenRouter serves
+    these — they are neither billed nor routed like one."""
+    from llm_sidecar import Sidecar, claude_cli
+    from llm_sidecar.types import ModelInfo
+
+    monkeypatch.setattr(Sidecar, "models",
+                        lambda self, refresh=False: [
+                            ModelInfo("claude/opus", "Claude Opus (subscription)")])
+    rows = {d["id"]: d for d in api.get("/v1/models").json()["data"]}
+    assert rows["claude/opus"]["owned_by"] == "claude-cli"
+
+
+def test_claude_cli_toggle_endpoint(api, monkeypatch):
+    """The dashboard has to be able to turn it on without a restart."""
+    from llm_sidecar import claude_cli
+
+    monkeypatch.setattr(claude_cli, "binary", lambda config: "/usr/local/bin/claude")
+    body = api.post("/config/claude-cli", json={"enabled": True}).json()
+    assert body["enabled"] is True
+    assert body["installed"] is True
+    assert "claude/sonnet" in body["models"]
+
+    off = api.post("/config/claude-cli", json={"enabled": False}).json()
+    assert off["enabled"] is False
+    assert off["models"] == []
+
+
+def test_claude_cli_status_endpoint_makes_no_call_when_off(api, monkeypatch):
+    """`check` costs a real completion when enabled, so an off provider must
+    not pay for one just to report that it is off."""
+    from llm_sidecar import claude_cli
+
+    monkeypatch.setattr(claude_cli, "binary", lambda config: "/usr/local/bin/claude")
+    monkeypatch.setattr(
+        claude_cli.subprocess, "run",
+        lambda *a, **k: type("R", (), {"stdout": "2.1.283 (Claude Code)"})(),
+    )
+    called: list = []
+    monkeypatch.setattr(claude_cli, "complete",
+                        lambda *a, **k: called.append(1))
+
+    body = api.get("/claude-cli/status").json()
+    assert body["enabled"] is False
+    assert body["version"] == "2.1.283 (Claude Code)"
+    assert body["authenticated"] is None
+    assert called == []
+
+
+def test_claude_subscription_cost_is_not_recorded_as_spend(cc):
+    """The CLI reports a metered-API equivalent even on a subscription — a
+    live haiku call came back at $0.00057 under OAuth. Feeding that to the
+    ledger would overstate the user's actual bill."""
+    done = cc["module"].complete([{"role": "user", "content": "hi"}],
+                                 "claude/sonnet",
+                                 _cc_cfg(), response_format=None)
+    assert done.usage.cost_usd == 0.0
+
+    # Opting into API-key auth makes the same figure a real charge.
+    import json as _json
+    from llm_sidecar import claude_cli as m
+
+    priced = m._usage_from(_json.loads(_envelope(total_cost_usd=0.00057)),
+                           _cc_cfg(claude_cli_use_subscription=False))
+    assert priced.cost_usd == 0.00057
+
+    free = m._usage_from(_json.loads(_envelope(total_cost_usd=0.00057)), _cc_cfg())
+    assert free.cost_usd == 0.0
+    # Still visible, just not counted as money owed.
+    assert free.notional_cost_usd == 0.00057
+
+
+def test_claude_always_sends_a_system_prompt(cc):
+    """--system-prompt replaces Claude Code's own. Omitting it cost 2480
+    prompt tokens for "Say OK." against 2 with a minimal one, measured live —
+    a thousandfold overhead billed to the user's allowance, plus coding-agent
+    framing on a general-purpose call."""
+    from llm_sidecar.claude_cli import DEFAULT_SYSTEM
+
+    cc["module"].complete([{"role": "user", "content": "hi"}],
+                          "claude/sonnet", _cc_cfg())
+    argv = cc["calls"][0]["argv"]
+    assert "--system-prompt" in argv
+    assert argv[argv.index("--system-prompt") + 1] == DEFAULT_SYSTEM
+
+    # A caller's own system message still wins outright.
+    cc["module"].complete([{"role": "system", "content": "Be a pirate."},
+                           {"role": "user", "content": "hi"}],
+                          "claude/sonnet", _cc_cfg())
+    argv = cc["calls"][1]["argv"]
+    assert argv[argv.index("--system-prompt") + 1] == "Be a pirate."
+
+
+# ── images ────────────────────────────────────────────────────────────────
+#
+# mflux is an Apple-Silicon-only optional extra, so every test here runs
+# without it: the engine is the seam, and what matters above it is the
+# licence gate, the naming rule, the digest and the memory guard. Those are
+# the parts that were wrong, or absent, in five separate repos.
+
+
+def test_image_profiles_are_self_consistent():
+    from llm_sidecar.images import profiles as pf
+
+    for name, p in pf.PROFILES.items():
+        assert p.name == name
+        assert p.variant in __import__(
+            "llm_sidecar.images.engine", fromlist=["VARIANTS"]).VARIANTS
+        # A profile that edits needs somewhere to put the references.
+        if p.requires_refs:
+            assert p.max_refs >= 1, name
+        # q4/q5 put fake signatures in klein output — measured in the
+        # inspiring-kids test, and the reason quantize is pinned per profile.
+        if p.quantize is not None:
+            assert p.quantize >= 8, name
+
+
+def test_non_commercial_profile_refused_by_default():
+    """The default is `commercial=True`, so a caller who never thought about
+    licensing is refused rather than quietly handed FLUX.1-dev output."""
+    from llm_sidecar.images import profiles as pf
+
+    with pytest.raises(pf.LicenceError) as e:
+        pf.check(pf.get("cinematic"), commercial=True, refs=[])
+    # The message has to name the alternatives, or it just blocks the user.
+    assert "standard" in str(e.value)
+
+    pf.check(pf.get("cinematic"), commercial=False, refs=[])   # allowed
+    pf.check(pf.get("standard"), commercial=True, refs=[])     # always fine
+
+
+def test_edit_profile_requires_references():
+    from llm_sidecar.images import profiles as pf
+
+    with pytest.raises(pf.ProfileError):
+        pf.check(pf.get("characters-consistent"), commercial=True, refs=[])
+    with pytest.raises(pf.ProfileError):
+        pf.check(pf.get("characters-consistent"), commercial=True,
+                 refs=["a", "b", "c", "d"])        # max_refs is 3
+    pf.check(pf.get("characters-consistent"), commercial=True, refs=["a", "b"])
+
+
+def test_image_never_overwrites(tmp_path):
+    """mflux refuses to overwrite and writes alongside instead, which three
+    repos each worked around differently. The service owns naming."""
+    from llm_sidecar.images import manifest
+
+    first = manifest.output_path(tmp_path, "scene", 7)
+    assert first.name == "scene_7.png"
+    first.write_bytes(b"x")
+
+    second = manifest.output_path(tmp_path, "scene", 7)
+    assert second.name == "scene_7-2.png"
+    assert first.exists() and first.read_bytes() == b"x"
+
+
+def test_digest_tracks_content_not_paths(tmp_path):
+    """Renaming a reference must not invalidate an image; editing one must."""
+    from llm_sidecar.images import manifest
+
+    ref = tmp_path / "hero.png"
+    ref.write_bytes(b"original")
+    base = dict(profile="characters-consistent", model="flux2-klein-4b",
+                prompt="p", negative=None, steps=4, width=512, height=512, seed=1)
+
+    d1 = manifest.digest(**base, ref_hashes=[manifest.sha256_file(ref)])
+
+    renamed = tmp_path / "protagonist.png"
+    ref.rename(renamed)
+    assert manifest.digest(**base, ref_hashes=[manifest.sha256_file(renamed)]) == d1
+
+    renamed.write_bytes(b"edited")
+    assert manifest.digest(**base, ref_hashes=[manifest.sha256_file(renamed)]) != d1
+
+    # And the prompt still matters.
+    assert manifest.digest(**{**base, "prompt": "other"}, ref_hashes=[]) != d1
+
+
+def test_manifest_round_trip_and_currency(tmp_path):
+    from llm_sidecar.images import manifest, profiles as pf
+
+    img = tmp_path / "scene_1.png"
+    img.write_bytes(b"png")
+    payload = manifest.build(
+        request={"prompt": "p"}, profile=pf.get("standard"), digest_value="abc123",
+        seed=1, ref_hashes=[], timing={"generate_s": 9.5, "warm": True},
+        mflux_version="0.24.0",
+    )
+    path = manifest.write(img, payload)
+    assert path.name == "scene_1.png.json"
+    assert manifest.is_current(img, "abc123")
+    assert not manifest.is_current(img, "different")
+    # Licence travels with the image, so provenance survives a copy.
+    assert manifest.read(img)["licence"] == "Apache-2.0"
+
+
+def test_image_memory_guard_refuses_rather_than_swaps(monkeypatch):
+    """Ollama's lesson, applied to diffusion: a model that does not fit is
+    not refused by the runtime, it is loaded and then crawls — which reads as
+    a hang rather than an error."""
+    from llm_sidecar import hardware
+    from llm_sidecar.images import engine, profiles as pf
+
+    monkeypatch.setattr(hardware, "usable_gib", lambda hw=None: 8.0)
+    with pytest.raises(engine.OutOfMemory) as e:
+        engine.guard(pf.get("zimage-negprompt"))   # needs ~31 GiB
+    assert "swap" in str(e.value).lower()
+
+    monkeypatch.setattr(hardware, "usable_gib", lambda hw=None: 40.0)
+    assert engine.guard(pf.get("zimage-negprompt"))["verdict"] == "fits"
+
+
+def test_images_import_without_mflux(monkeypatch):
+    """The package must install, import and test on Linux and Windows, where
+    mflux cannot be installed at all."""
+    import builtins
+
+    from llm_sidecar.images import engine
+
+    real_import = builtins.__import__
+
+    def no_mflux(name, *a, **k):
+        if name == "mflux" or name.startswith("mflux."):
+            raise ImportError("no mflux here")
+        return real_import(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", no_mflux)
+    assert engine.available() is False
+    with pytest.raises(engine.ImageUnavailable) as e:
+        engine.require()
+    assert "llm-sidecar[images]" in str(e.value)
+
+
+def test_image_endpoints_report_unavailable_not_500(api, monkeypatch):
+    """A Linux caller should get a clear 501 telling them why, not a stack
+    trace from an import error."""
+    from llm_sidecar import images as im
+
+    def unavailable(*a, **k):
+        raise im.ImageUnavailable('pip install "llm-sidecar[images]"')
+
+    monkeypatch.setattr(im, "generate", unavailable)
+    r = api.post("/v1/images/generate", json={"prompt": "x", "out_dir": "/tmp"})
+    assert r.status_code == 501
+    assert "images" in r.json()["detail"]
+
+
+def test_image_licence_refusal_is_a_400(api, monkeypatch):
+    from llm_sidecar import images as im
+
+    def refuse(*a, **k):
+        raise im.LicenceError("non-commercial")
+
+    monkeypatch.setattr(im, "generate", refuse)
+    r = api.post("/v1/images/generate",
+                 json={"prompt": "x", "out_dir": "/tmp", "profile": "cinematic"})
+    assert r.status_code == 400
+
+
+def test_image_profiles_endpoint(api):
+    rows = {p["name"]: p for p in api.get("/v1/images/profiles").json()["profiles"]}
+    assert rows["characters-consistent"]["max_refs"] == 3
+    assert rows["cinematic"]["commercial_ok"] is False
+
+
+def test_saving_another_setting_keeps_a_persisted_key(monkeypatch, tmp_path):
+    """"Don't write the key" is not "delete the key".
+
+    Saving any unrelated setting — a budget change, a provider toggle —
+    rewrote the file without the key and silently deauthenticated anyone who
+    had deliberately persisted one. Found by doing exactly that on a real
+    machine."""
+    from llm_sidecar import config as config_mod
+
+    monkeypatch.setattr(config_mod, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(config_mod, "CONFIG_FILE", tmp_path / "config.json")
+
+    config_mod.save(Config(openrouter_api_key="sk-or-secret"), include_api_key=True)
+
+    # A later, unrelated save must not disturb it.
+    config_mod.save(Config(default_budget="best", claude_cli_enabled=True))
+    data = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+    assert data["openrouter_api_key"] == "sk-or-secret"
+    assert data["default_budget"] == "best"
+
+    # Clearing still has to work, but only when asked for.
+    config_mod.save(Config(), clear_api_key=True)
+    data = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+    assert "openrouter_api_key" not in data
+
+
+def test_claude_binary_found_without_path(monkeypatch, tmp_path):
+    """launchd hands a service PATH=/usr/bin:/bin:/usr/sbin:/sbin, so a CLI
+    installed by npm is invisible to the daemon although it works in the
+    user's shell. Found by installing the service and watching claude/
+    requests fail on a machine where `claude --version` was fine."""
+    from llm_sidecar import claude_cli
+
+    home = tmp_path / "home"
+    (home / ".npm-global" / "bin").mkdir(parents=True)
+    exe = home / ".npm-global" / "bin" / "claude"
+    exe.write_text("#!/bin/sh\n")
+    exe.chmod(0o755)
+
+    monkeypatch.setattr(claude_cli.shutil, "which", lambda name: None)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(claude_cli.os.path, "expanduser",
+                        lambda p: p.replace("~", str(home), 1))
+
+    # Compared as paths, not strings: the lookup joins a POSIX-style
+    # well-known suffix onto the home directory, so on Windows the result is
+    # a mix of separators that is the same file and a different string.
+    found = claude_cli.binary(Config())
+    assert found is not None
+    assert pathlib.Path(found) == exe
+
+    # An explicit path still wins outright, and a bad one is not silently
+    # replaced by a guess — that would hide a typo.
+    assert claude_cli.binary(Config(claude_cli_path="/nope/claude")) is None
+
+
+def test_spent_model_is_rebuilt_not_reused():
+    """mflux's MemorySaver drops the text encoder once the prompt is encoded,
+    and Flux2 keeps no prompt cache — so a resident model cannot serve a
+    second prompt. Reusing one would raise deep inside mflux on the next
+    call instead of here."""
+    from llm_sidecar.images.engine import _encoder_evicted
+
+    class Spent:
+        text_encoder = None
+        small_text_encoder = False
+
+    class Live:
+        text_encoder = object()
+        small_text_encoder = False
+
+    class Small:
+        # The small encoder is loaded separately and never evicted.
+        text_encoder = None
+        small_text_encoder = True
+
+    class Upscaler:
+        """SeedVR2 has no text encoder at all."""
+
+    assert _encoder_evicted(Spent()) is True
+    assert _encoder_evicted(Live()) is False
+    assert _encoder_evicted(Small()) is False
+    assert _encoder_evicted(Upscaler()) is False
+    assert _encoder_evicted(None) is False
+
+
+def test_mlx_cache_is_capped_just_above_the_working_set(monkeypatch):
+    """The fix for the image slowdown, and the size is the whole point.
+
+    Uncapped, MLX's buffer cache reached 16.2 GiB and 1024x1024 images ran
+    22.5s to 77.6s. Capped, four runs each, with the generation peaking at
+    11.9 GiB: 4 GiB gave 35.8-48.7s, 8 GiB gave 31.8-40.3s, 12 GiB gave
+    23.1-23.9s. A cap below the working set makes MLX release and re-acquire
+    memory mid-generation, and that churn is the cost — so this sizes to the
+    peak, not to a fraction of RAM."""
+    from llm_sidecar.images import engine
+
+    seen = []
+
+    class FakeMx:
+        @staticmethod
+        def set_cache_limit(n): seen.append(round(n / 1024 ** 3, 2))
+
+    monkeypatch.setattr(engine, "_mx", lambda: FakeMx)
+
+    # 15% above the peak: comfortably over 11.9, nothing like 16.
+    assert engine.cap_mlx_cache(12.0, usable_gib=33.0) == 13.8
+    assert seen[-1] == 13.8
+
+    # Never more than the machine can actually give, however big the profile.
+    assert engine.cap_mlx_cache(40.0, usable_gib=33.0) == 26.4
+
+    # And never so small that the cap is itself the problem.
+    assert engine.cap_mlx_cache(0.1, usable_gib=33.0) == 2.0
+
+
+def test_cache_cap_follows_an_unexpectedly_large_generation(monkeypatch):
+    """A profile's peak_gib describes its usual size. Ask for 2048x2048 and
+    the real peak is higher, which would leave the cap under the working set
+    — the slow case."""
+    from llm_sidecar.images import engine, profiles as pf
+
+    caps = []
+    monkeypatch.setattr(engine, "cap_mlx_cache", lambda peak, **k: caps.append(peak))
+
+    class FakeMx:
+        @staticmethod
+        def get_peak_memory(): return int(20.0 * 1024 ** 3)
+
+    monkeypatch.setattr(engine, "_mx", lambda: FakeMx)
+
+    profile = pf.get("standard")                    # nominal peak 12 GiB
+    engine.retune_mlx_cache(profile)
+    assert caps == [20.0]
+
+    # A generation that stayed within the estimate changes nothing.
+    caps.clear()
+    FakeMx.get_peak_memory = staticmethod(lambda: int(5.0 * 1024 ** 3))
+    engine.retune_mlx_cache(profile)
+    assert caps == []
+
+
+def test_default_profile_leaves_headroom():
+    """The default must not be the heaviest thing in the table.
+
+    It was: `draft` meant Z-Image-Turbo at ~31 GiB against ~33 usable on a
+    36 GiB Mac, so the out-of-the-box choice was the one guaranteed to
+    thrash. A caller who names no profile gets the measured one instead."""
+    from llm_sidecar.images import profiles as pf
+
+    default = pf.get(pf.DEFAULT_PROFILE)
+    heaviest = max(pf.PROFILES.values(), key=lambda p: p.peak_gib)
+
+    assert default.peak_gib < heaviest.peak_gib
+    # Comfortable on a 36 GiB machine (~33 usable), with room for the editor
+    # and the browser the user also has open.
+    assert default.peak_gib <= 16.0
+    assert default.commercial_ok and not default.gated
+    # Measured, not estimated — the cache cap is sized from this number.
+    assert default.measured_s is not None
+
+
+def test_only_one_profile_can_exclude_things_from_an_image():
+    """Z-Image is the sole profile whose negative prompt does anything.
+
+    klein runs at guidance 1.0 and cannot exclude a subject at all, so work
+    that depends on keeping people or objects *out* of an image has to ask
+    for zimage-negprompt by name. Nothing may silently route it elsewhere:
+    the projects relying on this use it as a content gate."""
+    from llm_sidecar.images import profiles as pf
+
+    negative_capable = [n for n, p in pf.PROFILES.items() if p.supports_negative]
+    assert negative_capable == ["zimage-negprompt"]
+    assert not pf.get(pf.DEFAULT_PROFILE).supports_negative
+
+
+def test_cache_cap_is_retuned_when_the_resident_model_changes(monkeypatch):
+    """Swapping profiles must re-size the cap, not inherit the old one.
+
+    A klein-sized cap (13.8 GiB) left in place for Z-Image, whose working
+    set is ~31 GiB, would be a cap far below the working set — the slowest
+    case measured, and on a 36 GiB machine the one that swaps."""
+    from llm_sidecar.images import engine, profiles as pf
+
+    caps: list[float] = []
+    monkeypatch.setattr(engine, "cap_mlx_cache", lambda peak, **k: caps.append(peak))
+    monkeypatch.setattr(engine, "VARIANTS",
+                        {"klein": ("builtins", "dict"),
+                         "z-image-turbo": ("builtins", "dict")})
+
+    class FakeConfigResolution:
+        @staticmethod
+        def resolve(name): return object()
+
+    import sys, types
+    fake = types.ModuleType("mflux.models.common.resolution.config_resolution")
+    fake.ConfigResolution = FakeConfigResolution
+    for name in ("mflux", "mflux.models", "mflux.models.common",
+                 "mflux.models.common.resolution"):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    monkeypatch.setitem(sys.modules,
+                        "mflux.models.common.resolution.config_resolution", fake)
+
+    light, heavy = pf.get("standard"), pf.get("zimage-negprompt")
+    assert heavy.peak_gib > light.peak_gib      # the point of the test
+
+    resident = engine._Resident()
+    resident.get(light)
+    resident.get(heavy)
+    resident.get(light)
+
+    # Read from the profiles rather than hardcoded, so measuring a new peak
+    # cannot silently break this.
+    assert caps == [light.peak_gib, heavy.peak_gib, light.peak_gib]
+
+
+def test_peak_is_measured_per_generation_not_per_process(monkeypatch):
+    """mx.get_peak_memory() is a process-lifetime maximum.
+
+    Forgetting that was a real bug: one Z-Image generation peaking at 27.8
+    GiB left every later reading at 27.8 GiB, so a klein edit — a 12 GiB
+    profile — had its cache cap sized from Z-Image's working set and got
+    26.4 GiB. That run paged the most of any measured, which is exactly the
+    failure the cap exists to prevent."""
+    from llm_sidecar.images import engine, profiles as pf
+
+    resets: list[int] = []
+    caps: list[float] = []
+
+    class FakeMx:
+        peak = 27.83 * 1024 ** 3
+
+        @classmethod
+        def reset_peak_memory(cls):
+            resets.append(1)
+            cls.peak = 0
+
+        @classmethod
+        def get_peak_memory(cls):
+            return cls.peak
+
+    monkeypatch.setattr(engine, "_mx", lambda: FakeMx)
+    monkeypatch.setattr(engine, "cap_mlx_cache", lambda peak, **k: caps.append(peak))
+
+    profile = pf.get("characters-consistent")      # 12 GiB
+
+    # Without a reset, a stale 27.8 GiB would raise this profile's cap.
+    engine.retune_mlx_cache(profile)
+    assert caps == [27.83]
+
+    # With one, the cap follows what this generation actually did.
+    caps.clear()
+    engine.reset_peak()
+    assert resets == [1]
+    engine.retune_mlx_cache(profile)
+    assert caps == []
+
+
+def test_measured_profiles_carry_their_timings():
+    """A profile whose peak_gib is measured should say how long it took, so
+    a caller can plan a batch instead of discovering that a 3-reference edit
+    is four times a text-to-image."""
+    from llm_sidecar.images import profiles as pf
+
+    for name in ("standard", "characters-consistent", "zimage-negprompt"):
+        p = pf.get(name)
+        assert p.measured_s, f"{name} has a measured peak but no measured time"
+
+    # Reference-guided editing peaks higher than plain text-to-image, which
+    # is why it needs its own figure rather than inheriting klein's.
+    assert pf.get("characters-consistent").peak_gib > pf.get("standard").peak_gib
+    # And is far slower — 93s against ~23s measured.
+    assert pf.get("characters-consistent").measured_s > pf.get("standard").measured_s * 2

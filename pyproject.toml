@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "llm-sidecar"
-version = "0.6.0"
+version = "0.7.0"
 description = "Local sidecar giving any tool grounded, cited, routed AI — Ollama or OpenRouter, no API key required."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -54,6 +54,24 @@ dependencies = [
 search = []
 daemon = []
 mcp = []
+
+# Local image generation. Deliberately NOT part of `all`, and the one extra
+# that is a real install rather than a no-op:
+#
+#   - mflux is built on MLX, so it runs on Apple Silicon and nowhere else.
+#     The marker means `pip install llm-sidecar[images]` is a quiet no-op on
+#     Linux and Windows instead of a resolver error.
+#   - it pulls several GB of toolchain. `install.sh` and `install.bat` run
+#     `pip install -e ".[all]"`, so folding it in would make every developer
+#     on every platform download a dependency most of them cannot run.
+#
+# Everything under llm_sidecar/images imports mflux lazily, so the package
+# installs, imports and tests cleanly without it.
+images = [
+    "mflux==0.24.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "pillow; sys_platform == 'darwin' and platform_machine == 'arm64'",
+]
+
 all = []
 dev = ["pytest", "openai", "build", "twine"]
 

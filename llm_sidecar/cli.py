@@ -41,6 +41,12 @@ def _status() -> int:
     tight = [m['id'] for m in s['local_models'] if m['verdict'] != 'fits']
     if tight:
         print(f"local (won't)  : {', '.join(t.split('/', 1)[1] for t in tight)}")
+    cc = s.get("claude_cli") or {}
+    if cc.get("enabled"):
+        print(f"claude/ (CLI)  : on · {', '.join(cc.get('models') or []) or 'no binary found'}")
+    elif cc.get("installed"):
+        print("claude/ (CLI)  : installed but off   "
+              "(`llm-sidecar config claude-cli on` to use your subscription)")
     c = s["cache"]
     print(f"cache          : {c['completions']} completions, {c['searches']} searches "
           f"({c['bytes'] / 1024:.0f} KiB)")
@@ -48,8 +54,12 @@ def _status() -> int:
     print(f"last 30 days   : {u['calls']} calls, ${u['cost_usd']:.4f}, {u['total_tokens']:,} tokens")
     print(f"daemon would be: http://{sc.config.daemon_host}:{sc.config.daemon_port}/v1")
 
-    if not s["cloud_configured"] and not s["local_models"]:
-        print("\nNothing to route to. Install Ollama or set OPENROUTER_API_KEY.", file=sys.stderr)
+    if not s["cloud_configured"] and not s["local_models"] and not cc.get("models"):
+        print("\nNothing to route to. Any one of these fixes it:", file=sys.stderr)
+        print("  install Ollama                      (local, free)", file=sys.stderr)
+        print("  set OPENROUTER_API_KEY              (cloud)", file=sys.stderr)
+        print("  llm-sidecar config claude-cli on    (your Claude subscription)",
+              file=sys.stderr)
         return 1
     return 0
 
@@ -147,15 +157,162 @@ def _config(args) -> int:
         print(f"ollama         : {cfg.ollama_host}")
         print(f"search         : {cfg.search_provider}")
         print(f"locked tiers   : {cfg.models or 'none'}")
+        print(f"claude/ (CLI)  : {'on' if cfg.claude_cli_enabled else 'off'}")
         return 0
+
+    if args.action == "claude-cli":
+        from . import claude_cli
+
+        want = (args.value or "").strip().lower()
+        if want not in ("on", "off", ""):
+            print("Use: llm-sidecar config claude-cli on|off", file=sys.stderr)
+            return 1
+
+        if want:
+            cfg.claude_cli_enabled = (want == "on")
+            print(f"Saved to {config_mod.save(cfg)}")
+
+        info = claude_cli.check(cfg)
+        print(f"claude binary  : {info['binary'] or 'not found'}")
+        print(f"version        : {info['version'] or 'unknown'}")
+        print(f"enabled        : {'yes' if info['enabled'] else 'no'}")
+        if info["authenticated"] is not None:
+            print(f"signed in      : {'yes' if info['authenticated'] else 'no'}")
+        print(f"               : {info['detail']}")
+        if info["enabled"] and info["authenticated"]:
+            print()
+            print("Use it by naming a model:")
+            print("  llm-sidecar ask --model claude/sonnet \"...\"")
+            print("Or make it a tier default, in the dashboard or the environment:")
+            print("  export LLM_SIDECAR_MODEL_POWERFUL=claude/opus")
+        return 0 if (info["binary"] and (not info["enabled"] or info["authenticated"]))\
+            else 1
 
     if args.action == "clear-key":
         cfg.openrouter_api_key = None
-        config_mod.save(cfg)
+        # Explicit, because save() now preserves an on-disk key by default —
+        # removing it has to be asked for, not implied.
+        config_mod.save(cfg, clear_api_key=True)
         print("Key removed from the config file. Local models only.")
         print("  An OPENROUTER_API_KEY in your environment still wins over this.")
         return 0
     return 2
+
+
+def _image(args) -> int:
+    from . import images as im
+    from .images import engine, profiles as pf
+
+    if args.action == "profiles":
+        print(f"{'PROFILE':<24} {'STEPS':>5} {'REFS':>4} {'PEAK':>6}  {'COMMERCIAL':<10} LICENCE")
+        for p in pf.describe():
+            print(f"{p['name']:<24} {p['steps']:>5} {p['max_refs']:>4} "
+                  f"{p['peak_gib']:>5.0f}G  {'yes' if p['commercial_ok'] else 'NO':<10} {p['licence']}")
+        print()
+        print("Ask for a profile, not a model. Each one fixes the model, steps,")
+        print("quantisation and licence together, so upgrading it upgrades every caller.")
+        return 0
+
+    if args.action == "status":
+        s = engine.status()
+        if not s["available"]:
+            print("Image generation is not installed.")
+            print('  pip install "llm-sidecar[images]"      (Apple Silicon only)')
+            return 1
+        print(f"mflux          : {s['mflux']}")
+        print(f"resident model : {s['loaded'] or 'none'}")
+        if s["loaded"]:
+            print(f"idle           : {s['idle_s']:.0f}s "
+                  f"(unloads after {engine.IDLE_UNLOAD_S // 60:.0f} min)")
+        print(f"usable memory  : {s['usable_gib']} GiB")
+        return 0
+
+    if args.action == "bench":
+        return _image_bench(args)
+
+    if not args.prompt and args.profile != "upscale":
+        print("Give a prompt: llm-sidecar image gen \"a red apple\" --out ./pics",
+              file=sys.stderr)
+        return 1
+
+    try:
+        r = im.generate(im.ImageRequest(
+            prompt=args.prompt, profile=args.profile, out_dir=args.out,
+            stem=args.stem, refs=args.refs, negative=args.negative or None,
+            width=args.width, height=args.height, steps=args.steps,
+            seed=args.seed, resolution=args.resolution, project=args.project,
+            commercial=not args.non_commercial,
+        ))
+    except im.ImageError as e:
+        print(str(e), file=sys.stderr)
+        return 1
+
+    if r.skipped:
+        print(f"up to date, skipped: {r.path}")
+        return 0
+    print(f"{r.path}")
+    print(f"  {r.profile} · {r.model} · seed {r.seed} · {r.seconds:.1f}s"
+          f"{'' if r.warm else '  (cold model — the next one is faster)'}")
+    print(f"  manifest: {r.manifest_path}")
+    return 0
+
+
+def _image_bench(args) -> int:
+    """Measure what keeping a model resident actually saves, on this machine.
+
+    The whole argument for a shared service over `mflux` per subprocess is
+    that reloading costs real time. That is a number, not an opinion, so it
+    gets measured rather than asserted."""
+    import tempfile
+
+    from . import images as im
+    from .images import engine
+
+    try:
+        engine.require()
+    except im.ImageError as e:
+        print(str(e), file=sys.stderr)
+        return 1
+
+    profile = args.profile
+    prompt = args.prompt or "a red apple on a wooden table, soft daylight"
+    runs = max(2, args.runs)
+
+    # Four runs by default, not two, and every one is printed.
+    #
+    # A two-run bench said this machine was fine. The third run was the one
+    # that fell off a cliff — 23.9s, 22.5s, then 77.6s — because MLX's buffer
+    # cache had grown to 16 GiB by then and the kernel started paging. An
+    # average would have hidden that; the slowest run is the number you
+    # actually live with.
+    print(f"  {profile} at {args.width or 1024}x{args.height or 1024}, "
+          f"{runs} runs\n")
+    with tempfile.TemporaryDirectory() as tmp:
+        engine.RESIDENT.unload()
+        times = []
+        for i in range(runs):
+            r = im.generate(im.ImageRequest(
+                prompt=f"{prompt} (take {i})", profile=profile, out_dir=tmp,
+                stem=f"bench{i}", width=args.width or 1024,
+                height=args.height or 1024, seed=100 + i, project="bench",
+            ))
+            times.append(r.seconds)
+            st = engine.status()
+            print(f"  run{i + 1} {r.seconds:6.1f}s  "
+                  f"{'cold' if i == 0 else 'warm'}  "
+                  f"mlx cache {st.get('mlx_cache_gib', '?')}G")
+
+    steady = times[1:] or times
+    best, worst = min(steady), max(steady)
+    print()
+    print(f"  first {times[0]:.1f}s · then {best:.1f}-{worst:.1f}s")
+    if worst > best * 1.5:
+        print()
+        print("  Unstable: the slowest steady run is more than half again the")
+        print("  fastest. That is memory pressure, not the model. Close "
+              "something,")
+        print("  or use a profile with a smaller peak.")
+    return 0
 
 
 def _service(args) -> int:
@@ -354,10 +511,32 @@ def main(argv: list[str] | None = None) -> int:
     ca.add_argument("action", nargs="?", default="stats", choices=["stats", "clear"])
 
     cf = sub.add_parser("config", help="set your API key, budget, and see what's configured")
-    cf.add_argument("action", choices=["key", "budget", "show", "clear-key"])
+    cf.add_argument("action",
+                    choices=["key", "budget", "show", "clear-key", "claude-cli"])
     cf.add_argument("value", nargs="?", default="")
     cf.add_argument("--save", action="store_true",
                     help="write it to the config file (plain text) rather than this process only")
+
+    img = sub.add_parser("image", help="generate images locally (Apple Silicon)")
+    img.add_argument("action", nargs="?", default="status",
+                     choices=["gen", "profiles", "status", "bench"])
+    img.add_argument("prompt", nargs="?", default="")
+    img.add_argument("--profile", default="standard")
+    img.add_argument("--out", default=".", help="output directory")
+    img.add_argument("--stem", default="image", help="filename stem")
+    img.add_argument("--ref", action="append", dest="refs", default=[],
+                     help="reference image (repeatable, for consistency profiles)")
+    img.add_argument("--negative", default="")
+    img.add_argument("--width", type=int)
+    img.add_argument("--height", type=int)
+    img.add_argument("--steps", type=int)
+    img.add_argument("--seed", type=int)
+    img.add_argument("--resolution", type=int, help="upscale: target long edge")
+    img.add_argument("--project", default="", help="recorded in the manifest")
+    img.add_argument("--runs", type=int, default=4,
+                     help="with bench: how many images to time (default 4)")
+    img.add_argument("--non-commercial", action="store_true",
+                     help="permit non-commercial profiles (cinematic, kontext-edit)")
 
     sv = sub.add_parser("service", help="run the daemon at login (launchd / systemd)")
     sv.add_argument("action", nargs="?", default="status",
@@ -408,6 +587,8 @@ def main(argv: list[str] | None = None) -> int:
         return _usage(args)
     if args.cmd == "sum":
         return _summarise(args)
+    if args.cmd == "image":
+        return _image(args)
     if args.cmd == "config":
         return _config(args)
     if args.cmd == "service":

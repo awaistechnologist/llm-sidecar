@@ -2,6 +2,124 @@
 
 Notable changes per release. Dates are release dates.
 
+## [0.7.0] — 2026-11-17
+
+### Added
+- **The `claude/` provider.** A Claude subscription as a third backend,
+  alongside Ollama and OpenRouter, by running the Claude Code CLI locally —
+  no API key and no per-token bill. `llm-sidecar config claude-cli on`, then
+  `claude/haiku`, `claude/sonnet`, `claude/opus`, or any name
+  `claude --model` accepts. Works through the library, the daemon
+  (`/v1/chat/completions`, streaming included), the MCP server, the CLI and
+  the dashboard.
+
+  Off by default even where the CLI is installed, and never auto-picked by
+  `budget`. Ollama costs nothing to call; a subscription costs an allowance
+  the sidecar cannot see, so it is only used when named or locked to a tier.
+
+  Each call is one `claude -p` subprocess with its agent capabilities
+  removed: `--tools ""`, `--safe-mode`, `--strict-mcp-config`,
+  `--no-session-persistence`. The prompt goes in on stdin rather than argv,
+  so it does not appear in `ps`.
+- `GET /claude-cli/status`, `POST /config/claude-cli`,
+  `llm-sidecar config claude-cli on|off`, and `Sidecar.claude_cli_check()`.
+- `Usage.notional_cost_usd` — what a call would have cost on metered
+  pricing, kept separate from what it actually cost.
+
+### Added — images
+- **Local image generation**, as the optional `[images]` extra. Profiles
+  rather than model names: `draft`, `fast`, `cinematic`,
+  `characters-txt2img`, `characters-consistent`, `kontext-edit`, `lineart`,
+  `upscale`. Available through the library, `llm-sidecar image gen`, the
+  daemon (`/v1/images/generate`, `/v1/images/profiles`, `/v1/images/status`)
+  and three MCP tools, so Claude Code can make images from any repo on the
+  machine without that repo carrying mflux.
+
+  Replaces five separate integrations that had drifted to three mflux
+  versions, two repos importing another repo's virtualenv, a model reload
+  per image, per-directory locks that could not stop two repos competing,
+  and five provenance formats.
+
+  - One model resident at a time, swapped on demand, dropped after 10 idle
+    minutes. `draft` peaks near 31 GiB, so holding two is what makes a 36 GiB
+    machine swap.
+  - A machine-wide lock taken through a file, because the daemon and a
+    library-mode caller in another repo are different processes.
+  - The service owns output naming — `<stem>_<seed>.png`, never overwriting.
+  - A manifest beside each image with the request, model, mflux version,
+    licence and a digest over everything that changes the pixels, including
+    the *contents* of reference images rather than their paths.
+  - Licences enforced before anything loads: `commercial` defaults to true,
+    so the non-commercial profiles are refused unless a caller opts out.
+  - A memory guard that refuses rather than swaps, reusing the same
+    `hardware` module the model picker uses.
+
+  `[images]` is deliberately not part of `[all]`: mflux is Apple-Silicon-only
+  and pulls several GB, and `install.sh` runs `pip install -e ".[all]"`.
+  Everything imports mflux lazily, so the package installs, imports and tests
+  cleanly on Linux and Windows, where the HTTP routes answer 501 with an
+  explanation.
+
+### Fixed — image generation speed
+- **MLX's buffer cache was uncapped**, which made 1024x1024 generation
+  unpredictable: 22.5s to 77.6s across runs on a machine that started 92%
+  free, with the cache growing to 16.2 GiB beside 3.2 GiB of live weights.
+  mflux's CLI caps it through `CallbackManager`; driving the Python classes
+  directly skips that. The two ways of driving mflux have different costs —
+  in-process callers get the uncapped cache, CLI-per-image callers get a
+  model rebuild on every prompt — and a resident model behind a capped cache
+  avoids both.
+
+  The size turned out to matter more than the fact of capping. Four runs
+  each, where a generation peaks at 11.9 GiB:
+
+  | cap | times |
+  |---|---|
+  | uncapped | 22.5 - 77.6s |
+  | 4 GiB | 35.8 - 48.7s |
+  | 8 GiB | 31.8 - 40.3s |
+  | 12 GiB | 23.1 - 23.9s |
+
+  A cap *below* the working set makes MLX release and re-acquire memory
+  mid-generation, and that churn costs more than the paging did — 4 GiB was
+  slower than no cap at all on its good runs. The cap is now the profile's
+  peak plus 15%, raised automatically when a generation peaks higher than
+  estimated. End to end through the engine: 22.6 - 25.9s.
+
+  Two things that looked right and were not: clearing the cache after every
+  image (a zero cap, the worst case above) and mflux's own `MemorySaver`,
+  which caps the cache but also evicts the text encoder — and since FLUX.2
+  keeps no prompt cache, that rebuilds the model per prompt for about 20s of
+  tax on every image.
+- `image bench` times four runs and prints each. A two-run bench called the
+  uncapped build faster and missed the cliff entirely.
+- Memory-tight profiles now warn. `draft` needs ~31 GiB against ~33 usable
+  on a 36 GiB Mac; the cache cap cannot help when the working set alone
+  nearly fills RAM.
+
+### Fixed
+Three bugs found by running the thing rather than reasoning about it:
+- **2480 prompt tokens per call.** `--system-prompt` *replaces* Claude Code's
+  own; omitting it carried the full coding-agent framing into every
+  completion. Measured at 2480 tokens for "Say OK." against 2 with a minimal
+  default in place — a thousandfold overhead charged to the user's allowance,
+  and the wrong framing for a general-purpose call. A default system prompt
+  is now always sent.
+- **Duplicated streamed output.** The CLI emits incremental deltas *and* the
+  finished assistant message carrying the same text; reading from whichever
+  shape appeared returned "12345" as "1234512345". Deltas win now, with the
+  whole message kept only as a fallback.
+- **Phantom spend in the ledger.** The CLI reports a metered-API equivalent
+  cost even on a subscription ($0.00057 for a live Haiku call), which would
+  have made `llm-sidecar usage` overstate a bill nobody owed. Recorded as $0
+  when `claude_cli_use_subscription` is on — which is knowable for certain,
+  because that setting strips `ANTHROPIC_API_KEY` from the child process.
+
+### Changed
+- The pretest token ceiling is 512, not 10. Reasoning models spend their
+  allowance thinking before writing any content, so a 10-token cap failed
+  models that work and could leave `free` with nothing.
+
 ## [0.6.0] — 2026-08-20
 
 Four gaps reported by a consumer building against it, all confirmed against

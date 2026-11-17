@@ -279,6 +279,7 @@ Four checks, first match wins.
 
 ```
   ① model="ollama/qwen2.5:32b" given?   ──yes──►  use it. never rotated.
+     (or "claude/opus", or any exact id)
                     │ no
   ② is this tier LOCKED to a model?     ──yes──►  use it. budget ignored.
                     │ no
@@ -293,6 +294,8 @@ Four checks, first match wins.
      │ cheap          paid, under $1 per M tokens   │
      │ best           paid, over $5 per M tokens    │
      └──────────────────────────────────────────────┘
+       claude/ is in none of these pools — by design;
+       it spends an allowance, not money. Name it.
                     │
           probe 3 at once: "Reply OK"
                     │
@@ -313,6 +316,69 @@ process and the next request routes elsewhere.
 of the pool by context length. Curated entries missing from the live catalogue
 are skipped silently, which happens constantly — of nine curated free picks,
 one survived to today. So in practice: the survivors, then the roomiest.
+
+### Your Claude subscription
+
+A third provider, alongside Ollama and OpenRouter: `claude/` runs the Claude
+Code CLI locally, so a Claude subscription you already pay for becomes a
+backend — no API key, no per-token bill.
+
+```bash
+llm-sidecar config claude-cli on
+```
+
+```bash
+llm-sidecar ask --model claude/sonnet "Explain CRDTs in two sentences"
+```
+
+Model ids are `claude/haiku`, `claude/sonnet`, `claude/opus`, or any name
+`claude --model` accepts. They show up in `/v1/models`, the chat dropdown and
+the MCP server like anything else, and the dashboard has a toggle once the
+CLI is installed.
+
+**It is off by default even when the CLI is present**, which is the one place
+this provider is deliberately unlike the others. Ollama costs nothing to
+call, so the picker reaches for it freely. A subscription costs an *allowance*
+you cannot see from here, so nothing spends it unless you say so — `claude/`
+is never auto-picked by `budget`, only used when named or locked to a tier:
+
+```bash
+export LLM_SIDECAR_MODEL_POWERFUL=claude/opus
+```
+
+Each call is one `claude -p` subprocess, run with its agent capabilities
+removed — `--tools ""` (no Bash, no file access, no web), `--safe-mode` (no
+CLAUDE.md, skills, plugins, hooks or MCP servers) and
+`--no-session-persistence`. A completion backend that could read `~/.ssh`
+would not be a completion backend. Your prompt goes in on stdin rather than
+argv, so it does not appear in `ps`.
+
+What differs from the HTTP providers:
+
+| | |
+|---|---|
+| `max_tokens`, `temperature` | **ignored** — the CLI has no flag for either |
+| multi-turn `messages` | flattened to a labelled transcript; one user message is exact |
+| JSON schema | **better** — `--json-schema` is enforced at decode time |
+| streaming | works, via `stream-json` |
+| embeddings | not available; `embed`/`rank` stay on Ollama or OpenRouter |
+| latency | ~1–3s of process spawn on top of the model |
+| caching | skipped, because "deterministic" is decided by a temperature the CLI ignores |
+| cost | recorded as **$0** — see below |
+
+The CLI reports a metered-API equivalent cost even on a subscription (a live
+Haiku call came back at $0.00057). That is not money you owe, so it is kept
+out of the ledger and `llm-sidecar usage` — it is reported separately as
+`notional_cost_usd`. Switch `claude_cli_use_subscription` off and the figure
+becomes real spend again, because then it is.
+
+One sharp edge worth knowing: `--system-prompt` *replaces* Claude Code's own.
+Omitting it costs **2480 prompt tokens for "Say OK."** against 2 with a
+minimal one, so the sidecar always sends a system prompt — yours if you gave
+one, a one-line default otherwise.
+
+Keep the daemon on loopback with this enabled, and leave `cors_origins`
+empty. It is your subscription, and the daemon is unauthenticated.
 
 ### When free OpenRouter models are used
 
@@ -528,6 +594,179 @@ Measured on an M3 Max, not estimated.
 
 ---
 
+## Images
+
+Local image generation on Apple Silicon, through mflux. One install, one
+warm model, one queue — so every project on the machine stops carrying its
+own copy.
+
+```bash
+pip install "llm-sidecar[images]"
+```
+
+```bash
+llm-sidecar image gen "a red apple on a wooden table" --out ./pics --profile draft
+```
+
+### Profiles, not models
+
+A caller asks for a **profile**. Each one fixes the model, steps,
+quantisation, licence, memory peak and reference limit together, so
+upgrading a profile upgrades every caller at once.
+
+| profile | for | refs | commercial |
+|---|---|---|---|
+| `standard` | **the default** — klein-4b q8, measured 22-26s at 1024x1024 | 0 | yes |
+| `fast` | FLUX.1-schnell (gated: needs an HF token) | 0 | yes |
+| `cinematic` | best-looking FLUX.1-dev | 0 | **no** |
+| `zimage-negprompt` | the only profile whose **negative prompt works**; ~31 GiB | 0 | yes |
+| `characters-consistent` | **the same character across frames** | 3 | yes |
+| `kontext-edit` | continuity edits to an existing frame | 1 | **no** |
+| `lineart` | colouring pages | 3 | yes |
+| `upscale` | SeedVR2 | 1 | yes |
+
+`llm-sidecar image profiles` prints the full table with memory peaks.
+
+### What it fixes
+
+Five projects on one machine each drove mflux themselves: three mflux
+versions, two repos importing another repo's virtualenv, the model reloaded
+on every image in the subprocess callers, per-directory locks that stopped a
+repo racing itself but not two repos racing each other, and five provenance
+formats.
+
+- **One model resident at a time**, swapped on demand, dropped after 10 idle
+  minutes. `draft` peaks near 31 GiB; holding two is how a 36 GiB machine
+  starts swapping.
+- **A machine-wide lock**, taken through a file so it holds across
+  processes. The daemon and a library-mode caller in another repo are not
+  the same process, and it is two repos at once that causes the problem.
+- **Never overwrite.** The service owns naming: `<stem>_<seed>.png`, with a
+  collision becoming `-2` rather than a clobber or a refusal.
+- **One manifest** beside each image, carrying the request, the model, the
+  mflux version, the licence and a digest. Beside the image rather than in
+  an index, so provenance survives a copy.
+- **Licences are enforced, not remembered.** `commercial` defaults to true,
+  so `cinematic` and `kontext-edit` are refused unless a caller says the
+  output is non-commercial. That check runs before 10 GiB loads.
+
+### Speed, and the bug that was costing it
+
+`llm-sidecar image bench` times four images on your machine and prints every
+one, because the interesting number is the slowest, not the average.
+
+The first version of this module had a real bug, found by benchmarking
+rather than by reading the code. Driving mflux's Python classes directly
+leaves **MLX's buffer cache uncapped** — the CLI caps it through
+`CallbackManager`, the classes on their own do not. It grew to 16.2 GiB
+beside 3.2 GiB of live weights, and generation times became unpredictable.
+
+There are two ways to drive mflux and each has its own cost, which is why a
+shared service helps either way:
+
+| how a caller drives mflux | what it costs |
+|---|---|
+| Python classes in-process | uncapped cache; unpredictable times |
+| the CLI, one process per image | `MemorySaver` evicts the text encoder, so every prompt rebuilds the model |
+
+The sidecar takes neither: it keeps one model resident *and* caps the cache.
+
+M3 Max, FLUX.2 klein-4b q8 at 1024x1024, four runs per setting, on a
+machine that started 92% free. Peak allocation during a generation: 11.9 GiB.
+
+| MLX cache cap | times | spread |
+|---|---|---|
+| uncapped (grew to 16.2 GiB) | 22.5 – 77.6s | **3.4x** |
+| 4 GiB | 35.8 – 48.7s | 1.4x |
+| 8 GiB | 31.8 – 40.3s | 1.3x |
+| **12 GiB** | **23.1 – 23.9s** | **1.03x** |
+
+The pattern is not "smaller is safer". A cap *below* the working set makes
+MLX release and re-acquire memory mid-generation, and that churn is what
+costs the time — 4 GiB was the slowest setting tested. A cap just above the
+working set holds it without churning and still refuses to balloon.
+
+So the cap is sized to the profile's peak plus 15%, not to a fraction of
+RAM, and `retune_mlx_cache` raises it if a generation actually peaks higher
+than the profile estimated — ask for 2048x2048 and it will.
+
+Two things that looked right and were not:
+
+- **Clearing the cache after each image.** That is a zero cap, and the table
+  above shows where zero caps land. Removed.
+- **mflux's own `MemorySaver`**, which the CLI always installs and which does
+  cap the cache. It also evicts the text encoder after encoding, and FLUX.2
+  keeps no prompt cache, so the model is rebuilt per prompt: 43.1 – 65.9s,
+  about 20s of tax on every image. It trades unpredictability for a
+  permanent cost.
+
+### What each profile actually costs
+
+Measured on an M3 Max through the daemon, with the peak reset per
+generation (`mlx_peak_gib` in `/v1/images/status`):
+
+| profile | size | time | peak |
+|---|---|---|---|
+| `standard` | 1024x1024 | 22-26s | 11.9 GiB |
+| `characters-consistent`, 2 refs | 1024x640 | 60s | 13.0 GiB |
+| `characters-consistent`, 3 refs | 1024x640 | 93s | 13.9 GiB |
+| `zimage-negprompt` | 1024x768 | ~100s | 27.8 GiB |
+
+Two things follow for anyone planning a batch:
+
+- **Reference-guided editing is the expensive operation**, not generation —
+  93s against 23s, and a book is mostly edits. Budget from the edit figure.
+- **Switching profiles unloads and reloads**, so order a batch by profile:
+  generate everything, then upscale the keepers, rather than interleaving
+  two models and paying the swap each time.
+
+### Quality is why this runs at q8
+
+Your choice of quantisation decides this far more than any tuning:
+
+| | 1024x1024 | output |
+|---|---|---|
+| bf16 | 125.6s | swaps on 36 GiB |
+| **q8** | **~32s** | **clean** |
+| q4 | 30.2s | paints a fake signature |
+| pre-quantised 4-bit | 25.7s | paints a fake signature |
+
+4-bit is genuinely faster and genuinely worse, so every profile pins q8 or
+better and `profiles.py` refuses anything below it.
+
+### Keeping a model resident is not about speed
+
+The original premise here was that reloading costs real time, so a warm
+model is faster. It is not: mflux loads weights lazily, construction is
+under a second, and a warm model measured no faster than a cold one. What
+holding one model buys is a bound on how much sits in memory at once —
+which on a 36 GiB laptop with a 31 GiB profile is reason enough, just not
+the reason originally claimed.
+
+### Skipping work that is already done
+
+The manifest digest covers everything that changes the pixels — prompt,
+negative, model, steps, size, seed, and the *contents* of the reference
+images rather than their paths. Renaming a reference does not invalidate an
+image; editing one does. Regenerating a folder skips what has not changed.
+
+### Content policy stays in your project
+
+The Quran imagery gate, the modesty rules, the anachronism lists — those are
+editorial judgements belonging to the repo that holds them. This service
+never weakens a project's gate and does not try to own one.
+
+### Not installed by default
+
+`[images]` is deliberately outside `[all]`. mflux is built on MLX and runs on
+Apple Silicon only, and it pulls several GB of toolchain, so `install.sh`
+would otherwise impose it on every developer on every platform. Everything
+under `llm_sidecar/images` imports mflux lazily: the package installs,
+imports and tests cleanly without it, and the HTTP routes answer `501` with
+an explanation rather than a stack trace.
+
+---
+
 ## Honest limitations
 
 - **Verification is only as good as retrieval.** The verifier can only grade
@@ -554,6 +793,12 @@ Measured on an M3 Max, not estimated.
   is a different product; producing them is not.
 - `searxng` drives Docker or Podman compose. Anything else: run the compose
   file yourself and set `SEARXNG_URL`.
+- **`claude/` ignores `max_tokens` and `temperature`**, because the CLI has no
+  flag for either. They are dropped rather than approximated — a `max_tokens`
+  that silently does nothing is worse than one that is documented as absent.
+  Multi-turn conversations are flattened to a transcript for the same reason:
+  the CLI takes one prompt, and pretending turn boundaries survived would be
+  the dishonest version.
 
 ---
 
