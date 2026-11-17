@@ -104,7 +104,7 @@ the fastest one.
 | `kontext-edit` | 1024x1024 | est. | 14 GiB | 1 | **no** |
 | `lineart` | 1024x640 | ~93s | 14 GiB | up to 3 | yes |
 
-### Seven things that will bite you otherwise
+### Eight things that will bite you otherwise
 
 1. **Budget from the edit figure, not the generation figure.** A picture book
    is mostly `characters-consistent` at 60-93s, not `standard` at 23s. Using
@@ -113,20 +113,31 @@ the fastest one.
    loads another, and for `zimage-negprompt` that swap alone costs ~40s
    (117s cold against 76s warm). Generate everything, *then* upscale the
    keepers — do not interleave.
-3. **Only `zimage-negprompt` can keep something OUT of an image.** Every
+3. **You are probably not the only caller.** The daemon is shared, and the
+   queue is currently first-come-first-served, so another tool asking for a
+   different profile between two of your jobs makes *both* of you pay a
+   reload. Observed in practice: two consumers alternating profiles reloaded
+   a model on every single generation.
+
+   If a long batch matters, either run it when nothing else is using the
+   daemon, or agree a profile order with the other caller. `GET
+   /v1/images/status` reports which model is resident, and every generate
+   response carries `"warm": false` when that call had to load one — if you
+   see that on back-to-back jobs of the same profile, you have company.
+4. **Only `zimage-negprompt` can keep something OUT of an image.** Every
    other profile runs klein at guidance 1.0, which cannot exclude anything:
    a `negative` sent to them is accepted and silently ignored. If a negative
    prompt is your content gate, name that profile explicitly. It is never
    substituted in, and it is not the default because it needs 28 GiB.
-4. **Slow and synchronous.** Set your client timeout to **at least 300s**;
+5. **Slow and synchronous.** Set your client timeout to **at least 300s**;
    600s if you use 3 refs or upscale.
-5. **One at a time, machine-wide.** A second request waits rather than
+6. **One at a time, machine-wide.** A second request waits rather than
    competing for memory. That is the point — two models at once is what made
    a 36 GiB machine swap.
-6. **`commercial` defaults to `true`**, which *refuses* `cinematic` and
+7. **`commercial` defaults to `true`**, which *refuses* `cinematic` and
    `kontext-edit` (non-commercial weights). Send `"commercial": false` only
    if the output genuinely is not commercial.
-7. **Consistency needs references.** Describing a character in words gives a
+8. **Consistency needs references.** Describing a character in words gives a
    different person every time. Pass up to 3 `refs` with
    `characters-consistent`.
 
