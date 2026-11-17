@@ -657,19 +657,31 @@ machine, because "keeping the model loaded makes it faster" is a claim, not
 a fact.
 
 On an M3 Max (36 GiB) with `characters-txt2img` at 1024x1024, keeping the
-model resident initially made the **second image three times slower**: 35s
-cold, 96s warm. The weights were not the problem. MLX keeps freed buffers in
-a reuse cache, that cache grows with every generation, and on a 36 GiB
-machine it pushed the resident model towards swap — the exact failure the
-warm-model design was meant to prevent.
+model resident made the second image **worse, and worsening**:
 
-The fix is one call: `mx.clear_cache()` after each image, which drops the
-reuse cache without touching the loaded weights. `/v1/images/status` now
-reports `mlx_active_gib` and `mlx_cache_gib`, so "the second image took three
-times as long" is diagnosable rather than mysterious.
+| | before `clear_cache` | after |
+|---|---|---|
+| 1st (cold) | 35.0s | 33.7s |
+| 2nd (warm) | 96.4s | 42.0s |
+| 3rd (warm) | >120s, abandoned | 84.9s |
 
-Worth stating plainly: run `bench` on your own machine rather than trusting
-these numbers. Memory headroom is what decides them, and it differs.
+Releasing MLX's buffer cache after each image (`mx.clear_cache()`, which
+drops reusable freed buffers without touching the loaded weights) roughly
+halved the second image. It did **not** fix the trend: the third is still
+more than twice the first, with MLX reporting 3.2 GiB active and 0.0 GiB
+cached throughout.
+
+So the cache was a contributor, not the cause, and the real one is not
+isolated — macOS recorded no thermal warning, and system memory was 64%
+free afterwards. `/v1/images/status` reports `mlx_active_gib` and
+`mlx_cache_gib` so the next person can see more than we could.
+
+The honest summary: **keeping a model resident is not faster on this
+machine.** What it buys is control — one model in memory rather than two,
+and one generation at a time — which is still worth having on a laptop that
+has to hold a 31 GiB profile. But the latency argument for a warm model is
+not supported by measurement here, and if you are choosing on speed, run
+`llm-sidecar image bench` on your own machine rather than trusting ours.
 
 ### Skipping work that is already done
 

@@ -345,7 +345,13 @@ def _trim_cache() -> None:
     model towards swap.
 
     `clear_cache` drops the cache without touching live arrays, so the model
-    stays loaded and the next generation starts from a clean allocator."""
+    stays loaded and the next generation starts from a clean allocator.
+
+    It halves the problem rather than solving it: with this in place the
+    second image went 96s -> 42s, but the third was still 85s against 34s
+    cold, with MLX reporting 0.0 GiB cached throughout. So the cache was a
+    contributor and something else is the cause. Keeping this call because
+    the improvement is real and measured; not claiming it is the fix."""
     try:
         import mlx.core as mx
         mx.clear_cache()
