@@ -85,11 +85,14 @@ class Profile:
 
 PROFILES: dict[str, Profile] = {p.name: p for p in [
     Profile(
-        name="draft", model="z-image-turbo", variant="z-image-turbo", steps=8, quantize=8,
-        width=1024, height=768, supports_negative=True,
-        licence="Apache-2.0", commercial_ok=True, gated=False, peak_gib=31.0,
-        note="Ungated and commercially clear, with a negative prompt that "
-             "actually works. The default for bulk work.",
+        name="standard", model="flux2-klein-4b", variant="klein", steps=4,
+        quantize=8, guidance=1.0,
+        licence="Apache-2.0", commercial_ok=True, peak_gib=12.0,
+        measured_s=23.4,
+        note="The default. FLUX.2 klein-4b at q8: measured 22-26s per "
+             "1024x1024 image with ~12 GiB peak, so it leaves headroom on a "
+             "36 GiB machine. Also the right choice for character sheets. "
+             "Never q4 or q5 — lower quantisations paint fake signatures.",
     ),
     Profile(
         name="fast", model="schnell", variant="flux1", steps=4, quantize=8,
@@ -105,12 +108,16 @@ PROFILES: dict[str, Profile] = {p.name: p for p in [
              "unless the request says commercial=False.",
     ),
     Profile(
-        name="characters-txt2img", model="flux2-klein-4b", variant="klein", steps=4,
-        quantize=8, guidance=1.0,
-        licence="Apache-2.0", commercial_ok=True, peak_gib=12.0,
-        measured_s=23.4,
-        note="Character sheets. Never q4 or q5 — lower quantisations put "
-             "fake signatures in the output.",
+        name="zimage-negprompt", model="z-image-turbo", variant="z-image-turbo",
+        steps=8, quantize=8, width=1024, height=768, supports_negative=True,
+        licence="Apache-2.0", commercial_ok=True, gated=False, peak_gib=31.0,
+        note="Z-Image-Turbo, and the only profile with a negative prompt that "
+             "actually does something — klein at guidance 1.0 cannot exclude "
+             "anything, so work that depends on keeping subjects *out* of an "
+             "image has to ask for this by name. Named for what it is rather "
+             "than for a weight class: at ~31 GiB peak it is the heaviest "
+             "profile here, not a draft-quality one, and it was called `draft` "
+             "until that misled someone into expecting fast and light.",
     ),
     Profile(
         name="characters-consistent", model="flux2-klein-4b", variant="klein-edit", steps=4,
@@ -140,7 +147,7 @@ PROFILES: dict[str, Profile] = {p.name: p for p in [
     ),
 ]}
 
-DEFAULT_PROFILE = "draft"
+DEFAULT_PROFILE = "standard"
 
 
 def get(name: str) -> Profile:
@@ -167,9 +174,8 @@ def check(profile: Profile, *, commercial: bool, refs: list) -> None:
     if profile.requires_refs and not refs:
         raise ProfileError(
             f"Profile {profile.name!r} edits an existing image and needs at "
-            f"least one reference. Use "
-            f"{'characters-txt2img' if 'character' in profile.name else 'draft'} "
-            f"to generate from text alone."
+            f"least one reference. Use {DEFAULT_PROFILE!r} to generate from "
+            f"text alone."
         )
     if len(refs) > profile.max_refs:
         raise ProfileError(

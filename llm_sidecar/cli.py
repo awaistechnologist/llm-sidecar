@@ -521,7 +521,7 @@ def main(argv: list[str] | None = None) -> int:
     img.add_argument("action", nargs="?", default="status",
                      choices=["gen", "profiles", "status", "bench"])
     img.add_argument("prompt", nargs="?", default="")
-    img.add_argument("--profile", default="draft")
+    img.add_argument("--profile", default="standard")
     img.add_argument("--out", default=".", help="output directory")
     img.add_argument("--stem", default="image", help="filename stem")
     img.add_argument("--ref", action="append", dest="refs", default=[],

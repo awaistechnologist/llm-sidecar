@@ -1,17 +1,27 @@
 """Image generation — one local service for every project on this machine.
 
-Five projects here each drove mflux themselves: three mflux versions, two
-repos borrowing another repo's virtualenv, the model reloaded per image in
-the subprocess callers, per-directory locks that could not stop two repos
-generating at once, and five provenance formats. This is the single owner of
-mflux, and everything else asks it.
+Five projects here each drove mflux themselves, in two different ways and
+with two different costs:
+
+  - in-process (social-media-poster, inspiring-kids/flux-test) skips mflux's
+    CallbackManager, so MLX's buffer cache is never capped and generation
+    times swing — 22.5s to 77.6s measured for the same image
+  - CLI-per-image (inspired-tidings, quran-bloom, andalus) does get a
+    MemorySaver, which evicts the text encoder, so every prompt rebuilds the
+    model — about 20s of tax per image
+
+Plus three mflux versions, two repos borrowing another repo's virtualenv,
+per-directory locks that could not stop two repos generating at once, and
+five provenance formats. This is the single owner of mflux: one resident
+model behind a capped cache, which avoids both costs, and everything else
+asks it.
 
 Callers name a **profile**, not a model:
 
     from llm_sidecar import Sidecar
 
     sc = Sidecar()
-    r = sc.generate_image("a red apple on a wooden table", profile="draft")
+    r = sc.generate_image("a red apple on a wooden table", profile="standard")
     print(r.path)
 
 A profile carries the model, steps, quantisation, licence, memory peak and

@@ -616,10 +616,10 @@ upgrading a profile upgrades every caller at once.
 
 | profile | for | refs | commercial |
 |---|---|---|---|
-| `draft` | bulk work; real negative prompt, ungated | 0 | yes |
+| `standard` | **the default** — klein-4b q8, measured 22-26s at 1024x1024 | 0 | yes |
 | `fast` | FLUX.1-schnell (gated: needs an HF token) | 0 | yes |
 | `cinematic` | best-looking FLUX.1-dev | 0 | **no** |
-| `characters-txt2img` | character sheets | 0 | yes |
+| `zimage-negprompt` | the only profile whose **negative prompt works**; ~31 GiB | 0 | yes |
 | `characters-consistent` | **the same character across frames** | 3 | yes |
 | `kontext-edit` | continuity edits to an existing frame | 1 | **no** |
 | `lineart` | colouring pages | 3 | yes |
@@ -656,10 +656,20 @@ formats.
 one, because the interesting number is the slowest, not the average.
 
 The first version of this module had a real bug, found by benchmarking
-rather than by reading the code. Driving mflux's Python classes directly —
-which is what every project on this machine did — leaves **MLX's buffer
-cache uncapped**. It grew to 16.2 GiB beside 3.2 GiB of live weights, and
-generation times became unpredictable.
+rather than by reading the code. Driving mflux's Python classes directly
+leaves **MLX's buffer cache uncapped** — the CLI caps it through
+`CallbackManager`, the classes on their own do not. It grew to 16.2 GiB
+beside 3.2 GiB of live weights, and generation times became unpredictable.
+
+There are two ways to drive mflux and each has its own cost, which is why a
+shared service helps either way:
+
+| how a caller drives mflux | what it costs |
+|---|---|
+| Python classes in-process | uncapped cache; unpredictable times |
+| the CLI, one process per image | `MemorySaver` evicts the text encoder, so every prompt rebuilds the model |
+
+The sidecar takes neither: it keeps one model resident *and* caps the cache.
 
 M3 Max, FLUX.2 klein-4b q8 at 1024x1024, four runs per setting, on a
 machine that started 92% free. Peak allocation during a generation: 11.9 GiB.

@@ -79,7 +79,7 @@ rather than guessing.
 curl -s localhost:4001/v1/images/generate \
   -H 'Content-Type: application/json' \
   -d '{"prompt":"a red apple on a wooden table",
-       "profile":"draft",
+       "profile":"standard",
        "out_dir":"/Users/you/pics",
        "stem":"apple",
        "project":"my-app"}'
@@ -89,10 +89,10 @@ Ask for a **profile**, never a model. `GET /v1/images/profiles` lists them.
 
 | profile | for | refs | commercial use |
 |---|---|---|---|
-| `draft` | general work, ungated, real negative prompt | 0 | yes |
+| `standard` | **the default** — klein-4b q8, ~23s at 1024x1024 | 0 | yes |
 | `fast` | FLUX.1-schnell (needs an HF token) | 0 | yes |
 | `cinematic` | best-looking | 0 | **no** |
-| `characters-txt2img` | character sheets | 0 | yes |
+| `zimage-negprompt` | the only profile whose **negative prompt works** | 0 | yes |
 | `characters-consistent` | **same character across frames** | up to 3 | yes |
 | `kontext-edit` | continuity edit of an existing frame | 1 | **no** |
 | `lineart` | colouring pages | up to 3 | yes |
@@ -109,6 +109,11 @@ Four things to know:
   not commercial.
 - **Consistency needs references.** Describing a character in words gives a
   different person every time. Pass `refs` with `characters-consistent`.
+- **Only `zimage-negprompt` can keep something *out* of an image.** Every
+  other profile runs klein at guidance 1.0, which cannot exclude anything —
+  a `negative` sent to them is accepted and ignored. If you are using a
+  negative prompt as a content gate, name that profile explicitly. It costs
+  ~31 GiB, so it is not the default and never substituted in.
 
 Each image gets a `<image>.png.json` manifest beside it recording the
 request, model, licence and a digest. Re-requesting an identical image is

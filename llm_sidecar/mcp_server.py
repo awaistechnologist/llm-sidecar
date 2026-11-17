@@ -356,7 +356,7 @@ def list_image_profiles() -> dict:
 
 
 @mcp.tool()
-def generate_image(prompt: str, out_dir: str, profile: str = "draft",
+def generate_image(prompt: str, out_dir: str, profile: str = "standard",
                    stem: str = "image", negative: str = "",
                    width: int = 0, height: int = 0, seed: int = 0,
                    project: str = "", commercial: bool = True) -> dict:

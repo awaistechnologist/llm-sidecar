@@ -136,7 +136,7 @@ class VerifyRequest(BaseModel):
 
 class ImageRequestBody(BaseModel):
     prompt: str = ""
-    profile: str = "draft"
+    profile: str = "standard"
     negative: str | None = None
     refs: list[str] = []
     width: int | None = None

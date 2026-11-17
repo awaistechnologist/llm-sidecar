@@ -65,7 +65,10 @@ Notable changes per release. Dates are release dates.
   unpredictable: 22.5s to 77.6s across runs on a machine that started 92%
   free, with the cache growing to 16.2 GiB beside 3.2 GiB of live weights.
   mflux's CLI caps it through `CallbackManager`; driving the Python classes
-  directly, which is what every project on this machine does, skips that.
+  directly skips that. The two ways of driving mflux have different costs —
+  in-process callers get the uncapped cache, CLI-per-image callers get a
+  model rebuild on every prompt — and a resident model behind a capped cache
+  avoids both.
 
   The size turned out to matter more than the fact of capping. Four runs
   each, where a generation peaks at 11.9 GiB:

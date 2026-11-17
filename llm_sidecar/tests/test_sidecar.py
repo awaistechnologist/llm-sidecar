@@ -2907,10 +2907,10 @@ def test_non_commercial_profile_refused_by_default():
     with pytest.raises(pf.LicenceError) as e:
         pf.check(pf.get("cinematic"), commercial=True, refs=[])
     # The message has to name the alternatives, or it just blocks the user.
-    assert "draft" in str(e.value)
+    assert "standard" in str(e.value)
 
     pf.check(pf.get("cinematic"), commercial=False, refs=[])   # allowed
-    pf.check(pf.get("draft"), commercial=True, refs=[])        # always fine
+    pf.check(pf.get("standard"), commercial=True, refs=[])     # always fine
 
 
 def test_edit_profile_requires_references():
@@ -2966,7 +2966,7 @@ def test_manifest_round_trip_and_currency(tmp_path):
     img = tmp_path / "scene_1.png"
     img.write_bytes(b"png")
     payload = manifest.build(
-        request={"prompt": "p"}, profile=pf.get("draft"), digest_value="abc123",
+        request={"prompt": "p"}, profile=pf.get("standard"), digest_value="abc123",
         seed=1, ref_hashes=[], timing={"generate_s": 9.5, "warm": True},
         mflux_version="0.24.0",
     )
@@ -2987,11 +2987,11 @@ def test_image_memory_guard_refuses_rather_than_swaps(monkeypatch):
 
     monkeypatch.setattr(hardware, "usable_gib", lambda hw=None: 8.0)
     with pytest.raises(engine.OutOfMemory) as e:
-        engine.guard(pf.get("draft"))            # needs ~31 GiB
+        engine.guard(pf.get("zimage-negprompt"))   # needs ~31 GiB
     assert "swap" in str(e.value).lower()
 
     monkeypatch.setattr(hardware, "usable_gib", lambda hw=None: 40.0)
-    assert engine.guard(pf.get("draft"))["verdict"] == "fits"
+    assert engine.guard(pf.get("zimage-negprompt"))["verdict"] == "fits"
 
 
 def test_images_import_without_mflux(monkeypatch):
@@ -3178,7 +3178,7 @@ def test_cache_cap_follows_an_unexpectedly_large_generation(monkeypatch):
 
     monkeypatch.setitem(__import__("sys").modules, "mlx.core", FakeMx)
 
-    profile = pf.get("characters-txt2img")          # nominal peak 12 GiB
+    profile = pf.get("standard")                    # nominal peak 12 GiB
     engine.retune_mlx_cache(profile)
     assert caps == [20.0]
 
@@ -3187,3 +3187,72 @@ def test_cache_cap_follows_an_unexpectedly_large_generation(monkeypatch):
     FakeMx.get_peak_memory = staticmethod(lambda: int(5.0 * 1024 ** 3))
     engine.retune_mlx_cache(profile)
     assert caps == []
+
+
+def test_default_profile_leaves_headroom():
+    """The default must not be the heaviest thing in the table.
+
+    It was: `draft` meant Z-Image-Turbo at ~31 GiB against ~33 usable on a
+    36 GiB Mac, so the out-of-the-box choice was the one guaranteed to
+    thrash. A caller who names no profile gets the measured one instead."""
+    from llm_sidecar.images import profiles as pf
+
+    default = pf.get(pf.DEFAULT_PROFILE)
+    heaviest = max(pf.PROFILES.values(), key=lambda p: p.peak_gib)
+
+    assert default.peak_gib < heaviest.peak_gib
+    # Comfortable on a 36 GiB machine (~33 usable), with room for the editor
+    # and the browser the user also has open.
+    assert default.peak_gib <= 16.0
+    assert default.commercial_ok and not default.gated
+    # Measured, not estimated — the cache cap is sized from this number.
+    assert default.measured_s is not None
+
+
+def test_only_one_profile_can_exclude_things_from_an_image():
+    """Z-Image is the sole profile whose negative prompt does anything.
+
+    klein runs at guidance 1.0 and cannot exclude a subject at all, so work
+    that depends on keeping people or objects *out* of an image has to ask
+    for zimage-negprompt by name. Nothing may silently route it elsewhere:
+    the projects relying on this use it as a content gate."""
+    from llm_sidecar.images import profiles as pf
+
+    negative_capable = [n for n, p in pf.PROFILES.items() if p.supports_negative]
+    assert negative_capable == ["zimage-negprompt"]
+    assert not pf.get(pf.DEFAULT_PROFILE).supports_negative
+
+
+def test_cache_cap_is_retuned_when_the_resident_model_changes(monkeypatch):
+    """Swapping profiles must re-size the cap, not inherit the old one.
+
+    A klein-sized cap (13.8 GiB) left in place for Z-Image, whose working
+    set is ~31 GiB, would be a cap far below the working set — the slowest
+    case measured, and on a 36 GiB machine the one that swaps."""
+    from llm_sidecar.images import engine, profiles as pf
+
+    caps: list[float] = []
+    monkeypatch.setattr(engine, "cap_mlx_cache", lambda peak, **k: caps.append(peak))
+    monkeypatch.setattr(engine, "VARIANTS",
+                        {"klein": ("builtins", "dict"),
+                         "z-image-turbo": ("builtins", "dict")})
+
+    class FakeConfigResolution:
+        @staticmethod
+        def resolve(name): return object()
+
+    import sys, types
+    fake = types.ModuleType("mflux.models.common.resolution.config_resolution")
+    fake.ConfigResolution = FakeConfigResolution
+    for name in ("mflux", "mflux.models", "mflux.models.common",
+                 "mflux.models.common.resolution"):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    monkeypatch.setitem(sys.modules,
+                        "mflux.models.common.resolution.config_resolution", fake)
+
+    resident = engine._Resident()
+    resident.get(pf.get("standard"))            # peak 12
+    resident.get(pf.get("zimage-negprompt"))    # peak 31
+    resident.get(pf.get("standard"))            # back down to 12
+
+    assert caps == [12.0, 31.0, 12.0]
