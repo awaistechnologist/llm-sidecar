@@ -3101,3 +3101,67 @@ def test_claude_binary_found_without_path(monkeypatch, tmp_path):
     # An explicit path still wins outright, and a bad one is not silently
     # replaced by a guess — that would hide a typo.
     assert claude_cli.binary(Config(claude_cli_path="/nope/claude")) is None
+
+
+def test_spent_model_is_rebuilt_not_reused():
+    """mflux's MemorySaver drops the text encoder once the prompt is encoded,
+    and Flux2 keeps no prompt cache — so a resident model cannot serve a
+    second prompt. Reusing one would raise deep inside mflux on the next
+    call instead of here."""
+    from llm_sidecar.images.engine import _encoder_evicted
+
+    class Spent:
+        text_encoder = None
+        small_text_encoder = False
+
+    class Live:
+        text_encoder = object()
+        small_text_encoder = False
+
+    class Small:
+        # The small encoder is loaded separately and never evicted.
+        text_encoder = None
+        small_text_encoder = True
+
+    class Upscaler:
+        """SeedVR2 has no text encoder at all."""
+
+    assert _encoder_evicted(Spent()) is True
+    assert _encoder_evicted(Live()) is False
+    assert _encoder_evicted(Small()) is False
+    assert _encoder_evicted(Upscaler()) is False
+    assert _encoder_evicted(None) is False
+
+
+def test_mlx_cache_is_capped_and_scales_to_the_machine(monkeypatch):
+    """The fix for the degradation, and the reason it is a cap rather than
+    mflux's MemorySaver.
+
+    Unbounded, MLX's buffer cache reached 16.2 GiB beside 3.2 GiB of live
+    weights, and the third 1024x1024 image took 77.6s after two at ~23s.
+    Capping it removed the cliff (31.8-40.3s over four runs) while keeping
+    the weights resident. MemorySaver also caps the cache, but evicts the
+    text encoder too, which forces a rebuild per prompt and cost ~20s on
+    every image instead."""
+    from llm_sidecar.images import engine
+
+    seen = []
+
+    class FakeMx:
+        @staticmethod
+        def set_cache_limit(n): seen.append(n)
+
+    monkeypatch.setitem(__import__("sys").modules, "mlx.core", FakeMx)
+
+    # A quarter of usable memory, so the cap is not itself the problem on a
+    # small machine.
+    assert engine.cap_mlx_cache(36.0) == 8.0      # clamped at the ceiling
+    assert engine.cap_mlx_cache(13.0) == 3.25
+    assert engine.cap_mlx_cache(5.0) == 2.0       # clamped at the floor
+    assert len(seen) == 3
+
+    # Unknown memory must not mean an unbounded cache by accident — it means
+    # we leave MLX's default alone rather than guessing a number.
+    seen.clear()
+    assert engine.cap_mlx_cache(0) is None
+    assert seen == []

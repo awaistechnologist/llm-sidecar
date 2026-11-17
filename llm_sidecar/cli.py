@@ -276,23 +276,42 @@ def _image_bench(args) -> int:
 
     profile = args.profile
     prompt = args.prompt or "a red apple on a wooden table, soft daylight"
+    runs = max(2, args.runs)
+
+    # Four runs by default, not two, and every one is printed.
+    #
+    # A two-run bench said this machine was fine. The third run was the one
+    # that fell off a cliff — 23.9s, 22.5s, then 77.6s — because MLX's buffer
+    # cache had grown to 16 GiB by then and the kernel started paging. An
+    # average would have hidden that; the slowest run is the number you
+    # actually live with.
+    print(f"  {profile} at {args.width or 1024}x{args.height or 1024}, "
+          f"{runs} runs\n")
     with tempfile.TemporaryDirectory() as tmp:
         engine.RESIDENT.unload()
-        rows = []
-        for i, label in enumerate(("cold", "warm", "warm")):
+        times = []
+        for i in range(runs):
             r = im.generate(im.ImageRequest(
-                prompt=prompt, profile=profile, out_dir=tmp, stem=f"bench{i}",
-                width=args.width or 512, height=args.height or 512,
-                seed=100 + i, project="bench",
+                prompt=f"{prompt} (take {i})", profile=profile, out_dir=tmp,
+                stem=f"bench{i}", width=args.width or 1024,
+                height=args.height or 1024, seed=100 + i, project="bench",
             ))
-            rows.append((label, r.seconds))
-            print(f"  {label:<5} {r.seconds:6.1f}s")
+            times.append(r.seconds)
+            st = engine.status()
+            print(f"  run{i + 1} {r.seconds:6.1f}s  "
+                  f"{'cold' if i == 0 else 'warm'}  "
+                  f"mlx cache {st.get('mlx_cache_gib', '?')}G")
 
-    cold = rows[0][1]
-    warm = sum(s for l, s in rows[1:] if l == "warm") / max(1, len(rows) - 1)
+    steady = times[1:] or times
+    best, worst = min(steady), max(steady)
     print()
-    print(f"profile {profile}: cold {cold:.1f}s, warm {warm:.1f}s "
-          f"— keeping it resident saves {cold - warm:.1f}s per image.")
+    print(f"  first {times[0]:.1f}s · then {best:.1f}-{worst:.1f}s")
+    if worst > best * 1.5:
+        print()
+        print("  Unstable: the slowest steady run is more than half again the")
+        print("  fastest. That is memory pressure, not the model. Close "
+              "something,")
+        print("  or use a profile with a smaller peak.")
     return 0
 
 
@@ -514,6 +533,8 @@ def main(argv: list[str] | None = None) -> int:
     img.add_argument("--seed", type=int)
     img.add_argument("--resolution", type=int, help="upscale: target long edge")
     img.add_argument("--project", default="", help="recorded in the manifest")
+    img.add_argument("--runs", type=int, default=4,
+                     help="with bench: how many images to time (default 4)")
     img.add_argument("--non-commercial", action="store_true",
                      help="permit non-commercial profiles (cinematic, kontext-edit)")
 

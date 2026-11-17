@@ -14,9 +14,19 @@ actually causes swapping. The lock is on the engine, held across the whole
 generation, and taken through a file so it holds across processes too: the
 daemon and a library-mode caller in some other repo are not the same process.
 
-**Loading is the expensive half.** Measured on this machine rather than
-assumed; see BENCH. That is the entire argument for a shared service over
-`subprocess` per image, so the numbers are recorded rather than claimed.
+**A bounded MLX buffer cache.** The one that actually bit. MLX keeps freed
+buffers for reuse and, uncapped, grew to 16.2 GiB beside 3.2 GiB of live
+weights — after which the third 1024x1024 image took 77.6s following two at
+~23s, on a machine that started 92% free. `cap_mlx_cache` removes the cliff.
+
+That measurement also killed this module's original premise, which was that
+loading is the expensive half and keeping a model warm is therefore the
+point. It is not: mflux loads weights lazily, construction is under a
+second, and a warm model measured no faster than a cold one. What holding
+one model buys is a bound on how much is in memory at once — which on a
+36 GiB laptop with a 31 GiB profile is reason enough, just not the reason
+originally written here. Run `llm-sidecar image bench` rather than trusting
+any of these numbers on a different machine.
 
 mflux is an optional dependency — Apple Silicon only, and heavy. Nothing here
 is imported until an image is actually requested, so the package installs and
@@ -49,6 +59,15 @@ VARIANTS: dict[str, tuple[str, str]] = {
 }
 
 LOCK_FILE = CONFIG_DIR / "images.lock"
+
+GIB = 1024 ** 3
+
+# Ceiling on MLX's buffer cache — reusable freed buffers it would otherwise
+# hoard. Left alone it reached 15.8 GiB here on a machine that started 92%
+# free, and forced a thousand pageouts in a single generation. MLX gives the
+# memory back when capped; the cap costs a little allocator churn and buys
+# not being the process that pushes everything else to swap.
+MLX_CACHE_LIMIT = 4 * GIB
 
 # Drop the resident model after this long unused. Long enough that a batch
 # of images pays the load once, short enough that an idle daemon is not
@@ -142,6 +161,55 @@ def guard(profile: Profile, allow_tight: bool = True) -> dict:
 # ── the one resident model ────────────────────────────────────────────────
 
 
+def cap_mlx_cache(usable_gib: float | None = None) -> float | None:
+    """Bound MLX's buffer cache. The single most important call in here.
+
+    MLX keeps freed buffers for reuse and, left alone, will hold as many as
+    it likes. Measured on an M3 Max generating 1024x1024: it reached 16.2
+    GiB beside 3.2 GiB of live weights, and the third image took 77.6s after
+    two at ~23s. The machine had started 92% free. Capping the cache removed
+    the cliff outright — four runs at 31.8-40.3s with the weights still
+    resident.
+
+    Why not mflux's own MemorySaver, which also caps the cache: it evicts
+    the text encoder after encoding, and Flux2 keeps no prompt cache, so the
+    model has to be rebuilt for every prompt. Measured, that cost about 20s
+    on *every* image (43s steady against 32s) — it trades the cliff for a
+    permanent tax. The cap alone buys the stability without the tax.
+
+    Scaled to the machine rather than fixed: a quarter of usable memory,
+    which is 8 GiB on a 36 GiB Mac and proportionally less on a smaller one,
+    where an 8 GiB cache would be the whole problem."""
+    try:
+        import mlx.core as mx
+    except ImportError:
+        return None
+
+    if usable_gib is None:
+        from .. import hardware
+        usable_gib = hardware.usable_gib()
+    if not usable_gib:
+        return None
+
+    limit_gib = max(2.0, min(8.0, usable_gib * 0.25))
+    mx.set_cache_limit(int(limit_gib * GIB))
+    logger.debug("MLX cache capped at %.1f GiB", limit_gib)
+    return limit_gib
+
+
+def _encoder_evicted(model) -> bool:
+    """Whether MemorySaver has dropped this model's text encoder.
+
+    Such a model can still decode but cannot encode another prompt, so it is
+    spent. Variants without a text encoder at all (SeedVR2 upscaling) and
+    ones using the small encoder are unaffected."""
+    if model is None or not hasattr(model, "text_encoder"):
+        return False
+    if getattr(model, "small_text_encoder", False):
+        return False
+    return model.text_encoder is None
+
+
 class _Resident:
     """At most one loaded model, guarded for both threads and processes."""
 
@@ -184,8 +252,13 @@ class _Resident:
         key = f"{profile.variant}:{profile.model}:{profile.quantize}"
         with self._lock:
             if self.key == key and self.model is not None:
-                self.last_used = time.time()
-                return self.model, 0.0, True
+                if not _encoder_evicted(self.model):
+                    self.last_used = time.time()
+                    return self.model, 0.0, True
+                # Spent: the encoder went when the last prompt was encoded.
+                # Rebuilding is cheap because mflux loads weights lazily —
+                # far cheaper than the paging that holding it caused.
+                logger.debug("text encoder evicted; rebuilding %s", key)
 
             # A different profile: drop the old weights *first*. Holding both
             # briefly is exactly the peak this service exists to avoid.
@@ -204,6 +277,7 @@ class _Resident:
             if profile.quantize is not None:
                 kwargs["quantize"] = profile.quantize
             self.model = cls(**kwargs)
+            cap_mlx_cache()
             self.load_s = round(time.time() - t, 2)
             self.key = key
             self.loaded_at = self.last_used = time.time()
@@ -325,38 +399,12 @@ def run(profile: Profile, *, prompt: str, negative: str | None, seed: int,
         out.parent.mkdir(parents=True, exist_ok=True)
         image.save(path=str(out))
         RESIDENT.last_used = time.time()
-        _trim_cache()
 
     if profile.post == "lineart":
         _lineart(out)
 
     return {"load_s": load_s, "generate_s": generate_s, "warm": warm,
             "path": str(out)}
-
-
-def _trim_cache() -> None:
-    """Release MLX's buffer cache after each image, keeping the weights.
-
-    Measured, not assumed. Keeping a model resident was supposed to make the
-    second image faster; on an M3 Max at 1024x1024 it made it *three times
-    slower* — 35s cold, then 96s warm. The weights were not the problem: MLX
-    holds freed buffers in a cache for reuse, that cache grows with every
-    generation, and on a 36 GiB machine it eventually pushes the resident
-    model towards swap.
-
-    `clear_cache` drops the cache without touching live arrays, so the model
-    stays loaded and the next generation starts from a clean allocator.
-
-    It halves the problem rather than solving it: with this in place the
-    second image went 96s -> 42s, but the third was still 85s against 34s
-    cold, with MLX reporting 0.0 GiB cached throughout. So the cache was a
-    contributor and something else is the cause. Keeping this call because
-    the improvement is real and measured; not claiming it is the fix."""
-    try:
-        import mlx.core as mx
-        mx.clear_cache()
-    except Exception:
-        pass
 
 
 def _lineart(path: Path) -> None:
@@ -383,11 +431,11 @@ def status() -> dict:
     if out["available"]:
         from .. import hardware
         out["usable_gib"] = hardware.usable_gib()
-        # Reported because it is what made a resident model slower than a
-        # cold one here, and "the second image took three times as long" is
-        # otherwise an unexplainable symptom. active is the weights and live
-        # arrays; cache is reusable freed buffers, and should stay small
-        # between generations now that _trim_cache runs after each.
+        # Reported because the cache is what made the third image take
+        # 77.6s after two at ~23s, and "it got slower" is otherwise an
+        # unexplainable symptom. active is the weights and live arrays;
+        # cache is reusable freed buffers, and should now sit at or below
+        # the figure cap_mlx_cache set rather than climbing past 16 GiB.
         try:
             import mlx.core as mx
             out["mlx_active_gib"] = round(mx.get_active_memory() / 2 ** 30, 2)

@@ -650,38 +650,60 @@ formats.
   so `cinematic` and `kontext-edit` are refused unless a caller says the
   output is non-commercial. That check runs before 10 GiB loads.
 
-### What we measured, including the surprise
+### Speed, and the bug that was costing it
 
-`llm-sidecar image bench` times a cold generation against warm ones on your
-machine, because "keeping the model loaded makes it faster" is a claim, not
-a fact.
+`llm-sidecar image bench` times four images on your machine and prints every
+one, because the interesting number is the slowest, not the average.
 
-On an M3 Max (36 GiB) with `characters-txt2img` at 1024x1024, keeping the
-model resident made the second image **worse, and worsening**:
+The first version of this module had a real bug, found by benchmarking
+rather than by reading the code. Driving mflux's Python classes directly —
+which is what every project on this machine did — leaves **MLX's buffer
+cache uncapped**. It grew to 16.2 GiB beside 3.2 GiB of live weights, and
+then:
 
-| | before `clear_cache` | after |
+| 1024x1024, q8, M3 Max | run 1 | run 2 | run 3 | run 4 | cache |
+|---|---|---|---|---|---|
+| uncapped | 23.9s | 22.5s | **77.6s** | — | 16.2 GiB |
+| capped at 8 GiB | 32.8s | 31.8s | 32.9s | 40.3s | 8.0 GiB |
+
+The machine started 92% free. A two-run benchmark would have called the
+uncapped version faster and missed the cliff entirely.
+
+`cap_mlx_cache` sets the limit to a quarter of usable memory, so it is 8 GiB
+on a 36 GiB Mac and proportionally less on a smaller one.
+
+**Why not mflux's own `MemorySaver`**, which the CLI always installs and
+which also caps the cache: it additionally evicts the text encoder after
+encoding, and FLUX.2 keeps no prompt cache, so the model has to be rebuilt
+for every prompt. Measured, that costs about 20s on *every* image — 43s
+steady against 32s. It trades the cliff for a permanent tax. The cap alone
+buys the stability without it.
+
+A smaller cache is not better, either: capped at 4 GiB the worst run was
+48.7s against 8 GiB's 32.9s. Starving the allocator costs real time.
+
+### Quality is why this runs at q8
+
+Your choice of quantisation decides this far more than any tuning:
+
+| | 1024x1024 | output |
 |---|---|---|
-| 1st (cold) | 35.0s | 33.7s |
-| 2nd (warm) | 96.4s | 42.0s |
-| 3rd (warm) | >120s, abandoned | 84.9s |
+| bf16 | 125.6s | swaps on 36 GiB |
+| **q8** | **~32s** | **clean** |
+| q4 | 30.2s | paints a fake signature |
+| pre-quantised 4-bit | 25.7s | paints a fake signature |
 
-Releasing MLX's buffer cache after each image (`mx.clear_cache()`, which
-drops reusable freed buffers without touching the loaded weights) roughly
-halved the second image. It did **not** fix the trend: the third is still
-more than twice the first, with MLX reporting 3.2 GiB active and 0.0 GiB
-cached throughout.
+4-bit is genuinely faster and genuinely worse, so every profile pins q8 or
+better and `profiles.py` refuses anything below it.
 
-So the cache was a contributor, not the cause, and the real one is not
-isolated — macOS recorded no thermal warning, and system memory was 64%
-free afterwards. `/v1/images/status` reports `mlx_active_gib` and
-`mlx_cache_gib` so the next person can see more than we could.
+### Keeping a model resident is not about speed
 
-The honest summary: **keeping a model resident is not faster on this
-machine.** What it buys is control — one model in memory rather than two,
-and one generation at a time — which is still worth having on a laptop that
-has to hold a 31 GiB profile. But the latency argument for a warm model is
-not supported by measurement here, and if you are choosing on speed, run
-`llm-sidecar image bench` on your own machine rather than trusting ours.
+The original premise here was that reloading costs real time, so a warm
+model is faster. It is not: mflux loads weights lazily, construction is
+under a second, and a warm model measured no faster than a cold one. What
+holding one model buys is a bound on how much sits in memory at once —
+which on a 36 GiB laptop with a 31 GiB profile is reason enough, just not
+the reason originally claimed.
 
 ### Skipping work that is already done
 
