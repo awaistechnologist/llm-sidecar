@@ -85,42 +85,72 @@ curl -s localhost:4001/v1/images/generate \
        "project":"my-app"}'
 ```
 
-Ask for a **profile**, never a model. `GET /v1/images/profiles` lists them.
+Ask for a **profile**, never a model. `GET /v1/images/profiles` lists them
+with current numbers.
 
-| profile | for | refs | commercial use |
-|---|---|---|---|
-| `standard` | **the default** — klein-4b q8, ~23s at 1024x1024 | 0 | yes |
-| `fast` | FLUX.1-schnell (needs an HF token) | 0 | yes |
-| `cinematic` | best-looking | 0 | **no** |
-| `zimage-negprompt` | the only profile whose **negative prompt works** | 0 | yes |
-| `characters-consistent` | **same character across frames** | up to 3 | yes |
-| `kontext-edit` | continuity edit of an existing frame | 1 | **no** |
-| `lineart` | colouring pages | up to 3 | yes |
-| `upscale` | SeedVR2 | 1 | yes |
+### What each profile costs
 
-Four things to know:
+Measured on an M3 Max (36 GiB) through the daemon. Plan from these, not from
+the fastest one.
 
-- **It is slow and synchronous.** 15s to several minutes. Set your client
-  timeout to at least 300s.
-- **One at a time, machine-wide.** A second request waits rather than
-  competing for memory. That is deliberate.
-- **`commercial` defaults to `true`**, which *refuses* `cinematic` and
-  `kontext-edit`. Send `"commercial": false` only if the output genuinely is
-  not commercial.
-- **Consistency needs references.** Describing a character in words gives a
-  different person every time. Pass `refs` with `characters-consistent`.
-- **Only `zimage-negprompt` can keep something *out* of an image.** Every
-  other profile runs klein at guidance 1.0, which cannot exclude anything —
-  a `negative` sent to them is accepted and ignored. If you are using a
-  negative prompt as a content gate, name that profile explicitly. It costs
-  ~31 GiB, so it is not the default and never substituted in.
+| profile | typical size | time | peak RAM | refs | commercial |
+|---|---|---|---|---|---|
+| `standard` **(default)** | 1024x1024 | **23s** | 12 GiB | 0 | yes |
+| `characters-consistent` | 1024x640 | **60s** (2 refs) / **93s** (3) | 14 GiB | up to 3 | yes |
+| `zimage-negprompt` | 1024x768 | **76s** warm, 117s cold | 28 GiB | 0 | yes |
+| `upscale` (SeedVR2) | to 2400px | ~132s | 20 GiB | 1 | yes |
+| `fast` | 1024x1024 | est. | 12 GiB | 0 | yes (gated: HF token) |
+| `cinematic` | 1024x1024 | est. | 14 GiB | 0 | **no** |
+| `kontext-edit` | 1024x1024 | est. | 14 GiB | 1 | **no** |
+| `lineart` | 1024x640 | ~93s | 14 GiB | up to 3 | yes |
 
-Each image gets a `<image>.png.json` manifest beside it recording the
-request, model, licence and a digest. Re-requesting an identical image is
-skipped rather than regenerated.
+### Seven things that will bite you otherwise
+
+1. **Budget from the edit figure, not the generation figure.** A picture book
+   is mostly `characters-consistent` at 60-93s, not `standard` at 23s. Using
+   23s to estimate a batch will be wrong by 4x.
+2. **Order a batch by profile.** Switching profiles unloads one model and
+   loads another, and for `zimage-negprompt` that swap alone costs ~40s
+   (117s cold against 76s warm). Generate everything, *then* upscale the
+   keepers — do not interleave.
+3. **Only `zimage-negprompt` can keep something OUT of an image.** Every
+   other profile runs klein at guidance 1.0, which cannot exclude anything:
+   a `negative` sent to them is accepted and silently ignored. If a negative
+   prompt is your content gate, name that profile explicitly. It is never
+   substituted in, and it is not the default because it needs 28 GiB.
+4. **Slow and synchronous.** Set your client timeout to **at least 300s**;
+   600s if you use 3 refs or upscale.
+5. **One at a time, machine-wide.** A second request waits rather than
+   competing for memory. That is the point — two models at once is what made
+   a 36 GiB machine swap.
+6. **`commercial` defaults to `true`**, which *refuses* `cinematic` and
+   `kontext-edit` (non-commercial weights). Send `"commercial": false` only
+   if the output genuinely is not commercial.
+7. **Consistency needs references.** Describing a character in words gives a
+   different person every time. Pass up to 3 `refs` with
+   `characters-consistent`.
+
+### Don't regenerate what hasn't changed
+
+Every image gets a `<image>.png.json` manifest recording the request, model,
+licence and a **digest** over everything that changes the pixels — including
+the *contents* of the reference images, not their paths. Rename a reference
+and the image stays current; edit one and it does not.
+
+Re-requesting an identical image returns immediately with
+`"skipped": true` and `"seconds": 0.0`. Pass `"skip_existing": false` to
+force a regenerate.
+
+### Quality is fixed at q8, deliberately
+
+4-bit is about 20% faster and paints fake signatures into the output, which
+was measured, not assumed. Every profile pins q8 or better and the service
+refuses anything lower. If you need more speed, reduce the **resolution** —
+1024x640 is roughly half the cost of 1024x1024 — and upscale the keepers.
 
 **Content policy stays yours.** Imagery gates, modesty rules, anachronism
-lists — the sidecar does not own them and never weakens them.
+lists — the sidecar does not own them and never weakens them. It offers no
+way to turn your gate off.
 
 ---
 
