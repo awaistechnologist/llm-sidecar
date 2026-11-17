@@ -359,7 +359,8 @@ def list_image_profiles() -> dict:
 def generate_image(prompt: str, out_dir: str, profile: str = "standard",
                    stem: str = "image", negative: str = "",
                    width: int = 0, height: int = 0, seed: int = 0,
-                   project: str = "", commercial: bool = True) -> dict:
+                   project: str = "", commercial: bool = True,
+                   filename: str = "") -> dict:
     """
     Generate an image locally and write it to out_dir, with a manifest
     recording exactly how it was made.
@@ -367,6 +368,10 @@ def generate_image(prompt: str, out_dir: str, profile: str = "standard",
     Takes 20s to several minutes depending on profile. Generation is
     serialised across this whole machine, so a second call waits rather than
     competing for memory.
+
+    The file is written as <stem>_<seed>.png; pass `filename` for an exact
+    name instead. Either way, use the `path` in the result rather than
+    predicting it.
 
     `commercial` defaults to true, which REFUSES non-commercial profiles
     (cinematic, kontext-edit). Pass false only if the output genuinely is not
@@ -379,7 +384,7 @@ def generate_image(prompt: str, out_dir: str, profile: str = "standard",
             prompt=prompt, profile=profile, out_dir=out_dir, stem=stem,
             negative=negative or None,
             width=width or None, height=height or None, seed=seed or None,
-            project=project, commercial=commercial,
+            project=project, commercial=commercial, filename=filename or None,
         ))
         return {"path": r.path, "manifest": r.manifest_path, "seed": r.seed,
                 "profile": r.profile, "model": r.model, "seconds": r.seconds,

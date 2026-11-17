@@ -145,6 +145,9 @@ class ImageRequestBody(BaseModel):
     seed: int | None = None
     out_dir: str = "."
     stem: str = "image"
+    # Exact file name, when the caller has its own scheme. Default is
+    # <stem>_<seed>.png.
+    filename: str | None = None
     project: str = ""
     # Defaults to True so a caller who never thought about licensing is
     # refused a non-commercial profile rather than quietly handed one.

@@ -3320,3 +3320,44 @@ def test_measured_profiles_carry_their_timings():
     assert pf.get("characters-consistent").peak_gib > pf.get("standard").peak_gib
     # And is far slower — 93s against ~23s measured.
     assert pf.get("characters-consistent").measured_s > pf.get("standard").measured_s * 2
+
+
+def test_filename_override_for_callers_with_their_own_scheme(tmp_path):
+    """A consumer was renaming every output afterwards, which is a
+    workaround the API should not have required. Their pipeline numbers
+    shots S001.png; ours wanted scene_42.png."""
+    from llm_sidecar.images import manifest
+
+    exact = manifest.output_path(tmp_path, "scene", 42, filename="S001.png")
+    assert exact.name == "S001.png"
+
+    # Never-overwrite still applies — the point of the naming rule survives.
+    exact.write_bytes(b"x")
+    second = manifest.output_path(tmp_path, "scene", 42, filename="S001.png")
+    assert second.name == "S001-2.png"
+    assert exact.read_bytes() == b"x"
+
+    # Default is unchanged: the seed stays in the name so an image is
+    # reproducible from its own filename.
+    assert manifest.output_path(tmp_path, "scene", 42).name == "scene_42.png"
+
+
+def test_filename_cannot_escape_the_output_directory(tmp_path):
+    """A caller-supplied name is a basename, never a path. Otherwise
+    "../../.ssh/authorized_keys" is a file write wherever the daemon can
+    reach."""
+    from llm_sidecar.images import manifest
+
+    out = manifest.output_path(tmp_path, "scene", 1,
+                               filename="../../../etc/passwd.png")
+    assert out.parent == tmp_path
+    assert out.name == "passwd.png"
+
+    for bad in (".", "..", "/"):
+        with pytest.raises(ValueError):
+            manifest.output_path(tmp_path, "scene", 1, filename=bad)
+
+    # An empty string means "not set", not an error — a caller sending
+    # filename="" gets the default name rather than a refusal.
+    assert manifest.output_path(tmp_path, "scene", 1, filename="").name \
+        == "scene_1.png"

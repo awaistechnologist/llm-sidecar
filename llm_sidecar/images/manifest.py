@@ -51,15 +51,37 @@ def digest(*, profile: str, model: str, prompt: str, negative: str | None,
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
 
-def output_path(out_dir: Path, stem: str, seed: int, suffix: str = ".png") -> Path:
-    """`<out_dir>/<stem>_<seed>.png`, never overwriting an existing file."""
+def output_path(out_dir: Path, stem: str, seed: int, suffix: str = ".png",
+                filename: str | None = None) -> Path:
+    """`<out_dir>/<stem>_<seed>.png`, never overwriting an existing file.
+
+    The seed is in the name so an image is reproducible from its own
+    filename and two seeds of one shot cannot silently replace each other.
+
+    `filename` overrides that for callers with their own naming scheme — a
+    shot list numbered S001.png, say. It was added because a consumer was
+    renaming every file afterwards, which is a workaround the API should not
+    have required. Never-overwrite still applies: a collision becomes
+    `name-2.png` rather than replacing anything."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    candidate = out_dir / f"{stem}_{seed}{suffix}"
+
+    if filename:
+        # Basename only: a caller must not be able to write outside out_dir
+        # by passing "../../etc/thing.png".
+        name = Path(filename).name
+        if not name or name in (".", ".."):
+            raise ValueError(f"filename {filename!r} is not a usable file name")
+        stem_part = Path(name).stem
+        suffix = Path(name).suffix or suffix
+    else:
+        stem_part = f"{stem}_{seed}"
+
+    candidate = out_dir / f"{stem_part}{suffix}"
     if not candidate.exists():
         return candidate
     n = 2
-    while (alt := out_dir / f"{stem}_{seed}-{n}{suffix}").exists():
+    while (alt := out_dir / f"{stem_part}-{n}{suffix}").exists():
         n += 1
     return alt
 

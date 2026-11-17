@@ -130,6 +130,42 @@ the fastest one.
    different person every time. Pass up to 3 `refs` with
    `characters-consistent`.
 
+### Writing prompts for these models
+
+Reported from real use, and surprising enough to be worth stating:
+
+- **Naming a thing pulls it in, even to forbid it.** "no hair visible" added
+  hair. A style block containing "friendly faces" added a child to a prompt
+  about an apple. These models have no reliable negation: describe only what
+  you want present.
+- **`guidance` is fixed at 1.0** for the klein profiles and is not a knob
+  the API exposes. Raising it is how you would normally strengthen prompt
+  adherence elsewhere; here you cannot, so put the weight in the prompt.
+- **A negative prompt does nothing** except on `zimage-negprompt`. It is
+  accepted and ignored everywhere else — see above. If you are relying on
+  one to keep a subject out, that profile is the only one that honours it.
+- **A style block applies to every image it is in.** If it describes people
+  ("friendly faces", "rosy cheeks"), expect people to appear in images that
+  were not supposed to contain any. Keep character description out of the
+  shared style string and in the per-image prompt.
+
+### Where your image is written
+
+`<out_dir>/<stem>_<seed>.png`, **not** `<out_dir>/<stem>.png`. The seed is
+in the filename on purpose: it makes an image reproducible from its own name
+and means two seeds of the same shot cannot silently overwrite each other.
+A collision becomes `<stem>_<seed>-2.png` rather than a clobber.
+
+**Use the `path` in the response rather than predicting the name.** It is
+returned on every call, including when the image was skipped as already
+current, and it is authoritative.
+
+If your pipeline has its own naming scheme — a shot list numbered
+`S001.png`, say — send `"filename": "S001.png"` and that is exactly what
+you get, rather than renaming afterwards. Never-overwrite still applies: a
+collision becomes `S001-2.png`. The name is treated as a basename, so it
+cannot write outside `out_dir`.
+
 ### Don't regenerate what hasn't changed
 
 Every image gets a `<image>.png.json` manifest recording the request, model,

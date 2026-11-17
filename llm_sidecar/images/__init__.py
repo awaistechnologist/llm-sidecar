@@ -76,6 +76,9 @@ class ImageRequest:
     seed: int | None = None
     out_dir: str = "."
     stem: str = "image"
+    # Exact output file name, for a caller with its own naming scheme.
+    # Unset means <stem>_<seed>.png — see manifest.output_path.
+    filename: str | None = None
     # Which project asked. Recorded in the manifest, because "who made this
     # and with what" is the question provenance exists to answer.
     project: str = ""
@@ -137,7 +140,7 @@ def generate(req: ImageRequest, config: Config | None = None) -> ImageResult:
     )
 
     out_dir = Path(req.out_dir).expanduser()
-    existing = out_dir / f"{req.stem}_{seed}.png"
+    existing = out_dir / (req.filename or f"{req.stem}_{seed}.png")
     if req.skip_existing and existing.exists() and manifest.is_current(existing, dg):
         logger.info("up to date, skipping: %s", existing)
         return ImageResult(
@@ -147,7 +150,7 @@ def generate(req: ImageRequest, config: Config | None = None) -> ImageResult:
             seconds=0.0, warm=True, skipped=True, width=width, height=height,
         )
 
-    out = manifest.output_path(out_dir, req.stem, seed)
+    out = manifest.output_path(out_dir, req.stem, seed, filename=req.filename)
     timing = engine.run(
         profile, prompt=req.prompt, negative=req.negative, seed=seed,
         width=width, height=height, steps=steps, refs=refs,
