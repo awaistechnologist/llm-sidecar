@@ -60,6 +60,40 @@ Notable changes per release. Dates are release dates.
   cleanly on Linux and Windows, where the HTTP routes answer 501 with an
   explanation.
 
+### Fixed — image generation speed
+- **MLX's buffer cache was uncapped**, which made 1024x1024 generation
+  unpredictable: 22.5s to 77.6s across runs on a machine that started 92%
+  free, with the cache growing to 16.2 GiB beside 3.2 GiB of live weights.
+  mflux's CLI caps it through `CallbackManager`; driving the Python classes
+  directly, which is what every project on this machine does, skips that.
+
+  The size turned out to matter more than the fact of capping. Four runs
+  each, where a generation peaks at 11.9 GiB:
+
+  | cap | times |
+  |---|---|
+  | uncapped | 22.5 - 77.6s |
+  | 4 GiB | 35.8 - 48.7s |
+  | 8 GiB | 31.8 - 40.3s |
+  | 12 GiB | 23.1 - 23.9s |
+
+  A cap *below* the working set makes MLX release and re-acquire memory
+  mid-generation, and that churn costs more than the paging did — 4 GiB was
+  slower than no cap at all on its good runs. The cap is now the profile's
+  peak plus 15%, raised automatically when a generation peaks higher than
+  estimated. End to end through the engine: 22.6 - 25.9s.
+
+  Two things that looked right and were not: clearing the cache after every
+  image (a zero cap, the worst case above) and mflux's own `MemorySaver`,
+  which caps the cache but also evicts the text encoder — and since FLUX.2
+  keeps no prompt cache, that rebuilds the model per prompt for about 20s of
+  tax on every image.
+- `image bench` times four runs and prints each. A two-run bench called the
+  uncapped build faster and missed the cliff entirely.
+- Memory-tight profiles now warn. `draft` needs ~31 GiB against ~33 usable
+  on a 36 GiB Mac; the cache cap cannot help when the working set alone
+  nearly fills RAM.
+
 ### Fixed
 Three bugs found by running the thing rather than reasoning about it:
 - **2480 prompt tokens per call.** `--system-prompt` *replaces* Claude Code's
