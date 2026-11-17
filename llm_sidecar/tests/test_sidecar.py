@@ -3250,12 +3250,17 @@ def test_cache_cap_is_retuned_when_the_resident_model_changes(monkeypatch):
     monkeypatch.setitem(sys.modules,
                         "mflux.models.common.resolution.config_resolution", fake)
 
-    resident = engine._Resident()
-    resident.get(pf.get("standard"))            # peak 12
-    resident.get(pf.get("zimage-negprompt"))    # peak 31
-    resident.get(pf.get("standard"))            # back down to 12
+    light, heavy = pf.get("standard"), pf.get("zimage-negprompt")
+    assert heavy.peak_gib > light.peak_gib      # the point of the test
 
-    assert caps == [12.0, 31.0, 12.0]
+    resident = engine._Resident()
+    resident.get(light)
+    resident.get(heavy)
+    resident.get(light)
+
+    # Read from the profiles rather than hardcoded, so measuring a new peak
+    # cannot silently break this.
+    assert caps == [light.peak_gib, heavy.peak_gib, light.peak_gib]
 
 
 def test_peak_is_measured_per_generation_not_per_process(monkeypatch):
@@ -3298,3 +3303,20 @@ def test_peak_is_measured_per_generation_not_per_process(monkeypatch):
     assert resets == [1]
     engine.retune_mlx_cache(profile)
     assert caps == []
+
+
+def test_measured_profiles_carry_their_timings():
+    """A profile whose peak_gib is measured should say how long it took, so
+    a caller can plan a batch instead of discovering that a 3-reference edit
+    is four times a text-to-image."""
+    from llm_sidecar.images import profiles as pf
+
+    for name in ("standard", "characters-consistent", "zimage-negprompt"):
+        p = pf.get(name)
+        assert p.measured_s, f"{name} has a measured peak but no measured time"
+
+    # Reference-guided editing peaks higher than plain text-to-image, which
+    # is why it needs its own figure rather than inheriting klein's.
+    assert pf.get("characters-consistent").peak_gib > pf.get("standard").peak_gib
+    # And is far slower — 93s against ~23s measured.
+    assert pf.get("characters-consistent").measured_s > pf.get("standard").measured_s * 2

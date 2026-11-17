@@ -71,8 +71,12 @@ class Profile:
     # sizes MLX's buffer cache just above it — a cap *below* the working set
     # is the slow case, so this figure being roughly right matters.
     #
-    # The klein entries are measured (mx.get_peak_memory at 1024x1024); the
-    # rest are estimates until `llm-sidecar image bench` replaces them.
+    # Measured with mx.get_peak_memory, reset per generation:
+    #   standard               11.9 GiB  (1024x1024)
+    #   characters-consistent  13.0 GiB at 2 refs, 13.9 at 3 (1024x640)
+    #   zimage-negprompt       27.8 GiB  (1024x768)
+    # fast, cinematic, kontext-edit and upscale are still estimates until
+    # `llm-sidecar image bench` replaces them.
     peak_gib: float = 16.0
     # Set by `bench`, not guessed.
     measured_s: float | None = None
@@ -110,7 +114,7 @@ PROFILES: dict[str, Profile] = {p.name: p for p in [
     Profile(
         name="zimage-negprompt", model="z-image-turbo", variant="z-image-turbo",
         steps=8, quantize=8, width=1024, height=768, supports_negative=True,
-        licence="Apache-2.0", commercial_ok=True, gated=False, peak_gib=31.0,
+        licence="Apache-2.0", commercial_ok=True, gated=False, peak_gib=28.0, measured_s=100.8,
         note="Z-Image-Turbo, and the only profile with a negative prompt that "
              "actually does something — klein at guidance 1.0 cannot exclude "
              "anything, so work that depends on keeping subjects *out* of an "
@@ -122,9 +126,14 @@ PROFILES: dict[str, Profile] = {p.name: p for p in [
     Profile(
         name="characters-consistent", model="flux2-klein-4b", variant="klein-edit", steps=4,
         quantize=8, guidance=1.0, max_refs=3, requires_refs=True,
-        licence="Apache-2.0", commercial_ok=True, peak_gib=12.0,
+        licence="Apache-2.0", commercial_ok=True, peak_gib=14.0,
+        measured_s=93.0,
         note="The same character across frames, from up to 3 reference "
-             "images. The one capability no other profile has.",
+             "images. The one capability no other profile has, and the "
+             "slowest thing here: measured 60s with 2 refs and 93s with 3 "
+             "at 1024x640, against ~23s for text-to-image. A book is mostly "
+             "this, so generate everything first and upscale the keepers "
+             "afterwards rather than interleaving the two models.",
     ),
     Profile(
         name="kontext-edit", model="dev-kontext", variant="kontext", steps=20, quantize=8,
@@ -136,7 +145,7 @@ PROFILES: dict[str, Profile] = {p.name: p for p in [
     Profile(
         name="lineart", model="flux2-klein-4b", variant="klein-edit", steps=4, quantize=8,
         guidance=1.0, max_refs=3, requires_refs=True, post="lineart",
-        licence="Apache-2.0", commercial_ok=True, peak_gib=12.0,
+        licence="Apache-2.0", commercial_ok=True, peak_gib=14.0,
         note="Colouring pages: klein edit, then threshold and dilate.",
     ),
     Profile(

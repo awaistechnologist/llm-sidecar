@@ -700,6 +700,26 @@ Two things that looked right and were not:
   about 20s of tax on every image. It trades unpredictability for a
   permanent cost.
 
+### What each profile actually costs
+
+Measured on an M3 Max through the daemon, with the peak reset per
+generation (`mlx_peak_gib` in `/v1/images/status`):
+
+| profile | size | time | peak |
+|---|---|---|---|
+| `standard` | 1024x1024 | 22-26s | 11.9 GiB |
+| `characters-consistent`, 2 refs | 1024x640 | 60s | 13.0 GiB |
+| `characters-consistent`, 3 refs | 1024x640 | 93s | 13.9 GiB |
+| `zimage-negprompt` | 1024x768 | ~100s | 27.8 GiB |
+
+Two things follow for anyone planning a batch:
+
+- **Reference-guided editing is the expensive operation**, not generation —
+  93s against 23s, and a book is mostly edits. Budget from the edit figure.
+- **Switching profiles unloads and reloads**, so order a batch by profile:
+  generate everything, then upscale the keepers, rather than interleaving
+  two models and paying the swap each time.
+
 ### Quality is why this runs at q8
 
 Your choice of quantisation decides this far more than any tuning:
