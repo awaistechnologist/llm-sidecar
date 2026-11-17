@@ -325,12 +325,32 @@ def run(profile: Profile, *, prompt: str, negative: str | None, seed: int,
         out.parent.mkdir(parents=True, exist_ok=True)
         image.save(path=str(out))
         RESIDENT.last_used = time.time()
+        _trim_cache()
 
     if profile.post == "lineart":
         _lineart(out)
 
     return {"load_s": load_s, "generate_s": generate_s, "warm": warm,
             "path": str(out)}
+
+
+def _trim_cache() -> None:
+    """Release MLX's buffer cache after each image, keeping the weights.
+
+    Measured, not assumed. Keeping a model resident was supposed to make the
+    second image faster; on an M3 Max at 1024x1024 it made it *three times
+    slower* — 35s cold, then 96s warm. The weights were not the problem: MLX
+    holds freed buffers in a cache for reuse, that cache grows with every
+    generation, and on a 36 GiB machine it eventually pushes the resident
+    model towards swap.
+
+    `clear_cache` drops the cache without touching live arrays, so the model
+    stays loaded and the next generation starts from a clean allocator."""
+    try:
+        import mlx.core as mx
+        mx.clear_cache()
+    except Exception:
+        pass
 
 
 def _lineart(path: Path) -> None:
@@ -357,4 +377,15 @@ def status() -> dict:
     if out["available"]:
         from .. import hardware
         out["usable_gib"] = hardware.usable_gib()
+        # Reported because it is what made a resident model slower than a
+        # cold one here, and "the second image took three times as long" is
+        # otherwise an unexplainable symptom. active is the weights and live
+        # arrays; cache is reusable freed buffers, and should stay small
+        # between generations now that _trim_cache runs after each.
+        try:
+            import mlx.core as mx
+            out["mlx_active_gib"] = round(mx.get_active_memory() / 2 ** 30, 2)
+            out["mlx_cache_gib"] = round(mx.get_cache_memory() / 2 ** 30, 2)
+        except Exception:
+            pass
     return out

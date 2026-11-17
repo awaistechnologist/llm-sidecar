@@ -650,6 +650,27 @@ formats.
   so `cinematic` and `kontext-edit` are refused unless a caller says the
   output is non-commercial. That check runs before 10 GiB loads.
 
+### What we measured, including the surprise
+
+`llm-sidecar image bench` times a cold generation against warm ones on your
+machine, because "keeping the model loaded makes it faster" is a claim, not
+a fact.
+
+On an M3 Max (36 GiB) with `characters-txt2img` at 1024x1024, keeping the
+model resident initially made the **second image three times slower**: 35s
+cold, 96s warm. The weights were not the problem. MLX keeps freed buffers in
+a reuse cache, that cache grows with every generation, and on a 36 GiB
+machine it pushed the resident model towards swap — the exact failure the
+warm-model design was meant to prevent.
+
+The fix is one call: `mx.clear_cache()` after each image, which drops the
+reuse cache without touching the loaded weights. `/v1/images/status` now
+reports `mlx_active_gib` and `mlx_cache_gib`, so "the second image took three
+times as long" is diagnosable rather than mysterious.
+
+Worth stating plainly: run `bench` on your own machine rather than trusting
+these numbers. Memory headroom is what decides them, and it differs.
+
 ### Skipping work that is already done
 
 The manifest digest covers everything that changes the pixels — prompt,
