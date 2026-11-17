@@ -279,6 +279,7 @@ Four checks, first match wins.
 
 ```
   ① model="ollama/qwen2.5:32b" given?   ──yes──►  use it. never rotated.
+     (or "claude/opus", or any exact id)
                     │ no
   ② is this tier LOCKED to a model?     ──yes──►  use it. budget ignored.
                     │ no
@@ -293,6 +294,8 @@ Four checks, first match wins.
      │ cheap          paid, under $1 per M tokens   │
      │ best           paid, over $5 per M tokens    │
      └──────────────────────────────────────────────┘
+       claude/ is in none of these pools — by design;
+       it spends an allowance, not money. Name it.
                     │
           probe 3 at once: "Reply OK"
                     │
@@ -313,6 +316,69 @@ process and the next request routes elsewhere.
 of the pool by context length. Curated entries missing from the live catalogue
 are skipped silently, which happens constantly — of nine curated free picks,
 one survived to today. So in practice: the survivors, then the roomiest.
+
+### Your Claude subscription
+
+A third provider, alongside Ollama and OpenRouter: `claude/` runs the Claude
+Code CLI locally, so a Claude subscription you already pay for becomes a
+backend — no API key, no per-token bill.
+
+```bash
+llm-sidecar config claude-cli on
+```
+
+```bash
+llm-sidecar ask --model claude/sonnet "Explain CRDTs in two sentences"
+```
+
+Model ids are `claude/haiku`, `claude/sonnet`, `claude/opus`, or any name
+`claude --model` accepts. They show up in `/v1/models`, the chat dropdown and
+the MCP server like anything else, and the dashboard has a toggle once the
+CLI is installed.
+
+**It is off by default even when the CLI is present**, which is the one place
+this provider is deliberately unlike the others. Ollama costs nothing to
+call, so the picker reaches for it freely. A subscription costs an *allowance*
+you cannot see from here, so nothing spends it unless you say so — `claude/`
+is never auto-picked by `budget`, only used when named or locked to a tier:
+
+```bash
+export LLM_SIDECAR_MODEL_POWERFUL=claude/opus
+```
+
+Each call is one `claude -p` subprocess, run with its agent capabilities
+removed — `--tools ""` (no Bash, no file access, no web), `--safe-mode` (no
+CLAUDE.md, skills, plugins, hooks or MCP servers) and
+`--no-session-persistence`. A completion backend that could read `~/.ssh`
+would not be a completion backend. Your prompt goes in on stdin rather than
+argv, so it does not appear in `ps`.
+
+What differs from the HTTP providers:
+
+| | |
+|---|---|
+| `max_tokens`, `temperature` | **ignored** — the CLI has no flag for either |
+| multi-turn `messages` | flattened to a labelled transcript; one user message is exact |
+| JSON schema | **better** — `--json-schema` is enforced at decode time |
+| streaming | works, via `stream-json` |
+| embeddings | not available; `embed`/`rank` stay on Ollama or OpenRouter |
+| latency | ~1–3s of process spawn on top of the model |
+| caching | skipped, because "deterministic" is decided by a temperature the CLI ignores |
+| cost | recorded as **$0** — see below |
+
+The CLI reports a metered-API equivalent cost even on a subscription (a live
+Haiku call came back at $0.00057). That is not money you owe, so it is kept
+out of the ledger and `llm-sidecar usage` — it is reported separately as
+`notional_cost_usd`. Switch `claude_cli_use_subscription` off and the figure
+becomes real spend again, because then it is.
+
+One sharp edge worth knowing: `--system-prompt` *replaces* Claude Code's own.
+Omitting it costs **2480 prompt tokens for "Say OK."** against 2 with a
+minimal one, so the sidecar always sends a system prompt — yours if you gave
+one, a one-line default otherwise.
+
+Keep the daemon on loopback with this enabled, and leave `cors_origins`
+empty. It is your subscription, and the daemon is unauthenticated.
 
 ### When free OpenRouter models are used
 
@@ -554,6 +620,12 @@ Measured on an M3 Max, not estimated.
   is a different product; producing them is not.
 - `searxng` drives Docker or Podman compose. Anything else: run the compose
   file yourself and set `SEARXNG_URL`.
+- **`claude/` ignores `max_tokens` and `temperature`**, because the CLI has no
+  flag for either. They are dropped rather than approximated — a `max_tokens`
+  that silently does nothing is worse than one that is documented as absent.
+  Multi-turn conversations are flattened to a transcript for the same reason:
+  the CLI takes one prompt, and pretending turn boundaries survived would be
+  the dishonest version.
 
 ---
 

@@ -30,6 +30,7 @@ from . import (
     answer as answer_mod,
     cache,
     catalogue,
+    claude_cli,
     client,
     config as config_mod,
     hardware,
@@ -54,7 +55,7 @@ from .types import (
 
 logger = logging.getLogger("llm_sidecar")
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 
 __all__ = [
     "Sidecar",
@@ -71,6 +72,10 @@ __all__ = [
     "NoWorkingModel",
     "__version__",
 ]
+
+
+def _is_claude(model: str) -> bool:
+    return bool(model) and model.startswith(claude_cli.PREFIX)
 
 
 def _json_schema(schema: dict) -> dict:
@@ -196,8 +201,16 @@ class Sidecar:
         chosen = model or self.model_for(tier, budget)
         # Web-retrieving calls are never cached: the whole reason to pay for
         # retrieval is that the answer might have changed since last time.
-        hit = (None if web else
-               cache.get_completion(self.config, msgs, chosen, max_tokens, temperature))
+        #
+        # Neither are claude/ calls. The cache's contract is that it only
+        # stores deterministic requests, which it decides from temperature —
+        # and the CLI has no temperature flag, so temperature=0 does not mean
+        # there what it means everywhere else. Storing those under a
+        # "deterministic" key would also keep serving answers after a
+        # subscription expired, hiding the one error the user must see.
+        cacheable = not web and not _is_claude(chosen)
+        hit = (cache.get_completion(self.config, msgs, chosen, max_tokens, temperature)
+               if cacheable else None)
         if hit is not None:
             done = Completion(
                 text=hit["text"], model=hit["model"],
@@ -223,7 +236,7 @@ class Sidecar:
                                    temperature=temperature, web=web, web_results=web_results,
                                    response_format=response_format)
 
-        if web:
+        if not cacheable:
             self._record(done, operation)
             return done
 
@@ -459,11 +472,20 @@ class Sidecar:
     # ── introspection ─────────────────────────────────────────────────────
 
     def models(self, refresh: bool = False) -> list[ModelInfo]:
-        """Every model we could route to — cloud catalogue plus local Ollama."""
+        """Every model we could route to — cloud catalogue, local Ollama, and
+        the claude/ aliases when that provider is on."""
         return (
             catalogue.openrouter_models(self.config, force_refresh=refresh)
             + catalogue.ollama_models(self.config)
+            + claude_cli.models(self.config)
         )
+
+    def claude_cli_check(self) -> dict:
+        """Whether the claude/ provider is installed, enabled and signed in.
+
+        Makes one minimal call when enabled, because nothing cheaper
+        distinguishes a live login from an expired one."""
+        return claude_cli.check(self.config)
 
     def local_models(self, context_tokens: int = 8000) -> list[dict]:
         """Installed Ollama models scored against this machine's memory."""
@@ -490,6 +512,13 @@ class Sidecar:
                             if self.config.openrouter_api_key else ""),
             "default_budget": self.config.default_budget,
             "search_provider": provider,
+            # Installed-and-enabled only. Auth needs a real call, so status()
+            # stays free of one and claude_cli_check() does it on request.
+            "claude_cli": {
+                "enabled": self.config.claude_cli_enabled,
+                "installed": claude_cli.binary(self.config) is not None,
+                "models": [m.id for m in claude_cli.models(self.config)],
+            },
             "hardware": hardware.probe(),
             "local_models": [
                 {"id": m["id"], "verdict": m["verdict"], "size_gib": m["size_gib"]}

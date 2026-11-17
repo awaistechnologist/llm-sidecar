@@ -2,6 +2,53 @@
 
 Notable changes per release. Dates are release dates.
 
+## [0.7.0] — 2026-11-17
+
+### Added
+- **The `claude/` provider.** A Claude subscription as a third backend,
+  alongside Ollama and OpenRouter, by running the Claude Code CLI locally —
+  no API key and no per-token bill. `llm-sidecar config claude-cli on`, then
+  `claude/haiku`, `claude/sonnet`, `claude/opus`, or any name
+  `claude --model` accepts. Works through the library, the daemon
+  (`/v1/chat/completions`, streaming included), the MCP server, the CLI and
+  the dashboard.
+
+  Off by default even where the CLI is installed, and never auto-picked by
+  `budget`. Ollama costs nothing to call; a subscription costs an allowance
+  the sidecar cannot see, so it is only used when named or locked to a tier.
+
+  Each call is one `claude -p` subprocess with its agent capabilities
+  removed: `--tools ""`, `--safe-mode`, `--strict-mcp-config`,
+  `--no-session-persistence`. The prompt goes in on stdin rather than argv,
+  so it does not appear in `ps`.
+- `GET /claude-cli/status`, `POST /config/claude-cli`,
+  `llm-sidecar config claude-cli on|off`, and `Sidecar.claude_cli_check()`.
+- `Usage.notional_cost_usd` — what a call would have cost on metered
+  pricing, kept separate from what it actually cost.
+
+### Fixed
+Three bugs found by running the thing rather than reasoning about it:
+- **2480 prompt tokens per call.** `--system-prompt` *replaces* Claude Code's
+  own; omitting it carried the full coding-agent framing into every
+  completion. Measured at 2480 tokens for "Say OK." against 2 with a minimal
+  default in place — a thousandfold overhead charged to the user's allowance,
+  and the wrong framing for a general-purpose call. A default system prompt
+  is now always sent.
+- **Duplicated streamed output.** The CLI emits incremental deltas *and* the
+  finished assistant message carrying the same text; reading from whichever
+  shape appeared returned "12345" as "1234512345". Deltas win now, with the
+  whole message kept only as a fallback.
+- **Phantom spend in the ledger.** The CLI reports a metered-API equivalent
+  cost even on a subscription ($0.00057 for a live Haiku call), which would
+  have made `llm-sidecar usage` overstate a bill nobody owed. Recorded as $0
+  when `claude_cli_use_subscription` is on — which is knowable for certain,
+  because that setting strips `ANTHROPIC_API_KEY` from the child process.
+
+### Changed
+- The pretest token ceiling is 512, not 10. Reasoning models spend their
+  allowance thinking before writing any content, so a 10-token cap failed
+  models that work and could leave `free` with nothing.
+
 ## [0.6.0] — 2026-08-20
 
 Four gaps reported by a consumer building against it, all confirmed against

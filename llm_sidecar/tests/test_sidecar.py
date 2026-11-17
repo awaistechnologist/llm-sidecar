@@ -2493,3 +2493,382 @@ def test_embeddings_endpoint_shape(api, monkeypatch):
     assert body["object"] == "list"
     assert [d["index"] for d in body["data"]] == [0, 1]
     assert body["x_sidecar"]["dimensions"] == 2
+
+
+# ── claude/ provider (Claude Code CLI) ────────────────────────────────────────
+#
+# Every test here is offline and spawns nothing: the subprocess boundary is
+# the seam, so _run / create_subprocess_exec is what gets replaced. Checking
+# the argv we would have passed is the point — those flags are the difference
+# between a text generator and an agent with filesystem access.
+
+
+def _cc_cfg(**kw):
+    base = dict(claude_cli_enabled=True, claude_cli_path=None)
+    base.update(kw)
+    return Config(**base)
+
+
+def _envelope(text="hello", **kw):
+    body = {
+        "type": "result", "subtype": "success", "is_error": False,
+        "result": text, "total_cost_usd": 0,
+        "usage": {"input_tokens": 11, "output_tokens": 4,
+                  "cache_read_input_tokens": 2},
+    }
+    body.update(kw)
+    return json.dumps(body)
+
+
+@pytest.fixture
+def cc(monkeypatch, tmp_path):
+    """The claude/ provider with a fake binary and a captured subprocess."""
+    from llm_sidecar import claude_cli
+
+    exe = tmp_path / "claude"
+    exe.write_text("#!/bin/sh\nexit 0\n")
+    exe.chmod(0o755)
+    monkeypatch.setattr(claude_cli.shutil, "which", lambda name: str(exe))
+    monkeypatch.setattr(claude_cli, "_workdir", lambda: str(tmp_path))
+
+    calls: list[dict] = []
+
+    def fake_run(argv, prompt, config, timeout):
+        calls.append({"argv": argv, "prompt": prompt, "timeout": timeout})
+        return _envelope()
+
+    monkeypatch.setattr(claude_cli, "_run", fake_run)
+    return {"module": claude_cli, "calls": calls, "exe": str(exe)}
+
+
+def test_claude_cli_off_by_default():
+    """It spends a subscription allowance, so it has to be switched on.
+
+    The asymmetry with Ollama is deliberate: a local model costs nothing to
+    call, an allowance is invisible from here until it runs out."""
+    assert Config().claude_cli_enabled is False
+
+
+def test_claude_cli_refuses_when_disabled(cc):
+    from llm_sidecar.claude_cli import ClaudeCliUnavailable
+
+    with pytest.raises(ClaudeCliUnavailable):
+        cc["module"].complete([{"role": "user", "content": "hi"}],
+                              "claude/sonnet", Config())
+
+
+def test_claude_cli_strips_capabilities(cc):
+    """A completion backend must not be able to read the filesystem."""
+    cc["module"].complete([{"role": "user", "content": "hi"}],
+                          "claude/sonnet", _cc_cfg())
+    argv = cc["calls"][0]["argv"]
+
+    assert argv[0] == cc["exe"]
+    assert "-p" in argv
+    # --tools "" removes Bash, Edit, Read, WebFetch and the rest.
+    assert argv[argv.index("--tools") + 1] == ""
+    # No CLAUDE.md, skills, hooks, plugins or MCP servers leaking in.
+    assert "--safe-mode" in argv
+    assert "--strict-mcp-config" in argv
+    assert "--no-session-persistence" in argv
+    assert argv[argv.index("--permission-prompts") + 1] == "none"
+    # Never --bare: it forces ANTHROPIC_API_KEY auth and would bill the API
+    # for calls the user believes their subscription covers.
+    assert "--bare" not in argv
+
+
+def test_claude_cli_prompt_goes_on_stdin_not_argv(cc):
+    """argv is world-readable through `ps`; the prompt is not."""
+    secret = "my private question about salary negotiation"
+    cc["module"].complete([{"role": "user", "content": secret}],
+                          "claude/sonnet", _cc_cfg())
+    call = cc["calls"][0]
+    assert call["prompt"] == secret
+    assert not any(secret in a for a in call["argv"])
+
+
+def test_claude_cli_alias_passes_through(cc):
+    """Unknown model names are forwarded, so a model released after this
+    version still works without a release of ours."""
+    cc["module"].complete([{"role": "user", "content": "hi"}],
+                          "claude/claude-something-6", _cc_cfg())
+    argv = cc["calls"][0]["argv"]
+    assert argv[argv.index("--model") + 1] == "claude-something-6"
+
+
+def test_claude_cli_system_prompt_split(cc):
+    cc["module"].complete(
+        [{"role": "system", "content": "Be terse."},
+         {"role": "user", "content": "hi"}],
+        "claude/sonnet", _cc_cfg(),
+    )
+    argv = cc["calls"][0]["argv"]
+    assert argv[argv.index("--system-prompt") + 1] == "Be terse."
+    assert cc["calls"][0]["prompt"] == "hi"
+
+
+def test_claude_cli_multi_turn_becomes_transcript():
+    """Lossy, and honestly so: the CLI takes one prompt, not a conversation."""
+    from llm_sidecar.claude_cli import split_messages
+
+    system, prompt = split_messages([
+        {"role": "system", "content": "S"},
+        {"role": "user", "content": "first"},
+        {"role": "assistant", "content": "reply"},
+        {"role": "user", "content": "second"},
+    ])
+    assert system == "S"
+    assert prompt == "User: first\n\nAssistant: reply\n\nUser: second\n\nAssistant:"
+
+
+def test_claude_cli_single_message_is_exact():
+    """The common case must not be mangled by transcript rendering."""
+    from llm_sidecar.claude_cli import split_messages
+
+    assert split_messages([{"role": "user", "content": "just this"}]) == (None, "just this")
+
+
+def test_claude_cli_schema_unwrapped(cc):
+    """response_format is the wire form two HTTP providers want; the CLI
+    wants the bare schema."""
+    schema = {"type": "object", "properties": {"n": {"type": "integer"}}}
+    cc["module"].complete(
+        [{"role": "user", "content": "hi"}], "claude/sonnet", _cc_cfg(),
+        response_format={"type": "json_schema",
+                         "json_schema": {"name": "response", "schema": schema}},
+    )
+    argv = cc["calls"][0]["argv"]
+    assert json.loads(argv[argv.index("--json-schema") + 1]) == schema
+
+
+def test_claude_cli_json_object_mode_sends_no_schema(cc):
+    """"must be JSON" has no CLI equivalent; ops.parse_json_response already
+    salvages fenced output, so sending nothing is right."""
+    cc["module"].complete([{"role": "user", "content": "hi"}], "claude/sonnet",
+                          _cc_cfg(), response_format={"type": "json_object"})
+    assert "--json-schema" not in cc["calls"][0]["argv"]
+
+
+def test_claude_cli_usage_and_cost(cc):
+    done = cc["module"].complete([{"role": "user", "content": "hi"}],
+                                 "claude/sonnet", _cc_cfg())
+    assert done.text == "hello"
+    assert done.model == "claude/sonnet"
+    # Cache reads are input tokens the user was served, so they count.
+    assert done.usage.prompt_tokens == 13
+    assert done.usage.completion_tokens == 4
+    # Zero under a subscription, and that is the truth rather than a stand-in.
+    assert done.usage.cost_usd == 0.0
+
+
+def test_claude_cli_error_inside_success_envelope(monkeypatch, cc):
+    """The trap UpstreamError exists for, on the subprocess side: the CLI
+    reports failure in a well-formed envelope, not by exiting non-zero."""
+    from llm_sidecar.claude_cli import ClaudeCliAuthError
+
+    monkeypatch.setattr(
+        cc["module"], "_run",
+        lambda *a, **k: _envelope(
+            "Failed to authenticate: OAuth session expired and could not be refreshed",
+            is_error=True),
+    )
+    with pytest.raises(ClaudeCliAuthError):
+        cc["module"].complete([{"role": "user", "content": "hi"}],
+                              "claude/sonnet", _cc_cfg())
+
+
+def test_claude_cli_limit_is_not_an_auth_error(monkeypatch, cc):
+    """A limit means rotate to another provider; auth means stop and sign in.
+    Conflating them would make the sidecar retry something unfixable."""
+    from llm_sidecar.claude_cli import ClaudeCliLimitError
+
+    monkeypatch.setattr(
+        cc["module"], "_run",
+        lambda *a, **k: _envelope("Claude usage limit reached", is_error=True),
+    )
+    with pytest.raises(ClaudeCliLimitError):
+        cc["module"].complete([{"role": "user", "content": "hi"}],
+                              "claude/sonnet", _cc_cfg())
+
+
+def test_claude_cli_non_json_output(monkeypatch, cc):
+    from llm_sidecar.claude_cli import ClaudeCliError
+
+    monkeypatch.setattr(cc["module"], "_run", lambda *a, **k: "not json at all")
+    with pytest.raises(ClaudeCliError):
+        cc["module"].complete([{"role": "user", "content": "hi"}],
+                              "claude/sonnet", _cc_cfg())
+
+
+def test_claude_cli_env_strips_api_key(monkeypatch, cc):
+    """Otherwise a key sitting in the environment silently bills the API for
+    work the user believed their subscription covered."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-should-not-reach-the-child")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://gateway.example")
+
+    env = cc["module"]._child_env(_cc_cfg())
+    assert "ANTHROPIC_API_KEY" not in env
+    assert "ANTHROPIC_BASE_URL" not in env
+
+    kept = cc["module"]._child_env(_cc_cfg(claude_cli_use_subscription=False))
+    assert kept["ANTHROPIC_API_KEY"] == "sk-ant-should-not-reach-the-child"
+
+
+def test_claude_models_hidden_unless_enabled(cc):
+    assert cc["module"].models(Config()) == []
+    ids = [m.id for m in cc["module"].models(_cc_cfg())]
+    assert ids == ["claude/haiku", "claude/sonnet", "claude/opus"]
+
+
+def test_claude_models_priced_zero_but_not_in_free_budget(cfg, cc):
+    """Priced at zero because a subscription call costs no money — which is
+    exactly why they must stay out of the `free` candidate pool. `free` means
+    "costs nothing"; these cost an allowance."""
+    from llm_sidecar import picker
+
+    cfg.claude_cli_enabled = True
+    for budget in ("free", "cheap", "best"):
+        assert not any(c.startswith("claude/")
+                       for c in picker.candidates(cfg, budget))
+
+
+def test_claude_completions_are_not_cached(cfg, monkeypatch, cc):
+    """The cache stores only deterministic requests and decides that from
+    temperature — which the CLI has no flag for. Caching these would also
+    keep serving answers after a subscription expired."""
+    from llm_sidecar import cache, client
+
+    from llm_sidecar.types import Completion
+
+    cfg.claude_cli_enabled = True
+    sc = Sidecar(cfg)
+    puts: list = []
+    monkeypatch.setattr(cache, "put_completion", lambda *a, **k: puts.append(a[2]))
+    monkeypatch.setattr(
+        client, "complete",
+        lambda msgs, model, *a, **k: Completion(text="fresh", model=model),
+    )
+
+    sc.complete("hi", model="claude/sonnet", temperature=0.0)
+    assert puts == []
+
+    # The same call on an HTTP model *is* cached — otherwise this test would
+    # pass just as well with caching broken everywhere.
+    sc.complete("hi", model="free/a:free", temperature=0.0)
+    assert puts == ["free/a:free"]
+
+
+def test_claude_stream_delta_and_whole_message_stay_separate():
+    """The CLI emits deltas *and* the finished assistant message carrying the
+    same text. A parser that read text from either shape duplicated every
+    answer: "12345" arrived as "1234512345" in a live run. Deltas win; the
+    whole message is only a fallback for a version that sends no deltas."""
+    from llm_sidecar.claude_cli import _delta_text, _message_text
+
+    delta = {"type": "stream_event",
+             "event": {"type": "content_block_delta",
+                       "delta": {"type": "text_delta", "text": "tok"}}}
+    message = {"type": "assistant",
+               "message": {"content": [{"type": "text", "text": "whole"},
+                                       {"type": "thinking", "thinking": "hidden"}]}}
+
+    assert _delta_text(delta) == "tok"
+    assert _message_text(delta) == ""
+    assert _delta_text(message) == ""
+    # Thinking blocks excluded: a scratchpad is not the answer.
+    assert _message_text(message) == "whole"
+    assert _delta_text({"type": "system", "subtype": "init"}) == ""
+    assert _message_text({"type": "system", "subtype": "init"}) == ""
+
+
+def test_claude_models_listed_as_their_own_owner(api, monkeypatch):
+    """A dropdown built from /v1/models should not claim OpenRouter serves
+    these — they are neither billed nor routed like one."""
+    from llm_sidecar import Sidecar, claude_cli
+    from llm_sidecar.types import ModelInfo
+
+    monkeypatch.setattr(Sidecar, "models",
+                        lambda self, refresh=False: [
+                            ModelInfo("claude/opus", "Claude Opus (subscription)")])
+    rows = {d["id"]: d for d in api.get("/v1/models").json()["data"]}
+    assert rows["claude/opus"]["owned_by"] == "claude-cli"
+
+
+def test_claude_cli_toggle_endpoint(api, monkeypatch):
+    """The dashboard has to be able to turn it on without a restart."""
+    from llm_sidecar import claude_cli
+
+    monkeypatch.setattr(claude_cli, "binary", lambda config: "/usr/local/bin/claude")
+    body = api.post("/config/claude-cli", json={"enabled": True}).json()
+    assert body["enabled"] is True
+    assert body["installed"] is True
+    assert "claude/sonnet" in body["models"]
+
+    off = api.post("/config/claude-cli", json={"enabled": False}).json()
+    assert off["enabled"] is False
+    assert off["models"] == []
+
+
+def test_claude_cli_status_endpoint_makes_no_call_when_off(api, monkeypatch):
+    """`check` costs a real completion when enabled, so an off provider must
+    not pay for one just to report that it is off."""
+    from llm_sidecar import claude_cli
+
+    monkeypatch.setattr(claude_cli, "binary", lambda config: "/usr/local/bin/claude")
+    monkeypatch.setattr(
+        claude_cli.subprocess, "run",
+        lambda *a, **k: type("R", (), {"stdout": "2.1.283 (Claude Code)"})(),
+    )
+    called: list = []
+    monkeypatch.setattr(claude_cli, "complete",
+                        lambda *a, **k: called.append(1))
+
+    body = api.get("/claude-cli/status").json()
+    assert body["enabled"] is False
+    assert body["version"] == "2.1.283 (Claude Code)"
+    assert body["authenticated"] is None
+    assert called == []
+
+
+def test_claude_subscription_cost_is_not_recorded_as_spend(cc):
+    """The CLI reports a metered-API equivalent even on a subscription — a
+    live haiku call came back at $0.00057 under OAuth. Feeding that to the
+    ledger would overstate the user's actual bill."""
+    done = cc["module"].complete([{"role": "user", "content": "hi"}],
+                                 "claude/sonnet",
+                                 _cc_cfg(), response_format=None)
+    assert done.usage.cost_usd == 0.0
+
+    # Opting into API-key auth makes the same figure a real charge.
+    import json as _json
+    from llm_sidecar import claude_cli as m
+
+    priced = m._usage_from(_json.loads(_envelope(total_cost_usd=0.00057)),
+                           _cc_cfg(claude_cli_use_subscription=False))
+    assert priced.cost_usd == 0.00057
+
+    free = m._usage_from(_json.loads(_envelope(total_cost_usd=0.00057)), _cc_cfg())
+    assert free.cost_usd == 0.0
+    # Still visible, just not counted as money owed.
+    assert free.notional_cost_usd == 0.00057
+
+
+def test_claude_always_sends_a_system_prompt(cc):
+    """--system-prompt replaces Claude Code's own. Omitting it cost 2480
+    prompt tokens for "Say OK." against 2 with a minimal one, measured live —
+    a thousandfold overhead billed to the user's allowance, plus coding-agent
+    framing on a general-purpose call."""
+    from llm_sidecar.claude_cli import DEFAULT_SYSTEM
+
+    cc["module"].complete([{"role": "user", "content": "hi"}],
+                          "claude/sonnet", _cc_cfg())
+    argv = cc["calls"][0]["argv"]
+    assert "--system-prompt" in argv
+    assert argv[argv.index("--system-prompt") + 1] == DEFAULT_SYSTEM
+
+    # A caller's own system message still wins outright.
+    cc["module"].complete([{"role": "system", "content": "Be a pirate."},
+                           {"role": "user", "content": "hi"}],
+                          "claude/sonnet", _cc_cfg())
+    argv = cc["calls"][1]["argv"]
+    assert argv[argv.index("--system-prompt") + 1] == "Be a pirate."

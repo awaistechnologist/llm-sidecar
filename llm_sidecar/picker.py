@@ -34,8 +34,12 @@ BUDGETS = ("free", "cheap", "best")
 # meant a cold start paid the full timeout for every dead model in front of
 # the live one — with a 15s timeout and four stale entries, over a minute
 # before the first token. A wave costs a few extra tiny calls (free models,
-# ten tokens each) in exchange for bounding that to one timeout.
+# a few hundred tokens at most) in exchange for bounding that to one timeout.
 PROBE_WAVE = 3
+
+# Room for a reasoning model to think and still write "OK". Non-reasoning
+# models stop after one token, so the cap only costs anything when needed.
+PRETEST_MAX_TOKENS = 512
 
 # Preference is expressed as model *families*, not exact ids.
 #
@@ -166,7 +170,10 @@ def pretest(model_id: str, config: Config) -> tuple[bool, str | None]:
     payload = {
         "model": wire_model,
         "messages": [{"role": "user", "content": "Reply with 'OK' and nothing else."}],
-        "max_tokens": 10,
+        # Reasoning models spend their allowance thinking before they write
+        # any content. With a 10-token cap they return empty content and fail
+        # the pretest although they work, which left `free` with no model.
+        "max_tokens": PRETEST_MAX_TOKENS,
         "temperature": 0.0,
     }
     try:

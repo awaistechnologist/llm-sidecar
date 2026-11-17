@@ -30,6 +30,10 @@ logger = logging.getLogger("llm_sidecar.client")
 
 OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
 OLLAMA_PREFIX = "ollama/"
+# The third provider is not HTTP at all — see claude_cli. It is dispatched
+# before _route() rather than inside it, because a subprocess has no URL and
+# no headers to return.
+CLAUDE_PREFIX = "claude/"
 RETRYABLE_STATUS = (429, 503)
 
 
@@ -175,6 +179,17 @@ def complete(
     Ollama, which has no such facility — silently, because the sensible
     fallback for a local model is simply to answer without it, and raising
     would make `web=True` unusable as a default."""
+    if model.startswith(CLAUDE_PREFIX):
+        from . import claude_cli
+        if web:
+            # Same reasoning as Ollama: log, don't raise. The CLI is run with
+            # --tools "" and so has no WebFetch to offer.
+            logger.info(f"web=True ignored for {model} (no retrieval via claude -p)")
+        return claude_cli.complete(
+            messages, model, config, max_tokens=max_tokens,
+            temperature=temperature, response_format=response_format,
+        )
+
     url, wire_model, headers = _route(model, config)
     is_local = model.startswith(OLLAMA_PREFIX)
     payload = {
@@ -240,6 +255,14 @@ async def stream(
 
     Retries only before the first token — once tokens are out the door the
     consumer has already seen them, and a retry would duplicate the prefix."""
+    if model.startswith(CLAUDE_PREFIX):
+        from . import claude_cli
+        async for event in claude_cli.stream(
+            messages, model, config, max_tokens=max_tokens, temperature=temperature,
+        ):
+            yield event
+        return
+
     url, wire_model, headers = _route(model, config)
     is_local = model.startswith(OLLAMA_PREFIX)
     payload = {

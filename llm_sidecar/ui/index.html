@@ -210,6 +210,15 @@
           </select>
           <span class="muted" id="cfg-budget-status"></span>
         </div>
+        <div class="row" id="cfg-claude-row" hidden>
+          <label class="muted" style="display:flex;align-items:center;gap:5px;font-size:12px"
+                 title="Runs `claude -p` locally, with tools, skills and MCP servers switched off">
+            <input type="checkbox" id="cfg-claude" style="width:auto">
+            Use my Claude subscription
+          </label>
+          <button class="btn" id="cfg-claude-test">Test</button>
+          <span class="muted" id="cfg-claude-status"></span>
+        </div>
         <p class="hint" style="margin:10px 0 0">
           The key is applied immediately and never sent back to this page — only a
           masked preview. Unless you tick "remember", it lives in the running daemon
@@ -976,6 +985,47 @@ $("cfg-budget").onchange = async () => {
   } catch (e) { $("cfg-budget-status").textContent = "failed: " + e.message; }
 };
 
+// The claude/ provider. The row stays hidden unless the CLI is actually
+// installed — a toggle for software you don't have is noise, not a feature.
+async function loadClaudeCli() {
+  try {
+    const s = await api("/status");
+    const cc = s.claude_cli || {};
+    if (!cc.installed && !cc.enabled) return;
+    $("cfg-claude-row").hidden = false;
+    $("cfg-claude").checked = !!cc.enabled;
+    $("cfg-claude-status").textContent = cc.enabled
+      ? (cc.models || []).join(", ")
+      : "installed, not in use";
+  } catch (e) { /* the dashboard is still useful without this row */ }
+}
+
+$("cfg-claude").onchange = async () => {
+  const on = $("cfg-claude").checked;
+  $("cfg-claude-status").textContent = "saving…";
+  try {
+    const r = await post("/config/claude-cli", { enabled: on });
+    $("cfg-claude-status").textContent = r.enabled
+      ? (r.models || []).join(", ")
+      : "off";
+    // claude/ ids enter and leave the model list with the toggle.
+    loadChatModels();
+    await refresh();
+  } catch (e) { $("cfg-claude-status").textContent = "failed: " + e.message; }
+};
+
+$("cfg-claude-test").onclick = async () => {
+  const btn = $("cfg-claude-test");
+  btn.disabled = true;
+  $("cfg-claude-status").textContent = "testing… (this makes one real call)";
+  try {
+    const r = await api("/claude-cli/status");
+    $("cfg-claude-status").textContent =
+      `${r.version || "unknown version"} — ${r.detail}`;
+  } catch (e) { $("cfg-claude-status").textContent = "failed: " + e.message; }
+  finally { btn.disabled = false; }
+};
+
 $("refresh").onclick = refresh;
 $("clear-cache").onclick = async () => {
   const btn = $("clear-cache");
@@ -990,6 +1040,7 @@ $("clear-cache").onclick = async () => {
 };
 
 refresh();
+loadClaudeCli();
 loadChatModels().then(showResolved);
 // Slow poll. The interesting numbers move when *you* do something, and a
 // dashboard that hammers its own daemon would mostly be measuring itself.

@@ -65,6 +65,12 @@ class ApiKeyRequest(BaseModel):
     persist: bool = False
 
 
+class ClaudeCliRequest(BaseModel):
+    enabled: bool = False
+    # None leaves the configured path alone; "" clears it back to PATH lookup.
+    path: str | None = None
+
+
 class BudgetRequest(BaseModel):
     budget: str
 
@@ -465,6 +471,31 @@ def create_app(config: Config | None = None) -> FastAPI:
         except Exception as e:
             return {"error": str(e)}
 
+    @app.get("/claude-cli/status")
+    def claude_cli_status(_: None = Depends(require_token)) -> dict:
+        """Installed / enabled / signed in for the claude/ provider.
+
+        Its own endpoint rather than part of /status because the auth check
+        costs a real model call, and /status is polled by the dashboard."""
+        from . import claude_cli
+        try:
+            return claude_cli.check(cfg)
+        except Exception as e:
+            return {"enabled": cfg.claude_cli_enabled, "detail": str(e)[:200]}
+
+    @app.post("/config/claude-cli")
+    def set_claude_cli(req: ClaudeCliRequest, _: None = Depends(require_token)) -> dict:
+        """Turn the claude/ provider on or off on the running daemon."""
+        from . import claude_cli
+        cfg.claude_cli_enabled = bool(req.enabled)
+        if req.path is not None:
+            cfg.claude_cli_path = req.path or None
+        return {
+            "enabled": cfg.claude_cli_enabled,
+            "installed": claude_cli.binary(cfg) is not None,
+            "models": [m.id for m in claude_cli.models(cfg)],
+        }
+
     @app.get("/status")
     def status(_: None = Depends(require_token)) -> dict:
         """Everything about this sidecar: hardware, local model fit, search
@@ -504,10 +535,16 @@ def create_app(config: Config | None = None) -> FastAPI:
             for a in ("auto",) + TIER_ALIASES + BUDGET_ALIASES
         ]
         for m in sidecar.models():
+            if m.is_local:
+                owner = "ollama"
+            elif m.id.startswith("claude/"):
+                owner = "claude-cli"
+            else:
+                owner = "openrouter"
             data.append({
                 "id": m.id,
                 "object": "model",
-                "owned_by": "ollama" if m.is_local else "openrouter",
+                "owned_by": owner,
                 "created": 0,
                 "context_length": m.context_length,
             })

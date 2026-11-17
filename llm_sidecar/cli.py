@@ -41,6 +41,12 @@ def _status() -> int:
     tight = [m['id'] for m in s['local_models'] if m['verdict'] != 'fits']
     if tight:
         print(f"local (won't)  : {', '.join(t.split('/', 1)[1] for t in tight)}")
+    cc = s.get("claude_cli") or {}
+    if cc.get("enabled"):
+        print(f"claude/ (CLI)  : on · {', '.join(cc.get('models') or []) or 'no binary found'}")
+    elif cc.get("installed"):
+        print("claude/ (CLI)  : installed but off   "
+              "(`llm-sidecar config claude-cli on` to use your subscription)")
     c = s["cache"]
     print(f"cache          : {c['completions']} completions, {c['searches']} searches "
           f"({c['bytes'] / 1024:.0f} KiB)")
@@ -48,8 +54,12 @@ def _status() -> int:
     print(f"last 30 days   : {u['calls']} calls, ${u['cost_usd']:.4f}, {u['total_tokens']:,} tokens")
     print(f"daemon would be: http://{sc.config.daemon_host}:{sc.config.daemon_port}/v1")
 
-    if not s["cloud_configured"] and not s["local_models"]:
-        print("\nNothing to route to. Install Ollama or set OPENROUTER_API_KEY.", file=sys.stderr)
+    if not s["cloud_configured"] and not s["local_models"] and not cc.get("models"):
+        print("\nNothing to route to. Any one of these fixes it:", file=sys.stderr)
+        print("  install Ollama                      (local, free)", file=sys.stderr)
+        print("  set OPENROUTER_API_KEY              (cloud)", file=sys.stderr)
+        print("  llm-sidecar config claude-cli on    (your Claude subscription)",
+              file=sys.stderr)
         return 1
     return 0
 
@@ -147,7 +157,36 @@ def _config(args) -> int:
         print(f"ollama         : {cfg.ollama_host}")
         print(f"search         : {cfg.search_provider}")
         print(f"locked tiers   : {cfg.models or 'none'}")
+        print(f"claude/ (CLI)  : {'on' if cfg.claude_cli_enabled else 'off'}")
         return 0
+
+    if args.action == "claude-cli":
+        from . import claude_cli
+
+        want = (args.value or "").strip().lower()
+        if want not in ("on", "off", ""):
+            print("Use: llm-sidecar config claude-cli on|off", file=sys.stderr)
+            return 1
+
+        if want:
+            cfg.claude_cli_enabled = (want == "on")
+            print(f"Saved to {config_mod.save(cfg)}")
+
+        info = claude_cli.check(cfg)
+        print(f"claude binary  : {info['binary'] or 'not found'}")
+        print(f"version        : {info['version'] or 'unknown'}")
+        print(f"enabled        : {'yes' if info['enabled'] else 'no'}")
+        if info["authenticated"] is not None:
+            print(f"signed in      : {'yes' if info['authenticated'] else 'no'}")
+        print(f"               : {info['detail']}")
+        if info["enabled"] and info["authenticated"]:
+            print()
+            print("Use it by naming a model:")
+            print("  llm-sidecar ask --model claude/sonnet \"...\"")
+            print("Or make it a tier default, in the dashboard or the environment:")
+            print("  export LLM_SIDECAR_MODEL_POWERFUL=claude/opus")
+        return 0 if (info["binary"] and (not info["enabled"] or info["authenticated"]))\
+            else 1
 
     if args.action == "clear-key":
         cfg.openrouter_api_key = None
@@ -354,7 +393,8 @@ def main(argv: list[str] | None = None) -> int:
     ca.add_argument("action", nargs="?", default="stats", choices=["stats", "clear"])
 
     cf = sub.add_parser("config", help="set your API key, budget, and see what's configured")
-    cf.add_argument("action", choices=["key", "budget", "show", "clear-key"])
+    cf.add_argument("action",
+                    choices=["key", "budget", "show", "clear-key", "claude-cli"])
     cf.add_argument("value", nargs="?", default="")
     cf.add_argument("--save", action="store_true",
                     help="write it to the config file (plain text) rather than this process only")

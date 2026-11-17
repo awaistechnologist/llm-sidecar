@@ -10,7 +10,16 @@ class Usage:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
+    # Money actually owed for this call. Zero for local inference and for
+    # subscription-backed claude/ calls, because in both cases nothing is
+    # billed — the ledger adds this up and reporting it as spend would be a
+    # lie about the user's bill.
     cost_usd: float = 0.0
+    # What the same call would have cost on metered API pricing. Reported by
+    # the Claude CLI even under a subscription; kept because "what the
+    # subscription saved" is worth seeing, and dropped from the ledger
+    # because it is not spend.
+    notional_cost_usd: float = 0.0
 
 
 @dataclass
