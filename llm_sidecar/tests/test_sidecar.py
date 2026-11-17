@@ -3150,7 +3150,7 @@ def test_mlx_cache_is_capped_just_above_the_working_set(monkeypatch):
         @staticmethod
         def set_cache_limit(n): seen.append(round(n / 1024 ** 3, 2))
 
-    monkeypatch.setitem(__import__("sys").modules, "mlx.core", FakeMx)
+    monkeypatch.setattr(engine, "_mx", lambda: FakeMx)
 
     # 15% above the peak: comfortably over 11.9, nothing like 16.
     assert engine.cap_mlx_cache(12.0, usable_gib=33.0) == 13.8
@@ -3176,7 +3176,7 @@ def test_cache_cap_follows_an_unexpectedly_large_generation(monkeypatch):
         @staticmethod
         def get_peak_memory(): return int(20.0 * 1024 ** 3)
 
-    monkeypatch.setitem(__import__("sys").modules, "mlx.core", FakeMx)
+    monkeypatch.setattr(engine, "_mx", lambda: FakeMx)
 
     profile = pf.get("standard")                    # nominal peak 12 GiB
     engine.retune_mlx_cache(profile)
@@ -3256,3 +3256,45 @@ def test_cache_cap_is_retuned_when_the_resident_model_changes(monkeypatch):
     resident.get(pf.get("standard"))            # back down to 12
 
     assert caps == [12.0, 31.0, 12.0]
+
+
+def test_peak_is_measured_per_generation_not_per_process(monkeypatch):
+    """mx.get_peak_memory() is a process-lifetime maximum.
+
+    Forgetting that was a real bug: one Z-Image generation peaking at 27.8
+    GiB left every later reading at 27.8 GiB, so a klein edit — a 12 GiB
+    profile — had its cache cap sized from Z-Image's working set and got
+    26.4 GiB. That run paged the most of any measured, which is exactly the
+    failure the cap exists to prevent."""
+    from llm_sidecar.images import engine, profiles as pf
+
+    resets: list[int] = []
+    caps: list[float] = []
+
+    class FakeMx:
+        peak = 27.83 * 1024 ** 3
+
+        @classmethod
+        def reset_peak_memory(cls):
+            resets.append(1)
+            cls.peak = 0
+
+        @classmethod
+        def get_peak_memory(cls):
+            return cls.peak
+
+    monkeypatch.setattr(engine, "_mx", lambda: FakeMx)
+    monkeypatch.setattr(engine, "cap_mlx_cache", lambda peak, **k: caps.append(peak))
+
+    profile = pf.get("characters-consistent")      # 12 GiB
+
+    # Without a reset, a stale 27.8 GiB would raise this profile's cap.
+    engine.retune_mlx_cache(profile)
+    assert caps == [27.83]
+
+    # With one, the cap follows what this generation actually did.
+    caps.clear()
+    engine.reset_peak()
+    assert resets == [1]
+    engine.retune_mlx_cache(profile)
+    assert caps == []

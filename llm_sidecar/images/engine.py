@@ -177,6 +177,21 @@ def guard(profile: Profile, allow_tight: bool = True) -> dict:
 # ── the one resident model ────────────────────────────────────────────────
 
 
+def _mx():
+    """mlx.core, or None when mflux is not installed.
+
+    One accessor rather than an `import mlx.core` at each call site, because
+    `import a.b as x` resolves through the real package's attribute when it
+    exists, so patching sys.modules in a test is silently ignored on a
+    machine that actually has mlx. Tests patch this instead and behave the
+    same on Linux CI, where there is no mlx at all."""
+    try:
+        import mlx.core as mx
+        return mx
+    except ImportError:
+        return None
+
+
 def cap_mlx_cache(peak_gib: float, usable_gib: float | None = None) -> float | None:
     """Bound MLX's buffer cache, just above the working set.
 
@@ -202,9 +217,8 @@ def cap_mlx_cache(peak_gib: float, usable_gib: float | None = None) -> float | N
     headroom is 15%, and `observed` lets a caller feed back what a real
     generation actually peaked at, since a larger image needs more than the
     profile's nominal figure."""
-    try:
-        import mlx.core as mx
-    except ImportError:
+    mx = _mx()
+    if mx is None:
         return None
 
     if usable_gib is None:
@@ -220,18 +234,36 @@ def cap_mlx_cache(peak_gib: float, usable_gib: float | None = None) -> float | N
     return round(limit, 1)
 
 
+def reset_peak() -> None:
+    """Start a generation's high-water mark from zero.
+
+    `mx.get_peak_memory()` is a process-lifetime maximum, not a per-call
+    one, and forgetting that was a real bug: one Z-Image generation peaking
+    at 27.8 GiB left every later reading at 27.8 GiB, so retune_mlx_cache
+    then sized a klein edit's cap off Z-Image's working set. The cap went to
+    26.4 GiB for a 12 GiB profile and that run paged the most of any
+    measured. Resetting per generation is what makes the figure mean
+    anything."""
+    mx = _mx()
+    if mx is not None:
+        mx.reset_peak_memory()
+
+
 def retune_mlx_cache(profile: Profile) -> None:
-    """Raise the cap if a generation actually peaked above the estimate.
+    """Raise the cap if *this* generation peaked above the profile estimate.
 
     A profile's peak_gib is a figure for its usual size; ask for 2048x2048
     and the real peak is higher. Left alone the cap would then sit under the
-    working set, which the numbers above show is the slow case."""
-    try:
-        import mlx.core as mx
-        observed = mx.get_peak_memory() / GIB
-    except Exception:
+    working set, which the numbers above show is the slow case.
+
+    Only meaningful because reset_peak runs first — see the bug it fixes."""
+    mx = _mx()
+    if mx is None:
         return
+    observed = mx.get_peak_memory() / GIB
     if observed > profile.peak_gib:
+        logger.info("%s peaked at %.1f GiB (estimate %.1f); raising the cap",
+                    profile.name, observed, profile.peak_gib)
         cap_mlx_cache(observed)
 
 
@@ -266,11 +298,9 @@ class _Resident:
             logger.info("unloading image model %s", self.key)
             self.model = None
             self.key = None
-            try:
-                import mlx.core as mx
+            mx = _mx()
+            if mx is not None:
                 mx.clear_cache()
-            except Exception:
-                pass
 
     def expire_if_idle(self, idle_s: float = IDLE_UNLOAD_S) -> None:
         with self._lock:
@@ -428,6 +458,7 @@ def run(profile: Profile, *, prompt: str, negative: str | None, seed: int,
 
     with MACHINE_LOCK:
         model, load_s, warm = RESIDENT.get(profile)
+        reset_peak()
         t = time.time()
         image = _call(model, profile, prompt=prompt, negative=negative, seed=seed,
                       width=width, height=height, steps=steps, refs=refs,
@@ -475,10 +506,14 @@ def status() -> dict:
         # unexplainable symptom. active is the weights and live arrays;
         # cache is reusable freed buffers, and should now sit at or below
         # the figure cap_mlx_cache set rather than climbing past 16 GiB.
-        try:
-            import mlx.core as mx
+        mx = _mx()
+        if mx is not None:
             out["mlx_active_gib"] = round(mx.get_active_memory() / 2 ** 30, 2)
             out["mlx_cache_gib"] = round(mx.get_cache_memory() / 2 ** 30, 2)
-        except Exception:
-            pass
+            # The last generation's working set — reset_peak runs before
+            # each one, so this is per-generation rather than the
+            # process-lifetime maximum MLX reports by default. It is the
+            # number the cap is sized from, and several profiles' peak_gib
+            # are still estimates inherited from other projects' notes.
+            out["mlx_peak_gib"] = round(mx.get_peak_memory() / 2 ** 30, 2)
     return out
