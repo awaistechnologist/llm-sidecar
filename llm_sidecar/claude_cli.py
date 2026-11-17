@@ -108,13 +108,46 @@ class ClaudeCliLimitError(ClaudeCliError):
     off is the wrong move; using a different model is the right one."""
 
 
+# Where `claude` actually lives when PATH does not say.
+#
+# This is not belt-and-braces: launchd hands a service a minimal PATH
+# (/usr/bin:/bin:/usr/sbin:/sbin), so a CLI installed by npm or the native
+# installer is invisible to the daemon even though it works perfectly in the
+# user's shell. Found by installing the service and watching claude/ requests
+# fail on a machine where `claude --version` was fine.
+WELL_KNOWN = (
+    "~/.claude/local/claude",      # native installer
+    "~/.npm-global/bin/claude",    # npm with a user prefix
+    "~/.local/bin/claude",
+    "/opt/homebrew/bin/claude",
+    "/usr/local/bin/claude",
+)
+
+
+def _usable(path: str) -> bool:
+    return os.path.isfile(path) and os.access(path, os.X_OK)
+
+
 def binary(config: Config) -> str | None:
-    """Path to the CLI, or None. Honours an explicit config path first so a
-    user with several installs can say which one."""
+    """Path to the CLI, or None.
+
+    An explicit config path wins, so a machine with several installs can say
+    which one. Otherwise PATH, then the well-known locations — see
+    WELL_KNOWN for why that last step is load-bearing rather than tidy."""
     if config.claude_cli_path:
-        p = config.claude_cli_path
-        return p if os.path.isfile(p) and os.access(p, os.X_OK) else None
-    return shutil.which("claude")
+        p = os.path.expanduser(config.claude_cli_path)
+        return p if _usable(p) else None
+
+    found = shutil.which("claude")
+    if found:
+        return found
+
+    for candidate in WELL_KNOWN:
+        p = os.path.expanduser(candidate)
+        if _usable(p):
+            logger.debug("claude not on PATH; using %s", p)
+            return p
+    return None
 
 
 def available(config: Config) -> bool:

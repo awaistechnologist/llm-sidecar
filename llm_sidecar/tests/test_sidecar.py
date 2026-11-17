@@ -3070,3 +3070,28 @@ def test_saving_another_setting_keeps_a_persisted_key(monkeypatch, tmp_path):
     config_mod.save(Config(), clear_api_key=True)
     data = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
     assert "openrouter_api_key" not in data
+
+
+def test_claude_binary_found_without_path(monkeypatch, tmp_path):
+    """launchd hands a service PATH=/usr/bin:/bin:/usr/sbin:/sbin, so a CLI
+    installed by npm is invisible to the daemon although it works in the
+    user's shell. Found by installing the service and watching claude/
+    requests fail on a machine where `claude --version` was fine."""
+    from llm_sidecar import claude_cli
+
+    home = tmp_path / "home"
+    (home / ".npm-global" / "bin").mkdir(parents=True)
+    exe = home / ".npm-global" / "bin" / "claude"
+    exe.write_text("#!/bin/sh\n")
+    exe.chmod(0o755)
+
+    monkeypatch.setattr(claude_cli.shutil, "which", lambda name: None)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(claude_cli.os.path, "expanduser",
+                        lambda p: p.replace("~", str(home), 1))
+
+    assert claude_cli.binary(Config()) == str(exe)
+
+    # An explicit path still wins outright, and a bad one is not silently
+    # replaced by a guess — that would hide a typo.
+    assert claude_cli.binary(Config(claude_cli_path="/nope/claude")) is None
