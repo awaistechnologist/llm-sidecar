@@ -13,6 +13,37 @@ aimed at whoever reported it. State what changed, what now breaks, and what
 to do instead. Anything that does not demand a change belongs in Added,
 Fixed or Changed.
 
+## [0.9.3] — 2026-11-18
+
+### Fixed
+- **The install instructions on PyPI were not usable.** The README is the
+  PyPI description, and it told people to run `/path/to/venv/bin/python` — a
+  placeholder nobody can paste and no directory can parse. Both documented
+  launch paths are now real commands, verified from a clean install:
+  `uvx --from llm-sidecar llm-sidecar-mcp` with nothing installed first, or
+  `llm-sidecar-mcp` after `pipx install llm-sidecar`.
+- The README listed 12 MCP tools when there are 17 — the four image tools
+  and `whats_new` were missing, and had been for three releases. A reader
+  cannot tell a short list from a complete one, so a test now fails if a
+  tool exists that the README does not name, or if the stated count drifts.
+- `USING.md`'s MCP registration command had a hardcoded path into one
+  machine's home directory.
+
+### Added
+- Tests for the surfaces a consumer touches: every MCP tool is driven with
+  its real signature while everything underneath fails, asserting it returns
+  an error rather than raising at an agent; `changes` degrades honestly when
+  the changelog is missing; and `images.generate` is covered without mflux.
+- A writeup of the image benchmarking in `docs/`, including the result that
+  contradicted the design — a cache cap *below* the working set was the
+  slowest setting measured.
+
+### Changed
+- The scheduler tests no longer assert a grouping count across racing
+  threads. That failed on one CI runner and passed everywhere else, which is
+  a flaky test rather than a flaky scheduler — and a red check on the default
+  branch shows up on directory listings as "tests failing".
+
 ## [0.9.2] — 2026-11-18
 
 ### Added
