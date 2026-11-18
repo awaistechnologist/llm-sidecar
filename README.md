@@ -1,5 +1,7 @@
 # llm-sidecar
 
+<!-- mcp-name: io.github.awaistechnologist/llm-sidecar -->
+
 [![tests](https://github.com/awaistechnologist/llm-sidecar/actions/workflows/test.yml/badge.svg)](https://github.com/awaistechnologist/llm-sidecar/actions/workflows/test.yml)
 [![PyPI](https://img.shields.io/pypi/v/llm-sidecar?logo=pypi&logoColor=white&color=2f6fdb)](https://pypi.org/project/llm-sidecar/)
 [![Python](https://img.shields.io/pypi/pyversions/llm-sidecar?logo=python&logoColor=white)](https://pypi.org/project/llm-sidecar/)

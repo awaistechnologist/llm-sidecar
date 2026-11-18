@@ -3604,3 +3604,32 @@ def test_server_instructions_tell_an_agent_to_check():
     text = (mcp.instructions or "").lower()
     assert "whats_new" in text
     assert "version" in text
+
+
+def test_readme_carries_the_mcp_registry_marker():
+    """The MCP Registry verifies PyPI ownership by finding
+    `mcp-name: <server-name>` in the published README, which becomes the PyPI
+    description. Lose it and the next publish is rejected — and the listing
+    is not something anyone would think to re-check."""
+    import pathlib
+    import re
+
+    readme = pathlib.Path(__file__).resolve().parents[2] / "README.md"
+    if not readme.exists():          # installed package, not a checkout
+        pytest.skip("README not present in an installed package")
+    text = readme.read_text(encoding="utf-8")
+
+    m = re.search(r"mcp-name:\s*(\S+)", text)
+    assert m, "README is missing the mcp-name marker the registry checks for"
+    name = m.group(1)
+    assert name == "io.github.awaistechnologist/llm-sidecar", name
+
+    # The docs are explicit that the token needs a boundary after it, and
+    # that gluing it to trailing punctuation prevents the match.
+    assert not name.endswith("."), "trailing punctuation breaks the match"
+
+    server_json = readme.parent / "server.json"
+    if server_json.exists():
+        import json
+        assert json.loads(server_json.read_text(encoding="utf-8"))["name"] == name, \
+            "server.json name and README marker must match"

@@ -13,6 +13,19 @@ aimed at whoever reported it. State what changed, what now breaks, and what
 to do instead. Anything that does not demand a change belongs in Added,
 Fixed or Changed.
 
+## [0.9.2] — 2026-11-18
+
+### Added
+- **Listed in the MCP Registry.** `llm-sidecar-mcp` is a dedicated console
+  script for the MCP server: an MCP client installing a PyPI package runs the
+  console script with no arguments, and the multi-command CLI exited with an
+  argparse error on that, which is a poor first run. `llm-sidecar mcp` still
+  works and is unchanged.
+- The README carries the `mcp-name` marker the registry uses to verify PyPI
+  ownership, and `server.json` describes the server for publication. A test
+  keeps the two in agreement, because a broken marker is only noticed at the
+  next publish.
+
 ## [0.9.1] — 2026-11-18
 
 0.9.0 was tagged but never published: its build failed, so nothing reached

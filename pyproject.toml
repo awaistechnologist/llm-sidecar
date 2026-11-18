@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "llm-sidecar"
-version = "0.9.1"
+version = "0.9.2"
 description = "Local sidecar giving any tool grounded, cited, routed AI — Ollama or OpenRouter, no API key required."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -77,6 +77,11 @@ dev = ["pytest", "openai", "build", "twine"]
 
 [project.scripts]
 llm-sidecar = "llm_sidecar.cli:main"
+# A dedicated entry point for the MCP server. `llm-sidecar mcp` does the same
+# thing, but an MCP client launching a PyPI package runs the console script
+# with no arguments, and the multi-command CLI exits with an argparse error
+# on that. One unambiguous command avoids a confusing first run.
+llm-sidecar-mcp = "llm_sidecar.mcp_server:main"
 
 [project.urls]
 Homepage = "https://github.com/awaistechnologist/llm-sidecar"
