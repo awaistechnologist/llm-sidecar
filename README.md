@@ -228,14 +228,39 @@ capability, `/status`, `/usage`, `/resolve-preview`, `/config/*`. Swagger at
 
 ### MCP — for agents
 
+Nothing to install first:
+
 ```json
 {"mcpServers": {"llm-sidecar": {
-  "command": "/path/to/venv/bin/python", "args": ["-m", "llm_sidecar.mcp_server"]}}}
+  "command": "uvx", "args": ["--from", "llm-sidecar", "llm-sidecar-mcp"]}}}
 ```
 
-`answer_question` · `search_web` · `read_url` · `verify_claims` ·
-`extract_claims` · `fact_check_document` · `summarise` · `classify` ·
-`extract_fields` · `delegate` · `usage_report` · `sidecar_status`
+Or, after `pipx install llm-sidecar`:
+
+```json
+{"mcpServers": {"llm-sidecar": {"command": "llm-sidecar-mcp"}}}
+```
+
+Both are copy-pasteable as they stand — no path to fill in.
+
+**17 tools**, grouped by what they are for.
+
+Evidence and verification:
+`search_web` · `answer_question` · `read_url` · `verify_claims` ·
+`extract_claims` · `fact_check_document`
+
+Bounded structured work:
+`summarise` · `classify` · `extract_fields` · `delegate`
+
+Images, on Apple Silicon with the `[images]` extra:
+`list_image_profiles` · `generate_image` · `edit_with_references` ·
+`upscale_image`
+
+Housekeeping: `usage_report` · `sidecar_status` · `whats_new`
+
+`whats_new(since="<the version you integrated against>")` is how an agent
+finds out what changed without anyone telling it — see
+[Finding out what changed](USING.md#6-finding-out-what-changed).
 
 Note what's *not* there: a general "call an LLM" tool. An MCP client is
 already a model, so exposing inference to it is close to a no-op. What it

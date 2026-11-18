@@ -220,7 +220,13 @@ way to turn your gate off.
 Register once and the tools appear in every repo:
 
 ```bash
-claude mcp add llm-sidecar -- /Users/awaistahir/.local/share/llm-sidecar/venv/bin/python -m llm_sidecar.mcp_server
+claude mcp add --scope user llm-sidecar -- uvx --from llm-sidecar llm-sidecar-mcp
+```
+
+Or, if it is already installed with `pipx install llm-sidecar`:
+
+```bash
+claude mcp add --scope user llm-sidecar -- llm-sidecar-mcp
 ```
 
 Tools: `search_web`, `answer_question`, `read_url`, `verify_claims`,

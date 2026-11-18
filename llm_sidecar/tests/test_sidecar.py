@@ -4017,3 +4017,41 @@ def test_listing_metadata_files_are_valid_and_consistent():
     srv = json.loads((root / "server.json").read_text(encoding="utf-8"))
     assert srv["name"] == f"io.github.{owner}/llm-sidecar"
     assert owner in srv["repository"]["url"]
+
+
+def test_readme_lists_every_mcp_tool():
+    """The README's tool list is what a person reads before installing, and
+    it had drifted to 12 tools when there were 17 — the image tools and
+    whats_new were missing. A reader cannot tell a short list from a
+    complete one."""
+    import asyncio
+    import pathlib
+
+    from llm_sidecar.mcp_server import mcp
+
+    readme = pathlib.Path(__file__).resolve().parents[2] / "README.md"
+    if not readme.exists():
+        pytest.skip("README not present in an installed package")
+    text = readme.read_text(encoding="utf-8")
+
+    tools = asyncio.run(mcp.list_tools())
+    missing = [t.name for t in tools if f"`{t.name}`" not in text]
+    assert not missing, f"README does not mention: {missing}"
+    assert f"**{len(tools)} tools**" in text, \
+        f"README's tool count is stale; there are {len(tools)}"
+
+
+def test_readme_mcp_config_has_no_placeholder():
+    """A config block with /path/to/... in it cannot be copy-pasted by a
+    person or used by a directory scraping for a runnable command."""
+    import pathlib
+
+    readme = pathlib.Path(__file__).resolve().parents[2] / "README.md"
+    if not readme.exists():
+        pytest.skip("README not present in an installed package")
+    text = readme.read_text(encoding="utf-8")
+
+    assert "/path/to/" not in text, "README still contains a placeholder path"
+    # Both documented launch paths must name the real console script.
+    assert '"command": "llm-sidecar-mcp"' in text
+    assert '"llm-sidecar", "llm-sidecar-mcp"' in text
