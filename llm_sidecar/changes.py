@@ -18,6 +18,13 @@ this module exists to prevent.
 An **Action required** section in a release is the load-bearing part: it is
 the machine-readable promise that a consumer must do something, as opposed
 to the ordinary case where they need only upgrade.
+
+Those items are read by consumers nobody here has met, so each one is
+written as a condition the reader tests against their own code ("You rename
+image files after generation"), not as an instruction aimed at whoever
+reported the problem. A changelog that says "remove your workaround" only
+helps the one consumer who had that workaround; everyone else cannot tell
+whether it concerns them.
 """
 
 from __future__ import annotations

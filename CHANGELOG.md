@@ -2,6 +2,17 @@
 
 Notable changes per release. Dates are release dates.
 
+This file is **served, not just published**: `whats_new(since=...)` over MCP,
+`changelog://llm-sidecar`, and `GET /changelog?since=...` all read it, so a
+consumer can ask what changed rather than wait to be told.
+
+That means an **Action required** section is read by people and agents you
+will never meet. Write each item as a condition they can test against their
+own code — "You rename image files after generation" — not as an instruction
+aimed at whoever reported it. State what changed, what now breaks, and what
+to do instead. Anything that does not demand a change belongs in Added,
+Fixed or Changed.
+
 ## [0.9.0] — 2026-11-18
 
 ### Added
@@ -31,12 +42,26 @@ Notable changes per release. Dates are release dates.
   it.
 
 ### Action required
-- **Remove workarounds for the bugs fixed in 0.7.1.** If your code renames
-  `<stem>_<seed>.png` afterwards, compensates for `resolution` being treated
-  as the long edge, or re-requests upscales because they were wrongly
-  skipped, delete all three — they are fixed upstream and the workarounds now
-  produce the wrong result. Use `filename` for an exact name, pass
-  `resolution` as the short edge, and trust the digest.
+Three behaviours were corrected in 0.7.1. Code written against the old
+behaviour still runs, and now produces the wrong result. Check whether any
+of these describe your integration:
+
+- **You rename image files after generation.** Output is
+  `<out_dir>/<stem>_<seed>.png`; it always was. If you renamed afterwards to
+  get a name of your own, send `filename` instead and the service writes
+  exactly that. Renaming on top of `filename` will fight it.
+- **You scale `resolution` before sending it to `upscale`.** It sets the
+  **short** edge — `scale = resolution / min(width, height)` — and always
+  did; the documentation said "long edge" and was wrong. If you halved or
+  doubled the value to compensate, stop: the behaviour did not change, only
+  its description, so the compensation is now a second error.
+- **You force upscales to regenerate.** The skip-if-unchanged digest ignored
+  `resolution`, so a second upscale of one image at a different size was
+  wrongly skipped. It is covered now. If you pass `skip_existing: false` or
+  vary the seed purely to defeat that, you can stop and let the digest work.
+
+None of these affect you if you take the response's `path` as authoritative
+and do not post-process names or sizes.
 
 ## [0.8.1] — 2026-11-18
 
