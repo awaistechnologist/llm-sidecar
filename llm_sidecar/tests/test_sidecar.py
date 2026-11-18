@@ -3518,3 +3518,89 @@ def test_mcp_docstrings_name_only_real_profiles():
         )
     # And at least the default must be named, or agents have no starting point.
     assert pf.DEFAULT_PROFILE in text
+
+
+# ── change discovery ──────────────────────────────────────────────────────
+#
+# A consumer pins assumptions — profile names, defaults, what a parameter
+# means, where files land — and those go stale. Telling each one by hand does
+# not scale and gets skipped. So the changelog is served, not published.
+
+
+def test_changelog_parses_into_something_actionable():
+    from llm_sidecar import changes
+
+    rels = changes.releases()
+    assert rels, "no releases parsed — the changelog format changed"
+    # Newest first, so `since` can stop early.
+    versions = [changes.parse_version(r["version"]) for r in rels]
+    assert versions == sorted(versions, reverse=True)
+    for r in rels:
+        assert r["version"] and r["date"]
+        assert isinstance(r["action_required"], list)
+
+
+def test_since_reports_only_newer_releases():
+    from llm_sidecar import changes
+
+    rels = changes.releases()
+    oldest = rels[-1]["version"]
+    out = changes.since(oldest)
+    assert all(
+        changes.parse_version(r["version"]) > changes.parse_version(oldest)
+        for r in out["releases"]
+    )
+    # Asking from the current version means nothing to do.
+    from llm_sidecar import __version__
+    assert changes.since(__version__)["releases"] == []
+
+
+def test_action_required_is_surfaced_separately():
+    """The whole point. "Something changed" is not actionable; "you must do
+    X" is, and a consumer must not have to read prose to tell them apart."""
+    from llm_sidecar import changes
+
+    sample = {
+        "version": "9.9.9", "date": "today",
+        "sections": {"Added": ["a nicety"],
+                     "Action required": ["delete your workaround"]},
+    }
+    rel = dict(sample)
+    rel["action_required"] = [
+        item for name, items in rel["sections"].items()
+        if any(k in name.lower() for k in changes.ACTION_SECTIONS)
+        for item in items
+    ]
+    assert rel["action_required"] == ["delete your workaround"]
+
+    out = changes.since()
+    assert "action_required" in out and "note" in out
+
+
+def test_version_parsing_never_crashes():
+    from llm_sidecar import changes
+
+    assert changes.parse_version("1.2.3") == (1, 2, 3)
+    assert changes.parse_version("v0.8") == (0, 8, 0)
+    assert changes.parse_version("garbage") == (0, 0, 0)
+    assert changes.parse_version("1.2.3rc1") == (1, 2, 3)
+
+
+def test_changelog_endpoint_and_mcp_tool_agree(api):
+    from llm_sidecar import changes
+
+    http = api.get("/changelog?since=0.7.0").json()
+    direct = changes.since("0.7.0")
+    assert [r["version"] for r in http["releases"]] == \
+           [r["version"] for r in direct["releases"]]
+    assert http["current"] == direct["current"]
+
+
+def test_server_instructions_tell_an_agent_to_check():
+    """An agent only looks if its instructions say to. This is the one place
+    that habit can be planted without a human passing it on."""
+    from llm_sidecar.mcp_server import mcp
+
+    text = (mcp.instructions or "").lower()
+    assert "whats_new" in text
+    assert "version" in text

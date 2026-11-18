@@ -493,6 +493,16 @@ def create_app(config: Config | None = None) -> FastAPI:
         except Exception as e:
             return {"error": str(e)}
 
+    @app.get("/changelog")
+    def changelog(since: str = "", _: None = Depends(require_token)) -> dict:
+        """What changed, for consumers that are not MCP clients.
+
+        `since` is the version the caller integrated against. The point of
+        serving this rather than publishing it is that a consumer can ask
+        instead of waiting to be told — see changes.py."""
+        from . import changes
+        return changes.since(since or None)
+
     @app.get("/v1/images/profiles")
     def image_profiles(_: None = Depends(require_token)) -> dict:
         """The profile table. A caller picks a name from here rather than

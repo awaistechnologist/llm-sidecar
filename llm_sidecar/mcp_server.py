@@ -43,6 +43,16 @@ mcp = _Server(
         "answers with citations. Use search_web and read_url to gather evidence "
         "yourself, verify_claims to fact-check statements against it, and "
         "delegate to hand bulk work to a cheap or local model."
+        "\n\n"
+        # Planted here rather than left to a human to pass on: this text is
+        # what an agent reads at connection, so it is the only place a
+        # "check before trusting what you remember" habit can be set.
+        "This server reports its version at connection. If that differs from "
+        "the version you integrated against, call whats_new(since=\"<your "
+        "version>\") before relying on remembered assumptions about image "
+        "profiles, defaults, parameter meanings or output paths — those are "
+        "what change between releases. Its action_required field is empty "
+        "when upgrading is all that is needed."
     ),
 )
 
@@ -440,6 +450,38 @@ def upscale_image(image_path: str, out_dir: str, resolution: int = 2048,
                 "seconds": r.seconds, "warm_model": r.warm}
     except Exception as e:
         return {"error": str(e)}
+
+
+@mcp.tool()
+def whats_new(since: str = "") -> dict:
+    """
+    What changed in this sidecar, and whether you need to do anything.
+
+    Call this when the version you integrated against differs from the one
+    reported at connection, or at the start of a session if you cache
+    assumptions about profiles, defaults, parameters or where files land.
+
+    `since` is the version YOU last integrated against (e.g. "0.7.0"), not
+    the one running. Omit it for the latest release only.
+
+    The field that matters is `action_required`: it is empty when upgrading
+    is enough, and non-empty when something on your side must change.
+    """
+    try:
+        from . import changes
+        return changes.since(since or None)
+    except Exception as e:
+        return {"error": f"Could not read the changelog: {e}"}
+
+
+@mcp.resource("changelog://llm-sidecar")
+def changelog_resource() -> str:
+    """The full changelog, for clients that prefer resources to tools."""
+    try:
+        from . import changes
+        return changes._source() or "No changelog shipped with this build."
+    except Exception as e:  # pragma: no cover - defensive
+        return f"Could not read the changelog: {e}"
 
 
 def main() -> None:

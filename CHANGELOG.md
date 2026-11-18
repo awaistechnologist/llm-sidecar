@@ -2,6 +2,42 @@
 
 Notable changes per release. Dates are release dates.
 
+## [0.9.0] — 2026-11-18
+
+### Added
+- **Consumers can ask what changed instead of being told.** A consumer pins
+  assumptions — profile names, defaults, what a parameter means, where files
+  land — and those go stale. Telling each one by hand does not scale and, in
+  practice, gets skipped: this project renamed a profile and left an MCP tool
+  advertising the old name for two releases.
+
+  Three ways in, all reading one source of truth (CHANGELOG.md, now shipped
+  inside the wheel rather than duplicated):
+
+  - `whats_new(since="0.7.0")` — an MCP tool. `since` is the version *you*
+    integrated against, not the one running.
+  - `changelog://llm-sidecar` — an MCP resource, for clients that prefer
+    resources to tools.
+  - `GET /changelog?since=0.7.0` — for consumers that are not MCP clients.
+
+  The field that matters is `action_required`, drawn from a release's
+  **Action required**, **Breaking** or **Removed** sections. It is empty when
+  upgrading is enough, so "something changed" and "you must do something" are
+  distinguishable without reading prose.
+
+  The server's MCP instructions now tell an agent to call `whats_new` when
+  the version it connects to differs from the one it integrated against.
+  That is the only place the habit can be planted without a human relaying
+  it.
+
+### Action required
+- **Remove workarounds for the bugs fixed in 0.7.1.** If your code renames
+  `<stem>_<seed>.png` afterwards, compensates for `resolution` being treated
+  as the long edge, or re-requests upscales because they were wrongly
+  skipped, delete all three — they are fixed upstream and the workarounds now
+  produce the wrong result. Use `filename` for an exact name, pass
+  `resolution` as the short edge, and trust the digest.
+
 ## [0.8.1] — 2026-11-18
 
 ### Fixed

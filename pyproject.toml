@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "llm-sidecar"
-version = "0.8.1"
+version = "0.9.0"
 description = "Local sidecar giving any tool grounded, cited, routed AI — Ollama or OpenRouter, no API key required."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -86,6 +86,9 @@ Changelog = "https://github.com/awaistechnologist/llm-sidecar/releases"
 
 [tool.hatch.build.targets.wheel]
 packages = ["llm_sidecar"]
+# The changelog ships inside the package because the server *serves* it:
+# consumers ask what changed rather than being told by hand. See changes.py.
+force-include = { "CHANGELOG.md" = "llm_sidecar/CHANGELOG.md" }
 exclude = ["tests", "tests/*"]
 
 [tool.hatch.build.targets.sdist]

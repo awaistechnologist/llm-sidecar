@@ -248,7 +248,45 @@ it will not fight the daemon.
 
 ---
 
-## 6. Assume this
+## 6. Finding out what changed
+
+You do not need to be told when this service moves. Ask it.
+
+The server reports its version when you connect. When that differs from the
+version you integrated against:
+
+```
+whats_new(since="0.7.0")          MCP tool — `since` is YOUR version
+changelog://llm-sidecar           MCP resource, if you prefer resources
+GET /changelog?since=0.7.0        for non-MCP consumers
+```
+
+All three read the same changelog. The field to branch on is
+**`action_required`**:
+
+```json
+{
+  "current": "0.9.0",
+  "behind_by": 3,
+  "action_required": [
+    {"version": "0.9.0", "item": "Remove workarounds for the bugs fixed in 0.7.1 ..."}
+  ],
+  "note": "1 thing(s) need you to change something."
+}
+```
+
+Empty means upgrading is enough. Non-empty means something on your side has
+to change — a renamed profile, a changed default, a parameter that now means
+what the docs always claimed. That distinction is the point: "something
+changed" is not actionable on its own.
+
+**What goes stale in practice**, and is therefore worth re-checking after an
+upgrade: profile names, the default profile, what a parameter means, and
+where output files land. Those are the four things consumers pin.
+
+---
+
+## 7. Assume this
 
 - **Loopback only.** Do not expose port 4001. It is unauthenticated by
   design, holds an API key, and can spend money.
