@@ -3633,3 +3633,31 @@ def test_readme_carries_the_mcp_registry_marker():
         import json
         assert json.loads(server_json.read_text(encoding="utf-8"))["name"] == name, \
             "server.json name and README marker must match"
+
+
+def test_server_json_matches_the_package():
+    """server.json pins a version, and the registry listing shows whatever
+    it said at publish time. If it drifts from the package, the listing
+    advertises a version that may not exist — the same staleness that let an
+    MCP tool describe a profile renamed two releases earlier."""
+    import json
+    import pathlib
+    import re
+
+    root = pathlib.Path(__file__).resolve().parents[2]
+    sj, pp = root / "server.json", root / "pyproject.toml"
+    if not sj.exists():
+        pytest.skip("server.json not present in an installed package")
+
+    d = json.loads(sj.read_text(encoding="utf-8"))
+    pkg_version = re.search(r'^version = "([^"]+)"',
+                            pp.read_text(encoding="utf-8"), re.M).group(1)
+
+    assert d["version"] == pkg_version, "server.json version != package version"
+    pypi = [p for p in d["packages"] if p["registryType"] == "pypi"]
+    assert pypi, "server.json declares no PyPI package"
+    assert pypi[0]["identifier"] == "llm-sidecar"
+    assert pypi[0]["version"] == pkg_version
+
+    # The registry rejects anything longer, and does so only at publish time.
+    assert len(d["description"]) <= 100, len(d["description"])
