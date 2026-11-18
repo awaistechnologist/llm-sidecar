@@ -3403,79 +3403,119 @@ def test_upscale_resolution_is_the_short_edge():
 # without letting anyone starve.
 
 
-def _drive(scheduler, order, resident_holder):
-    """Run `order` through the scheduler single-threaded, recording the
-    sequence actually served. `resident_holder` stands in for the loaded
-    model, updated as each job runs."""
-    import threading
+class _FakeResident:
+    """Stands in for the loaded model, so scheduling can be tested without
+    one. `key_for` is the identity two profiles share when they need no
+    swap."""
 
-    served = []
-    done = threading.Event()
-    threads = []
+    def __init__(self, key=None):
+        self.key = key
 
-    def one(key):
-        with scheduler.slot(key):
-            served.append(key)
-            resident_holder["key"] = key
-            time.sleep(0.02)
-
-    for key in order:
-        t = threading.Thread(target=one, args=(key,))
-        t.start()
-        threads.append(t)
-        time.sleep(0.01)      # deterministic arrival order
-    for t in threads:
-        t.join(timeout=10)
-    done.set()
-    return served
+    @staticmethod
+    def key_for(profile):
+        return profile
 
 
-def test_scheduler_groups_work_by_resident_model(monkeypatch):
-    """Two consumers alternating profiles previously reloaded a model on
-    every job: klein-edit, unload, z-image, unload, klein-edit, unload.
-    Affinity should collapse that to one swap."""
+def test_scheduler_prefers_the_resident_model(monkeypatch):
+    """The decision itself, tested without threads.
+
+    An earlier version of this asserted a grouping count from six racing
+    threads and was flaky: on a loaded CI runner a waiter had not registered
+    before the previous job finished, so there was nobody to group with. A
+    timing-dependent assertion about concurrency is flaky by construction —
+    the decision function is what actually encodes the policy, so that is
+    what gets asserted."""
     from llm_sidecar.images import engine
 
-    resident = {"key": None}
-
-    class FakeResident:
-        @property
-        def key(self): return resident["key"]
-        @staticmethod
-        def key_for(profile): return profile
-
-    monkeypatch.setattr(engine, "RESIDENT", FakeResident())
+    monkeypatch.setattr(engine, "RESIDENT", _FakeResident("B"))
     sched = engine._Scheduler()
 
-    # Arrivals strictly alternate, as two independent callers would.
-    served = _drive(sched, ["A", "B", "A", "B", "A", "B"], resident)
+    sched._waiting = [engine._Waiter(seq=1, key="A"),
+                      engine._Waiter(seq=2, key="B"),
+                      engine._Waiter(seq=3, key="A")]
+    # B is loaded, so the B job goes next even though an A job arrived first.
+    assert sched._choose().seq == 2
 
-    assert sorted(served) == ["A", "A", "A", "B", "B", "B"]
-    swaps = sum(1 for a, b in zip(served, served[1:]) if a != b)
-    # FIFO would give 5 swaps. Affinity should be far fewer.
-    assert swaps <= 2, f"expected grouping, got {served}"
+    # With nothing loaded, order of arrival decides.
+    monkeypatch.setattr(engine, "RESIDENT", _FakeResident(None))
+    assert sched._choose().seq == 1
+
+    # And a model nobody is waiting for changes nothing.
+    monkeypatch.setattr(engine, "RESIDENT", _FakeResident("Z"))
+    assert sched._choose().seq == 1
+
+    sched._waiting = []
+    assert sched._choose() is None
 
 
-def test_scheduler_cannot_starve_a_waiting_request(monkeypatch):
-    """Affinity must be bounded. A steady stream of one profile would
-    otherwise hold the other off forever."""
+def test_scheduler_bounds_starvation(monkeypatch):
+    """Affinity must be bounded or a steady stream of one profile holds the
+    other off forever."""
     from llm_sidecar.images import engine
 
-    resident = {"key": "A"}
-
-    class FakeResident:
-        @property
-        def key(self): return resident["key"]
-        @staticmethod
-        def key_for(profile): return profile
-
-    monkeypatch.setattr(engine, "RESIDENT", FakeResident())
+    monkeypatch.setattr(engine, "RESIDENT", _FakeResident("A"))
     sched = engine._Scheduler(max_skips=2)
 
-    # B arrives first and keeps losing to A, but only twice.
-    served = _drive(sched, ["B", "A", "A", "A", "A"], resident)
-    assert "B" in served
-    assert served.index("B") <= 2, f"B starved: {served}"
+    waiting = engine._Waiter(seq=1, key="B")
+    sched._waiting = [waiting, engine._Waiter(seq=2, key="A")]
+
+    # Overtaken while under the cap...
+    assert sched._choose().seq == 2
+    waiting.skipped = 1
+    assert sched._choose().seq == 2
+    # ...and at the cap it goes next regardless of what is loaded.
+    waiting.skipped = 2
+    assert sched._choose().seq == 1
+
+
+def test_scheduler_groups_interleaved_arrivals(monkeypatch):
+    """End to end, made deterministic by registering every waiter before any
+    decision is taken — which is the real situation this exists for: a queue
+    that has already built up."""
+    import threading
+
+    from llm_sidecar.images import engine
+
+    resident = _FakeResident(None)
+    monkeypatch.setattr(engine, "RESIDENT", resident)
+    sched = engine._Scheduler()
+
+    served: list[str] = []
+    hold = threading.Event()
+    arrivals = ["A", "B", "A", "B", "A", "B"]
+
+    def blocker():
+        with sched.slot("blocker"):
+            hold.wait(timeout=10)
+
+    def worker(key):
+        with sched.slot(key):
+            served.append(key)
+            resident.key = key
+
+    b = threading.Thread(target=blocker)
+    b.start()
+    while not sched.stats()["busy"]:          # the blocker holds the worker
+        time.sleep(0.005)
+
+    threads = [threading.Thread(target=worker, args=(k,)) for k in arrivals]
+    for t in threads:
+        t.start()
+    # Every arrival is queued before anything is decided — no race.
+    while sched.stats()["waiting"] < len(arrivals):
+        time.sleep(0.005)
+
+    hold.set()
+    b.join(timeout=10)
+    for t in threads:
+        t.join(timeout=10)
+
+    assert sorted(served) == sorted(arrivals), "a job was lost"
+    swaps = sum(1 for x, y in zip(served, served[1:]) if x != y)
+    # Strict FIFO on this arrival order is 5 swaps. Affinity must do better,
+    # and the exact figure is not asserted because only the policy is
+    # guaranteed, not a particular interleaving.
+    assert swaps < 5, f"no grouping happened: {served}"
 
 
 def test_scheduler_counts_are_reported():
