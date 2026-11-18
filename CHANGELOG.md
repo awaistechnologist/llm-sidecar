@@ -13,6 +13,23 @@ aimed at whoever reported it. State what changed, what now breaks, and what
 to do instead. Anything that does not demand a change belongs in Added,
 Fixed or Changed.
 
+## [0.9.1] — 2026-11-18
+
+0.9.0 was tagged but never published: its build failed, so nothing reached
+PyPI. 0.9.1 is the first release carrying the change-discovery feature
+described under 0.9.0 below.
+
+### Fixed
+- **The release build failed on the changelog it was meant to ship.**
+  `python -m build` builds the sdist and then builds the wheel *from inside
+  it*, so `CHANGELOG.md` — force-included into the wheel but absent from the
+  sdist's file list — came back as "Forced include not found". Local
+  verification had used `python -m build --wheel`, which goes straight from
+  the source tree and cannot see the problem.
+- CI now builds sdist and wheel the way the release does, installs the wheel
+  and asserts it serves a non-empty changelog. A packaging mistake fails a
+  pull request instead of a release.
+
 ## [0.9.0] — 2026-11-18
 
 ### Added

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "llm-sidecar"
-version = "0.9.0"
+version = "0.9.1"
 description = "Local sidecar giving any tool grounded, cited, routed AI — Ollama or OpenRouter, no API key required."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -94,7 +94,14 @@ exclude = ["tests", "tests/*"]
 [tool.hatch.build.targets.sdist]
 # The sdist should be able to rebuild and re-verify itself, so it keeps the
 # tests the wheel drops.
-include = ["llm_sidecar", "README.md", "LICENSE", "pyproject.toml",
+#
+# CHANGELOG.md is here because `python -m build` builds the sdist and then
+# builds the wheel *from inside it*. The wheel force-includes the changelog,
+# so leaving it out of the sdist breaks that build with "Forced include not
+# found" — which is exactly how 0.9.0 failed. Building with --wheel alone
+# goes straight from the source tree and never catches it.
+include = ["llm_sidecar", "README.md", "USING.md", "CHANGELOG.md",
+           "LICENSE", "pyproject.toml",
            "install.sh", "install.bat", "run.sh", "run.bat"]
 
 [tool.pytest.ini_options]

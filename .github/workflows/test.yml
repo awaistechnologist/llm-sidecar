@@ -72,3 +72,33 @@ jobs:
             catch { Start-Sleep -Seconds 2 }
           }
           if (-not $ok) { throw "daemon never answered" }
+
+  # Build the way the release does, and check the built artefact actually
+  # works — not just that it built.
+  #
+  # 0.9.0 failed to publish because `python -m build` builds the sdist and
+  # then builds the wheel from inside it, so a file force-included into the
+  # wheel but missing from the sdist is "not found". Building with --wheel
+  # goes straight from the source tree and never sees it. Catching that at
+  # tag time means a failed release; catching it here means a failed PR.
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Build sdist and wheel, exactly as the release does
+        run: pip install --quiet build && python -m build
+
+      - name: The built wheel must serve its own changelog
+        run: |
+          python -m venv /tmp/v
+          /tmp/v/bin/pip install --quiet dist/*.whl
+          cd /tmp && /tmp/v/bin/python -c "
+          from llm_sidecar import changes
+          r = changes.since('0.1.0')
+          assert r['releases'], 'the wheel serves an empty changelog'
+          print(f\"changelog ships: {len(r['releases'])} releases\")
+          "
