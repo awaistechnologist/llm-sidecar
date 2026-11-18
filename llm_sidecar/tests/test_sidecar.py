@@ -3661,3 +3661,297 @@ def test_server_json_matches_the_package():
 
     # The registry rejects anything longer, and does so only at publish time.
     assert len(d["description"]) <= 100, len(d["description"])
+
+
+# ── the MCP surface ───────────────────────────────────────────────────────
+#
+# These tools are what every agent touches, and an exception escaping one is
+# a bad experience for a consumer who cannot see the traceback. A failure has
+# to come back as data.
+
+# Minimal valid arguments per tool, so the test drives the real signature
+# rather than a guess at it.
+_MCP_TOOL_ARGS = {
+    "search_web": {"query": "x"},
+    "answer_question": {"question": "x"},
+    "read_url": {"url": "https://example.com"},
+    "verify_claims": {"claims": ["x"]},
+    "extract_claims": {"text": "x"},
+    "delegate": {"prompt": "x"},
+    "summarise": {"text": "x"},
+    "classify": {"items": ["x"], "labels": ["a", "b"]},
+    "extract_fields": {"text": "x", "fields": {"a": "desc"}},
+    "fact_check_document": {"text": "x"},
+    "usage_report": {},
+    "sidecar_status": {},
+    "list_image_profiles": {},
+    "generate_image": {"prompt": "x", "out_dir": "/tmp/nope"},
+    "edit_with_references": {"prompt": "x", "refs": ["/tmp/a.png"],
+                             "out_dir": "/tmp/nope"},
+    "upscale_image": {"image_path": "/tmp/a.png", "out_dir": "/tmp/nope"},
+    "whats_new": {},
+}
+
+
+def _mcp_tool_names():
+    import inspect
+    import re
+
+    from llm_sidecar import mcp_server
+    return re.findall(r"@mcp\.tool\(\)\s*\ndef (\w+)", inspect.getsource(mcp_server))
+
+
+def test_every_mcp_tool_has_arguments_in_this_test():
+    """If a tool is added, this file must learn about it — otherwise the
+    guarantees below quietly stop covering the new surface."""
+    missing = set(_mcp_tool_names()) - set(_MCP_TOOL_ARGS)
+    assert not missing, f"new MCP tool(s) not covered by these tests: {missing}"
+
+
+def test_no_mcp_tool_raises_when_everything_underneath_fails(monkeypatch):
+    """An agent calling a tool gets a result or an error dict — never a
+    traceback it cannot act on. This is the behavioural version of the
+    guarantee; reading the source for `except Exception` only proves someone
+    typed it."""
+    from llm_sidecar import changes, mcp_server
+    from llm_sidecar import images as images_mod
+
+    def boom(*a, **k):
+        raise RuntimeError("everything is on fire")
+
+    # Break every path a tool could take. Missing one here does not fail the
+    # test — it silently stops covering that tool, which is how the first
+    # version of this passed while list_image_profiles went untested.
+    from llm_sidecar.images import engine as image_engine
+    from llm_sidecar.images import profiles as image_profiles
+
+    monkeypatch.setattr(mcp_server, "sidecar", boom)
+    monkeypatch.setattr(images_mod, "generate", boom)
+    monkeypatch.setattr(changes, "since", boom)
+    monkeypatch.setattr(image_profiles, "describe", boom)
+    monkeypatch.setattr(image_engine, "available", boom)
+
+    for name in _mcp_tool_names():
+        fn = getattr(mcp_server, name)
+        try:
+            out = fn(**_MCP_TOOL_ARGS[name])
+        except Exception as e:  # noqa: BLE001 - the thing under test
+            raise AssertionError(f"{name} raised instead of returning: {e!r}")
+        assert isinstance(out, dict), f"{name} returned {type(out).__name__}"
+        assert "error" in out, f"{name} swallowed a failure without saying so"
+
+
+def test_every_mcp_tool_describes_itself():
+    """The description is what an agent reads before choosing. An empty or
+    stub one makes the tool invisible in practice."""
+    from llm_sidecar import mcp_server
+
+    for name in _mcp_tool_names():
+        doc = (getattr(mcp_server, name).__doc__ or "").strip()
+        assert len(doc) > 40, f"{name} has no usable description"
+        # Agents need to know what they get back, not just what it does.
+        assert "\n" in doc, f"{name}'s description is a single line"
+
+
+def test_changelog_degrades_honestly_when_it_cannot_be_read(monkeypatch):
+    """If the changelog is missing from a build, `whats_new` must say so
+    rather than report an empty list — "nothing changed" and "I cannot tell
+    you what changed" are different answers, and a consumer acts differently
+    on each."""
+    from llm_sidecar import changes
+
+    monkeypatch.setattr(changes, "_source", lambda: "")
+    out = changes.since("0.1.0")
+    assert out["releases"] == []
+    assert "No changelog" in out["note"], out["note"]
+    assert out["action_required"] == []
+    assert out["current"]          # the version is still known
+
+
+def test_changelog_survives_an_unreadable_file(monkeypatch, tmp_path):
+    """A permissions problem or a half-written file must not take the
+    server down — this is read on a tool call, not at startup."""
+    from llm_sidecar import changes
+
+    bad = tmp_path / "CHANGELOG.md"
+    bad.write_text("# nothing parseable here\n", encoding="utf-8")
+    monkeypatch.setattr(changes, "_CANDIDATES", (tmp_path / "missing.md", bad))
+
+    assert changes.releases() == []
+    out = changes.since()
+    assert out["releases"] == [] and "No changelog" in out["note"]
+
+    class Exploding:
+        def exists(self): return True
+        def read_text(self, **k): raise OSError("permission denied")
+
+    monkeypatch.setattr(changes, "_CANDIDATES", (Exploding(),))
+    assert changes.releases() == []          # must not raise
+
+
+def test_changelog_parsing_is_robust_to_formatting(monkeypatch):
+    """The changelog is hand-written prose. Parsing must not depend on it
+    being perfectly uniform, or a stray edit stops consumers being told
+    anything."""
+    from llm_sidecar import changes
+
+    text = """# Changelog
+
+## [2.0.0] — 2026-01-01
+
+### Breaking
+- the `old_thing` parameter is gone
+
+### Added
+* a bullet with an asterisk
+- **bold** and `code` should be stripped
+
+## [1.0.0] - 2025-01-01
+
+### Fixed
+- something
+"""
+    monkeypatch.setattr(changes, "_source", lambda: text)
+    rels = changes.releases()
+    assert [r["version"] for r in rels] == ["2.0.0", "1.0.0"]
+    # Both bullet styles, and an em dash or a hyphen in the heading.
+    assert len(rels[0]["sections"]["Added"]) == 2
+    assert "bold and code should be stripped" in rels[0]["sections"]["Added"][1]
+    # "Breaking" counts as action required, not just a section named exactly
+    # "Action required".
+    assert rels[0]["action_required"] == ["the old_thing parameter is gone"]
+
+    out = changes.since("1.0.0")
+    assert [r["version"] for r in out["releases"]] == ["2.0.0"]
+    assert out["behind_by"] == 1
+    assert len(out["action_required"]) == 1
+
+
+def test_since_handles_a_version_ahead_of_the_changelog(monkeypatch):
+    """A consumer pinned to something newer than we know about — a local
+    build, say — must not get a wall of history it has already seen."""
+    from llm_sidecar import changes
+
+    assert changes.since("999.0.0")["releases"] == []
+
+
+# ── the image path every consumer takes ───────────────────────────────────
+
+
+@pytest.fixture
+def fake_engine(monkeypatch, tmp_path):
+    """images.generate with the model swapped out, so the orchestration
+    around it — licences, digests, naming, manifests — can be tested on a
+    machine with no mflux, which includes all of CI."""
+    from llm_sidecar.images import engine
+
+    calls = []
+
+    def fake_run(profile, *, out, **kw):
+        calls.append({"profile": profile.name, "out": out, **kw})
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(b"\x89PNG fake")
+        return {"load_s": 0.0, "generate_s": 1.5, "warm": True, "path": str(out)}
+
+    monkeypatch.setattr(engine, "require", lambda: None)
+    monkeypatch.setattr(engine, "run", fake_run)
+    monkeypatch.setattr(engine, "mflux_version", lambda: "0.24.0")
+    return calls
+
+
+def test_generate_writes_image_and_manifest_together(fake_engine, tmp_path):
+    from llm_sidecar import images as im
+
+    r = im.generate(im.ImageRequest(prompt="an apple", out_dir=str(tmp_path),
+                                    stem="shot", seed=7, project="demo"))
+
+    assert r.path.endswith("shot_7.png")
+    assert pathlib.Path(r.path).exists()
+    m = json.loads(pathlib.Path(r.manifest_path).read_text(encoding="utf-8"))
+    # Provenance has to travel with the image, not live in an index.
+    assert m["digest"] == r.digest
+    assert m["request"]["project"] == "demo"
+    assert m["mflux_version"] == "0.24.0"
+    assert m["licence"] and m["model_id"]
+
+
+def test_generate_refuses_a_non_commercial_profile_before_loading_anything(
+        fake_engine, tmp_path):
+    """The licence check must come before the model does — refusing after a
+    10 GiB load wastes a minute to say no."""
+    from llm_sidecar import images as im
+
+    with pytest.raises(im.LicenceError):
+        im.generate(im.ImageRequest(prompt="x", profile="cinematic",
+                                    out_dir=str(tmp_path), commercial=True))
+    assert fake_engine == [], "the engine was asked to run a refused profile"
+
+
+def test_generate_skips_an_identical_request(fake_engine, tmp_path):
+    from llm_sidecar import images as im
+
+    req = im.ImageRequest(prompt="an apple", out_dir=str(tmp_path),
+                          stem="shot", seed=7)
+    first = im.generate(req)
+    assert first.skipped is False
+
+    second = im.generate(req)
+    assert second.skipped is True
+    assert second.seconds == 0.0
+    assert second.path == first.path
+    assert len(fake_engine) == 1, "a skipped request still ran the model"
+
+
+def test_generate_does_not_skip_when_the_request_differs(fake_engine, tmp_path):
+    """Changing anything that changes the pixels must defeat the skip —
+    resolution was missing from the digest and a stale upscale survived."""
+    from llm_sidecar import images as im
+
+    base = dict(out_dir=str(tmp_path), stem="shot", seed=7)
+    im.generate(im.ImageRequest(prompt="an apple", **base))
+
+    for change in (
+        {"prompt": "a pear"},
+        {"prompt": "an apple", "width": 512},
+        {"prompt": "an apple", "steps": 9},
+        {"prompt": "an apple", "resolution": 1500},
+    ):
+        before = len(fake_engine)
+        r = im.generate(im.ImageRequest(**{**base, **change}))
+        assert r.skipped is False, f"wrongly skipped after {change}"
+        assert len(fake_engine) == before + 1
+
+
+def test_generate_honours_an_exact_filename(fake_engine, tmp_path):
+    from llm_sidecar import images as im
+
+    r = im.generate(im.ImageRequest(prompt="x", out_dir=str(tmp_path),
+                                    stem="ignored", filename="S001.png", seed=1))
+    assert pathlib.Path(r.path).name == "S001.png"
+    assert pathlib.Path(str(r.path) + ".json").exists()
+
+
+def test_generate_rejects_a_missing_reference(fake_engine, tmp_path):
+    """A typo'd reference path must fail immediately, not after a model
+    load, and must say which file."""
+    from llm_sidecar import images as im
+
+    with pytest.raises(im.ProfileError) as e:
+        im.generate(im.ImageRequest(prompt="x", profile="characters-consistent",
+                                    refs=[str(tmp_path / "nope.png")],
+                                    out_dir=str(tmp_path)))
+    assert "nope.png" in str(e.value)
+    assert fake_engine == []
+
+
+def test_generate_passes_the_profile_defaults_through(fake_engine, tmp_path):
+    """A caller who specifies nothing gets the profile's own size and steps,
+    and the engine is told the same numbers that go in the manifest."""
+    from llm_sidecar import images as im
+    from llm_sidecar.images import profiles as pf
+
+    r = im.generate(im.ImageRequest(prompt="x", out_dir=str(tmp_path), seed=3))
+    default = pf.get(pf.DEFAULT_PROFILE)
+    assert (r.width, r.height) == (default.width, default.height)
+    assert fake_engine[0]["steps"] == default.steps
+    assert fake_engine[0]["width"] == default.width
