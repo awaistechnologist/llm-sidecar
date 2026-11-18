@@ -4055,3 +4055,46 @@ def test_readme_mcp_config_has_no_placeholder():
     # Both documented launch paths must name the real console script.
     assert '"command": "llm-sidecar-mcp"' in text
     assert '"llm-sidecar", "llm-sidecar-mcp"' in text
+
+
+def test_mcp_server_answers_introspection_over_stdio():
+    """A directory listing the server starts it and asks for its tools —
+    that is all Glama's checks require, and it is what a Dockerfile in this
+    repo exists to let them do.
+
+    Driven as a real client would: write, read, write, read. Piping every
+    message at once and closing stdin looks like a failure because the
+    server sees EOF before it handles the later messages, which briefly had
+    me debugging a server that was working correctly."""
+    import json
+    import subprocess
+    import sys
+
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "llm_sidecar.mcp_server"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL, text=True, bufsize=1,
+    )
+    try:
+        def send(obj):
+            proc.stdin.write(json.dumps(obj) + "\n")
+            proc.stdin.flush()
+
+        send({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+              "params": {"protocolVersion": "2024-11-05", "capabilities": {},
+                         "clientInfo": {"name": "test", "version": "1"}}})
+        init = json.loads(proc.stdout.readline())
+        assert "result" in init, init
+
+        send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        send({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+        listed = json.loads(proc.stdout.readline())
+
+        assert listed.get("id") == 2, listed
+        names = [t["name"] for t in listed["result"]["tools"]]
+        assert len(names) >= 17, f"only {len(names)} tools over stdio"
+        # No model, no key, no network needed to answer this.
+        assert "whats_new" in names and "search_web" in names
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)

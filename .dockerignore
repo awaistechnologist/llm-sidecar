@@ -1,0 +1,11 @@
+.git
+.venv
+dist
+docs
+*.md
+!README.md
+!CHANGELOG.md
+llm_sidecar/tests
+__pycache__
+**/__pycache__
+.github
