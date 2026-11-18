@@ -422,8 +422,11 @@ def edit_with_references(prompt: str, refs: list, out_dir: str,
 def upscale_image(image_path: str, out_dir: str, resolution: int = 2048,
                   stem: str = "upscaled", project: str = "") -> dict:
     """
-    Upscale an existing image with SeedVR2. `resolution` is the target long
-    edge in pixels. Roughly 130s to 2400px on an M3 Max.
+    Upscale an existing image with SeedVR2.
+
+    `resolution` sets the target **short** edge in pixels, not the long one:
+    mflux scales by `resolution / min(width, height)`. For a 1024x640 image,
+    resolution=1500 gives 2400x1500. Roughly 130s on an M3 Max.
     """
     try:
         from . import images as im

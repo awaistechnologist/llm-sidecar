@@ -98,7 +98,7 @@ the fastest one.
 | `standard` **(default)** | 1024x1024 | **23s** | 12 GiB | 0 | yes |
 | `characters-consistent` | 1024x640 | **60s** (2 refs) / **93s** (3) | 14 GiB | up to 3 | yes |
 | `zimage-negprompt` | 1024x768 | **76s** warm, 117s cold | 28 GiB | 0 | yes |
-| `upscale` (SeedVR2) | to 2400px | ~132s | 20 GiB | 1 | yes |
+| `upscale` (SeedVR2) | short edge → N px | ~132s | 20 GiB | 1 | yes |
 | `fast` | 1024x1024 | est. | 12 GiB | 0 | yes (gated: HF token) |
 | `cinematic` | 1024x1024 | est. | 14 GiB | 0 | **no** |
 | `kontext-edit` | 1024x1024 | est. | 14 GiB | 1 | **no** |
@@ -140,6 +140,16 @@ the fastest one.
 8. **Consistency needs references.** Describing a character in words gives a
    different person every time. Pass up to 3 `refs` with
    `characters-consistent`.
+
+### Upscaling: `resolution` is the SHORT edge
+
+mflux scales by `resolution / min(width, height)`, so the number you send
+sets the **short** edge, not the long one. A 1024x640 image upscaled with
+`"resolution": 1500` comes out **2400x1500**, not 1500 wide.
+
+This page said "long edge" until a consumer's first upscales came out 3840
+px wide. The behaviour matches mflux's own CLI and has not been changed —
+only described correctly.
 
 ### Writing prompts for these models
 

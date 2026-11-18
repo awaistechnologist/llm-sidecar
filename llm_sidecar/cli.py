@@ -531,7 +531,9 @@ def main(argv: list[str] | None = None) -> int:
     img.add_argument("--height", type=int)
     img.add_argument("--steps", type=int)
     img.add_argument("--seed", type=int)
-    img.add_argument("--resolution", type=int, help="upscale: target long edge")
+    img.add_argument("--resolution", type=int,
+                     help="upscale: target SHORT edge in pixels "
+                          "(mflux scales by resolution / min(w, h))")
     img.add_argument("--project", default="", help="recorded in the manifest")
     img.add_argument("--runs", type=int, default=4,
                      help="with bench: how many images to time (default 4)")

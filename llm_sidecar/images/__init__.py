@@ -88,7 +88,10 @@ class ImageRequest:
     commercial: bool = True
     # Skip generation when an identical image is already there.
     skip_existing: bool = True
-    # SeedVR2 only: target long edge in pixels.
+    # SeedVR2 only. Scales the image so its *short* edge becomes this many
+    # pixels — mflux computes `scale = resolution / min(w, h)`. Documented
+    # as the long edge once, which sent a consumer's first upscales to 3840
+    # px wide.
     resolution: int | None = None
 
 
@@ -136,7 +139,7 @@ def generate(req: ImageRequest, config: Config | None = None) -> ImageResult:
     dg = manifest.digest(
         profile=profile.name, model=profile.model, prompt=req.prompt,
         negative=req.negative, steps=steps, width=width, height=height,
-        seed=seed, ref_hashes=ref_hashes,
+        seed=seed, ref_hashes=ref_hashes, resolution=req.resolution,
     )
 
     out_dir = Path(req.out_dir).expanduser()

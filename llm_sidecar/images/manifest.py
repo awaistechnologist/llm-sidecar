@@ -36,16 +36,23 @@ def sha256_file(path: Path, chunk: int = 1 << 20) -> str:
 
 def digest(*, profile: str, model: str, prompt: str, negative: str | None,
            steps: int, width: int, height: int, seed: int,
-           ref_hashes: list[str]) -> str:
+           ref_hashes: list[str], resolution: int | None = None) -> str:
     """A stable fingerprint of everything that determines the output.
 
     Hashed from a sorted JSON document rather than a concatenated string, so
-    adding a field later cannot silently collide with an old digest."""
+    adding a field later cannot silently collide with an old digest.
+
+    `resolution` is in here because leaving it out was a real bug: for the
+    upscale profile it is the *only* parameter that changes the output —
+    width and height come from the profile and mean nothing — so two
+    upscales of one image at different resolutions hashed identically and
+    the second was skipped as already current. A consumer hit that and had
+    to work around it."""
     doc = {
         "profile": profile, "model": model, "prompt": prompt,
         "negative": negative or "", "steps": steps,
         "width": width, "height": height, "seed": seed,
-        "refs": sorted(ref_hashes),
+        "refs": sorted(ref_hashes), "resolution": resolution,
     }
     blob = json.dumps(doc, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]

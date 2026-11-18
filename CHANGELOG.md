@@ -2,6 +2,28 @@
 
 Notable changes per release. Dates are release dates.
 
+## [0.7.1] — 2026-11-18
+
+Three bugs reported by a consumer producing a real picture book, all of
+which they had to work around.
+
+### Fixed
+- **The skip-if-unchanged digest ignored `resolution`.** For `upscale` that
+  is the only parameter which changes the output — width and height come
+  from the profile and mean nothing — so re-upscaling one image at a
+  different resolution hashed identically to the first and was skipped as
+  already current. A stale upscale silently survived.
+- **`filename` was accepted and ignored by the running server.** It was
+  added after 0.7.0 was tagged, and the daemon runs the released package,
+  so the field was dropped without a word. Shipping it is the fix.
+
+### Changed
+- **`resolution` is documented as the short edge, which is what it has
+  always been.** mflux scales by `resolution / min(width, height)`; this
+  project's docs said "long edge", which sent a consumer's first upscales
+  to 3840 px wide. The behaviour matches mflux's own CLI and is unchanged —
+  only described correctly, in the CLI help, the MCP tool and USING.md.
+
 ## [0.7.0] — 2026-11-17
 
 ### Added

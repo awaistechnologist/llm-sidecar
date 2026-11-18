@@ -3361,3 +3361,36 @@ def test_filename_cannot_escape_the_output_directory(tmp_path):
     # filename="" gets the default name rather than a refusal.
     assert manifest.output_path(tmp_path, "scene", 1, filename="").name \
         == "scene_1.png"
+
+
+def test_digest_covers_upscale_resolution():
+    """For `upscale`, resolution is the only parameter that changes the
+    output — width and height come from the profile and mean nothing. It
+    was missing from the digest, so re-upscaling one image at a different
+    resolution hashed identically and was skipped as already current. A
+    consumer hit that and had to work around it."""
+    from llm_sidecar.images import manifest
+
+    base = dict(profile="upscale", model="seedvr2-3b", prompt="", negative=None,
+                steps=0, width=1024, height=1024, seed=1, ref_hashes=["abc"])
+
+    small = manifest.digest(**base, resolution=1500)
+    large = manifest.digest(**base, resolution=2400)
+    assert small != large, "a different target resolution must not be skipped"
+
+    # Same request still hashes stably, or nothing would ever be skipped.
+    assert manifest.digest(**base, resolution=1500) == small
+
+
+def test_upscale_resolution_is_the_short_edge():
+    """mflux computes `scale = resolution / min(w, h)`, so the number sets
+    the short edge. The docs said long edge, which sent a consumer's first
+    upscales to 3840 px wide."""
+    from llm_sidecar.images import ImageRequest
+
+    doc = ImageRequest.__dataclass_fields__["resolution"].__doc__ or ""
+    src = __import__("inspect").getsource(
+        __import__("llm_sidecar.images", fromlist=["images"]))
+    # The correction has to be stated where someone will read it.
+    assert "short" in src.lower()
+    assert "min(w, h)" in src
