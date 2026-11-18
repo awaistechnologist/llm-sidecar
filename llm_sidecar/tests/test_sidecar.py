@@ -3487,3 +3487,34 @@ def test_scheduler_counts_are_reported():
     s = sched.stats()
     assert set(s) >= {"waiting", "busy", "served", "model_swaps", "overtakes"}
     assert s["waiting"] == 0 and s["busy"] is False
+
+
+def test_mcp_docstrings_name_only_real_profiles():
+    """An MCP tool's docstring is what an agent reads before choosing, so a
+    profile named there must exist.
+
+    `list_image_profiles` advertised "draft, fast, cinematic,
+    characters-consistent" for two releases after `draft` was renamed to
+    `zimage-negprompt`. An agent following that would have asked for a
+    profile the service refuses, and nothing caught it because the data the
+    tool *returns* was always right — only the prose was wrong."""
+    import re
+
+    from llm_sidecar import mcp_server
+    from llm_sidecar.images import profiles as pf
+
+    known = set(pf.PROFILES)
+    # Names appearing in a profile-ish context: quoted or in a list of them.
+    text = " ".join(
+        (getattr(mcp_server, n).__doc__ or "")
+        for n in ("list_image_profiles", "generate_image",
+                  "edit_with_references", "upscale_image")
+        if hasattr(mcp_server, n)
+    )
+    retired = {"draft", "characters-txt2img"}
+    for name in retired:
+        assert not re.search(rf"\b{re.escape(name)}\b", text), (
+            f"MCP docstrings still advertise the retired profile {name!r}"
+        )
+    # And at least the default must be named, or agents have no starting point.
+    assert pf.DEFAULT_PROFILE in text

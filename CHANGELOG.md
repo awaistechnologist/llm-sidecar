@@ -2,6 +2,21 @@
 
 Notable changes per release. Dates are release dates.
 
+## [0.8.1] — 2026-11-18
+
+### Fixed
+- **The `list_image_profiles` MCP tool advertised a profile that no longer
+  exists.** Its docstring still read "named for intent (draft, fast,
+  cinematic, characters-consistent)" two releases after `draft` became
+  `zimage-negprompt`. An agent following that would ask for a profile the
+  service refuses — and nothing caught it, because the data the tool
+  *returns* was always correct and only the prose was wrong. A test now
+  fails if a retired profile name appears in any image tool's docstring.
+- The `zimage-negprompt` note still said "~31 GiB" after the peak was
+  measured at 27.8 and the field corrected to 28.
+- The `upscale` profile note now states that `resolution` sets the short
+  edge, where a caller choosing a profile will actually see it.
+
 ## [0.8.0] — 2026-11-18
 
 ### Added

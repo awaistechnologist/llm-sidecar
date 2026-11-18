@@ -11,7 +11,7 @@ A profile also carries the facts that get forgotten at the call site: what
 the licence permits, whether the weights are gated, whether a negative
 prompt does anything, how many reference images the model accepts, and how
 much memory it needs at peak. The last two are load-bearing — a profile that
-needs 31 GiB on a 36 GiB machine cannot run beside anything else, and
+needs 28 GiB on a 36 GiB machine cannot run beside anything else, and
 `max_refs` is the difference between character consistency and a different
 face every frame.
 """
@@ -122,7 +122,7 @@ PROFILES: dict[str, Profile] = {p.name: p for p in [
              "actually does something — klein at guidance 1.0 cannot exclude "
              "anything, so work that depends on keeping subjects *out* of an "
              "image has to ask for this by name. Named for what it is rather "
-             "than for a weight class: at ~31 GiB peak it is the heaviest "
+             "than for a weight class: at ~28 GiB peak it is much the heaviest "
              "profile here, not a draft-quality one, and it was called `draft` "
              "until that misled someone into expecting fast and light.",
     ),
@@ -155,7 +155,9 @@ PROFILES: dict[str, Profile] = {p.name: p for p in [
         name="upscale", model="seedvr2-3b", variant="seedvr2", steps=0, quantize=None,
         max_refs=1, requires_refs=True, peak_gib=20.0,
         licence="Apache-2.0", commercial_ok=True,
-        note="SeedVR2. ~132s to 2400px on an M3 Max.",
+        note="SeedVR2. `resolution` sets the SHORT edge — mflux scales "
+             "by resolution / min(w, h) — so a 1024x640 image at "
+             "resolution=1500 comes out 2400x1500. ~132s on an M3 Max.",
     ),
 ]}
 

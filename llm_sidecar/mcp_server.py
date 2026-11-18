@@ -343,8 +343,10 @@ def list_image_profiles() -> dict:
     limit for each.
 
     Call this before generate_image if you are unsure which to use. Profiles
-    are named for intent (draft, fast, cinematic, characters-consistent)
-    rather than for a model, so you never need to know a model id.
+    are named for intent (standard, characters-consistent, zimage-negprompt,
+    upscale, ...) rather than for a model, so you never need to know a model
+    id. `standard` is the default and the right choice unless you need
+    reference images or a working negative prompt.
     """
     try:
         from .images import profiles as p
