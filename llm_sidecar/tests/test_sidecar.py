@@ -3955,3 +3955,25 @@ def test_generate_passes_the_profile_defaults_through(fake_engine, tmp_path):
     assert (r.width, r.height) == (default.width, default.height)
     assert fake_engine[0]["steps"] == default.steps
     assert fake_engine[0]["width"] == default.width
+
+
+def test_listing_metadata_files_are_valid_and_consistent():
+    """server.json and glama.json are read by directories, not by us, so a
+    syntax error or a wrong username is invisible here and breaks a listing
+    nobody thinks to re-check."""
+    root = pathlib.Path(__file__).resolve().parents[2]
+    if not (root / "server.json").exists():
+        pytest.skip("not a source checkout")
+
+    glama = root / "glama.json"
+    assert glama.exists(), "glama.json is how the Glama listing is claimed"
+    g = json.loads(glama.read_text(encoding="utf-8"))
+    assert g["$schema"] == "https://glama.ai/mcp/schemas/server.json"
+    assert isinstance(g["maintainers"], list) and g["maintainers"]
+
+    # The GitHub owner appears in three places; they must agree, or one of
+    # the listings points somewhere else.
+    owner = g["maintainers"][0]
+    srv = json.loads((root / "server.json").read_text(encoding="utf-8"))
+    assert srv["name"] == f"io.github.{owner}/llm-sidecar"
+    assert owner in srv["repository"]["url"]
