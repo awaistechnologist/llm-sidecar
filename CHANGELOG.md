@@ -2,6 +2,34 @@
 
 Notable changes per release. Dates are release dates.
 
+## [0.8.0] — 2026-11-18
+
+### Added
+- **The image queue prefers whatever model is already loaded.** Strict
+  first-come-first-served had a pathological case that was measured, not
+  theorised: with two consumers using the daemon with different profiles,
+  the log showed a construct and an unload on *every single generation* —
+  klein-edit, unload, z-image-turbo, unload, klein-edit, unload. Each swap
+  is a model reload, and for Z-Image that alone costs about 40s (117s cold
+  against 76s warm).
+
+  Both consumers had been told to "order your batch by profile", which
+  cannot work: neither can see the other's queue.
+
+  Now the oldest waiter needing the resident model goes first, with
+  fairness bounded rather than hoped for — a request overtaken three times
+  goes next whatever is loaded. Twelve strictly alternating jobs went from
+  11 model swaps to 3.
+
+  Affinity is keyed on the model rather than the profile, so
+  `characters-consistent` and `lineart` are affine and swap nothing.
+
+  Two honest limits: this orders work inside the daemon, and a library-mode
+  caller in another process is still serialised by the file lock, which has
+  no priority; and `GET /v1/images/status` now reports
+  `queue: {waiting, busy, served, model_swaps, overtakes}` so thrashing is
+  visible instead of being something you have to go and measure.
+
 ## [0.7.1] — 2026-11-18
 
 Three bugs reported by a consumer producing a real picture book, all of

@@ -35,10 +35,12 @@ runs on Linux and Windows with the image routes simply absent.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from ..config import CONFIG_DIR, Config
@@ -307,6 +309,11 @@ class _Resident:
             if self.model is not None and (time.time() - self.last_used) > idle_s:
                 self.unload()
 
+    @staticmethod
+    def key_for(profile: Profile) -> str:
+        """The resident-model identity. Two profiles sharing it need no swap."""
+        return f"{profile.variant}:{profile.model}:{profile.quantize}"
+
     def get(self, profile: Profile):
         """The model for this profile, loading or swapping as needed.
 
@@ -317,7 +324,7 @@ class _Resident:
         spent 11.3s on step 1 against ~2s on steps 2-4. So the cost of a cold
         model hides inside the first generation, and the only honest way to
         show what keeping it resident saves is cold-vs-warm generate time."""
-        key = f"{profile.variant}:{profile.model}:{profile.quantize}"
+        key = self.key_for(profile)
         with self._lock:
             if self.key == key and self.model is not None:
                 if not _encoder_evicted(self.model):
@@ -362,6 +369,117 @@ class _Resident:
 
 
 RESIDENT = _Resident()
+
+
+
+# How many times a waiting request may be overtaken before it goes next,
+# whatever model is resident. Three is a deliberate compromise: it is enough
+# for affinity to group a short run of same-profile work, and small enough
+# that a steady stream of one profile cannot hold another off for long. At a
+# minute an image, three skips is the most anyone waits extra.
+MAX_SKIPS = 3
+
+
+@dataclass
+class _Waiter:
+    seq: int
+    key: str            # the model key this request needs
+    skipped: int = 0
+
+
+class _Scheduler:
+    """Admission control that prefers whatever model is already loaded.
+
+    Strict first-come-first-served has a pathological case, and it is not
+    hypothetical — it was measured. With two consumers using the daemon
+    with different profiles, the log showed a construct and an unload on
+    *every single generation*: klein-edit, unload, z-image-turbo, unload,
+    klein-edit, unload. Each of those swaps is a reload, and for Z-Image
+    that alone costs about 40s (117s cold against 76s warm). FIFO
+    guarantees the worst outcome whenever callers interleave, and no amount
+    of "order your batch by profile" advice helps, because neither caller
+    can see the other's queue.
+
+    So when the worker frees, the oldest waiter needing the resident model
+    goes first. Fairness is bounded rather than hoped for: a waiter
+    overtaken MAX_SKIPS times goes next regardless of what is loaded.
+
+    Two honest limits. This orders work *inside the daemon*; a library-mode
+    caller in another process is serialised by the file lock, which has no
+    priority and cannot be given one. And affinity is keyed on the model,
+    not the profile, which is a feature — `characters-consistent` and
+    `lineart` share klein-edit, so they are affine and swap nothing."""
+
+    def __init__(self, max_skips: int = MAX_SKIPS) -> None:
+        self._cv = threading.Condition()
+        self._busy = False
+        self._waiting: list[_Waiter] = []
+        self._seq = 0
+        self._max_skips = max_skips
+        # Counters, so the effect is observable rather than asserted.
+        self.served = 0
+        self.swaps = 0
+        self.overtakes = 0
+
+    def _choose(self) -> _Waiter | None:
+        """Who goes next. Caller holds the condition."""
+        if not self._waiting:
+            return None
+        oldest = self._waiting[0]
+        if oldest.skipped >= self._max_skips:
+            return oldest
+        resident = RESIDENT.key
+        if resident is not None:
+            for w in self._waiting:
+                if w.key == resident:
+                    return w
+        return oldest
+
+    @contextlib.contextmanager
+    def slot(self, key: str):
+        with self._cv:
+            self._seq += 1
+            me = _Waiter(seq=self._seq, key=key)
+            self._waiting.append(me)
+            # A new arrival can change who should go next, so re-evaluate.
+            self._cv.notify_all()
+
+            while True:
+                if not self._busy and self._choose() is me:
+                    for w in self._waiting:
+                        if w is me:
+                            break
+                        w.skipped += 1
+                        self.overtakes += 1
+                    self._waiting.remove(me)
+                    self._busy = True
+                    if RESIDENT.key is not None and RESIDENT.key != key:
+                        self.swaps += 1
+                    self.served += 1
+                    break
+                # The timeout is a backstop against a lost wakeup, not the
+                # mechanism; generations take seconds, so polling costs
+                # nothing measurable.
+                self._cv.wait(timeout=1.0)
+        try:
+            yield
+        finally:
+            with self._cv:
+                self._busy = False
+                self._cv.notify_all()
+
+    def stats(self) -> dict:
+        with self._cv:
+            return {
+                "waiting": len(self._waiting),
+                "busy": self._busy,
+                "served": self.served,
+                "model_swaps": self.swaps,
+                "overtakes": self.overtakes,
+            }
+
+
+SCHEDULER = _Scheduler()
 
 
 class _MachineLock:
@@ -456,7 +574,7 @@ def run(profile: Profile, *, prompt: str, negative: str | None, seed: int,
     require()
     guard(profile)
 
-    with MACHINE_LOCK:
+    with SCHEDULER.slot(RESIDENT.key_for(profile)), MACHINE_LOCK:
         model, load_s, warm = RESIDENT.get(profile)
         reset_peak()
         t = time.time()
@@ -497,7 +615,8 @@ def _lineart(path: Path) -> None:
 def status() -> dict:
     """What the engine is holding right now."""
     RESIDENT.expire_if_idle()
-    out = {"available": available(), "mflux": mflux_version(), **RESIDENT.status()}
+    out = {"available": available(), "mflux": mflux_version(),
+           **RESIDENT.status(), "queue": SCHEDULER.stats()}
     if out["available"]:
         from .. import hardware
         out["usable_gib"] = hardware.usable_gib()

@@ -113,17 +113,21 @@ the fastest one.
    loads another, and for `zimage-negprompt` that swap alone costs ~40s
    (117s cold against 76s warm). Generate everything, *then* upscale the
    keepers — do not interleave.
-3. **You are probably not the only caller.** The daemon is shared, and the
-   queue is currently first-come-first-served, so another tool asking for a
-   different profile between two of your jobs makes *both* of you pay a
-   reload. Observed in practice: two consumers alternating profiles reloaded
-   a model on every single generation.
+3. **You are probably not the only caller, and that is handled.** The
+   daemon is shared. It used to serve strictly first-come-first-served,
+   which meant another tool asking for a different profile between two of
+   your jobs made *both* of you pay a model reload — measured at a reload
+   on every single generation when two consumers alternated.
 
-   If a long batch matters, either run it when nothing else is using the
-   daemon, or agree a profile order with the other caller. `GET
-   /v1/images/status` reports which model is resident, and every generate
-   response carries `"warm": false` when that call had to load one — if you
-   see that on back-to-back jobs of the same profile, you have company.
+   The queue now prefers whichever model is already loaded, so interleaved
+   traffic gets grouped automatically: twelve alternating jobs went from 11
+   swaps to 3. Nothing starves — a request overtaken three times goes next
+   regardless.
+
+   You still do not need to coordinate with other callers. `GET
+   /v1/images/status` reports `queue.model_swaps` if you want to see how
+   often the daemon is switching models, and every generate response
+   carries `"warm": false` when that call had to load one.
 4. **Only `zimage-negprompt` can keep something OUT of an image.** Every
    other profile runs klein at guidance 1.0, which cannot exclude anything:
    a `negative` sent to them is accepted and silently ignored. If a negative

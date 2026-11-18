@@ -3394,3 +3394,96 @@ def test_upscale_resolution_is_the_short_edge():
     # The correction has to be stated where someone will read it.
     assert "short" in src.lower()
     assert "min(w, h)" in src
+
+
+# ── image scheduling ──────────────────────────────────────────────────────
+#
+# Strict FIFO was measured reloading a model on every generation when two
+# consumers alternated profiles. These prove the scheduler fixes that
+# without letting anyone starve.
+
+
+def _drive(scheduler, order, resident_holder):
+    """Run `order` through the scheduler single-threaded, recording the
+    sequence actually served. `resident_holder` stands in for the loaded
+    model, updated as each job runs."""
+    import threading
+
+    served = []
+    done = threading.Event()
+    threads = []
+
+    def one(key):
+        with scheduler.slot(key):
+            served.append(key)
+            resident_holder["key"] = key
+            time.sleep(0.02)
+
+    for key in order:
+        t = threading.Thread(target=one, args=(key,))
+        t.start()
+        threads.append(t)
+        time.sleep(0.01)      # deterministic arrival order
+    for t in threads:
+        t.join(timeout=10)
+    done.set()
+    return served
+
+
+def test_scheduler_groups_work_by_resident_model(monkeypatch):
+    """Two consumers alternating profiles previously reloaded a model on
+    every job: klein-edit, unload, z-image, unload, klein-edit, unload.
+    Affinity should collapse that to one swap."""
+    from llm_sidecar.images import engine
+
+    resident = {"key": None}
+
+    class FakeResident:
+        @property
+        def key(self): return resident["key"]
+        @staticmethod
+        def key_for(profile): return profile
+
+    monkeypatch.setattr(engine, "RESIDENT", FakeResident())
+    sched = engine._Scheduler()
+
+    # Arrivals strictly alternate, as two independent callers would.
+    served = _drive(sched, ["A", "B", "A", "B", "A", "B"], resident)
+
+    assert sorted(served) == ["A", "A", "A", "B", "B", "B"]
+    swaps = sum(1 for a, b in zip(served, served[1:]) if a != b)
+    # FIFO would give 5 swaps. Affinity should be far fewer.
+    assert swaps <= 2, f"expected grouping, got {served}"
+
+
+def test_scheduler_cannot_starve_a_waiting_request(monkeypatch):
+    """Affinity must be bounded. A steady stream of one profile would
+    otherwise hold the other off forever."""
+    from llm_sidecar.images import engine
+
+    resident = {"key": "A"}
+
+    class FakeResident:
+        @property
+        def key(self): return resident["key"]
+        @staticmethod
+        def key_for(profile): return profile
+
+    monkeypatch.setattr(engine, "RESIDENT", FakeResident())
+    sched = engine._Scheduler(max_skips=2)
+
+    # B arrives first and keeps losing to A, but only twice.
+    served = _drive(sched, ["B", "A", "A", "A", "A"], resident)
+    assert "B" in served
+    assert served.index("B") <= 2, f"B starved: {served}"
+
+
+def test_scheduler_counts_are_reported():
+    """The effect has to be observable, or nobody can tell whether the
+    daemon is thrashing — which is how the original problem went unnoticed."""
+    from llm_sidecar.images import engine
+
+    sched = engine._Scheduler()
+    s = sched.stats()
+    assert set(s) >= {"waiting", "busy", "served", "model_swaps", "overtakes"}
+    assert s["waiting"] == 0 and s["busy"] is False
