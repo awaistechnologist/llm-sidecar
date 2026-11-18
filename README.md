@@ -769,6 +769,16 @@ an explanation rather than a stack trace.
 
 ---
 
+## Writeups
+
+- [My image generation got slower the longer it ran, and a smaller cache made
+  it worse](docs/image-generation-got-slower.md) — benchmarking an MLX image
+  service: why a cache cap *below* the working set was the slowest setting
+  tested, why a warm model was not faster, and the process-lifetime peak
+  reading that made one model size another's cache.
+
+---
+
 ## Honest limitations
 
 - **Verification is only as good as retrieval.** The verifier can only grade
