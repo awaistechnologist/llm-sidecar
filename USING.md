@@ -138,6 +138,18 @@ the fastest one.
 6. **One at a time, machine-wide.** A second request waits rather than
    competing for memory. That is the point — two models at once is what made
    a 36 GiB machine swap.
+
+   You get this whichever way you call: the HTTP endpoint above, the MCP
+   tools, the CLI and the Python library all hand the job to this daemon,
+   so the model is loaded once no matter how many of them are in play. If
+   the daemon is not running, the library and CLI fall back to doing it
+   in-process — correct, but then *your* process is the one holding the
+   12 GiB. `GET /v1/images/status` reports `delegating_to_daemon` if you
+   need to know which.
+
+   A refusal is not laundered by that fallback. If the daemon rejects a
+   non-commercial profile, the library raises the same error rather than
+   quietly generating it locally.
 7. **`commercial` defaults to `true`**, which *refuses* `cinematic` and
    `kontext-edit` (non-commercial weights). Send `"commercial": false` only
    if the output genuinely is not commercial.
@@ -249,8 +261,13 @@ print(sc.answer("What is the population of Iran?").text)
 print(sc.verify(["The Eiffel Tower is in Berlin"]))
 ```
 
-In library mode image generation still takes the same machine-wide lock, so
-it will not fight the daemon.
+Image generation in library mode **posts the job to the daemon** when one is
+running, so importing `llm_sidecar` into your process does not make your
+process the one holding 12 GiB of model. With no daemon it runs in-process,
+serialised by a machine-wide file lock, so it still will not fight anything.
+
+`llm_sidecar.images.status()["delegating_to_daemon"]` says which of the two
+you are getting.
 
 ---
 
@@ -296,6 +313,12 @@ where output files land. Those are the four things consumers pin.
 
 - **Loopback only.** Do not expose port 4001. It is unauthenticated by
   design, holds an API key, and can spend money.
+- **Call it by a name it answers to.** The daemon checks the Host header —
+  that is what stops a web page reaching it through DNS rebinding — and
+  answers to `localhost`, `127.0.0.1`, `::1`, `*.ts.net`, and
+  `host.docker.internal` / `host.containers.internal` from a container.
+  Anything else gets a 403 that says so. If your client uses another name,
+  the machine's owner adds it with `LLM_SIDECAR_HOSTS`.
 - **It may not be running.** Treat a connection error as "fall back", not as
   a crash. `GET /health` is cheap.
 - **Models are not stable.** Ask for `auto` or a tier. Anything that pins an

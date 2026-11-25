@@ -1,0 +1,1456 @@
+<!doctype html>
+<!--
+  llm-sidecar on your phone.
+
+  The dashboard (index.html) is for setting the sidecar up at a desk. This is
+  for using it away from one: a chat app that talks to whatever this machine
+  can reach — its own Ollama models, the Claude subscription signed in here,
+  OpenRouter — plus web answers with sources and image generation on the Mac's
+  GPU.
+
+  Same rules as the dashboard: one file, no build step, no dependencies, and
+  no request to anything but the sidecar itself. A phone page that loaded a
+  CDN would tell that CDN every time you opened it, and break the moment the
+  CDN was unreachable while your Mac was not.
+
+  Conversations live on the phone (localStorage), not on the Mac. The sidecar
+  stays stateless, and a conversation is only ever as visible as the phone
+  it was had on.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="theme-color" content="#f6f6f9" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0d0e12" media="(prefers-color-scheme: dark)">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Sidecar">
+<link rel="manifest" href="/app/manifest.webmanifest">
+<link rel="icon" href="/app/icon-192.png">
+<link rel="apple-touch-icon" href="/app/apple-touch-icon.png">
+<title>Sidecar</title>
+<style>
+  :root {
+    --bg: #f6f6f9;      --bg2: #ffffff;     --ink: #15161b;    --ink2: #3b3d46;
+    --muted: #6d7180;   --faint: #a1a4b0;   --line: #e6e6ec;   --line2: #d9d9e2;
+    --accent: #4f46e5;  --accent2: #7c3aed; --on-accent: #fff;
+    --tint: #eef0ff;    --tint2: #e3e5ff;
+    --ok: #15803d;      --ok-bg: #dcfce7;
+    --warn: #a16207;    --warn-bg: #fef3c7;
+    --bad: #b91c1c;     --bad-bg: #fee2e2;
+    --user: #4f46e5;    --on-user: #fff;
+    --code-bg: #f0f1f5; --shadow: 0 6px 30px rgba(20, 20, 50, .10), 0 1px 3px rgba(20,20,50,.06);
+    --r: 18px; --r-sm: 12px;
+    --top: env(safe-area-inset-top, 0px); --bot: env(safe-area-inset-bottom, 0px);
+    color-scheme: light dark;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0d0e12;      --bg2: #16171d;     --ink: #ecebf2;    --ink2: #c9c9d4;
+      --muted: #9a9cab;   --faint: #636674;   --line: #23242d;   --line2: #2e303b;
+      --accent: #8b85f7;  --accent2: #b18cff; --on-accent: #0d0e12;
+      --tint: #1c1d2b;    --tint2: #262842;
+      --ok: #4ade80;      --ok-bg: #11291a;
+      --warn: #fbbf24;    --warn-bg: #2f240b;
+      --bad: #f87171;     --bad-bg: #351416;
+      --user: #5b54ea;    --on-user: #fff;
+      --code-bg: #1d1e26; --shadow: 0 10px 40px rgba(0,0,0,.45), 0 1px 3px rgba(0,0,0,.3);
+    }
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 16px/1.55 ui-sans-serif, -apple-system, "Segoe UI", Roboto, system-ui, sans-serif;
+    overscroll-behavior: none; -webkit-font-smoothing: antialiased;
+  }
+  button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; padding: 0; }
+  input, textarea, select { font: inherit; color: inherit; }
+  svg { display: block; }
+  .mono, code, pre { font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace; }
+  [hidden] { display: none !important; }
+
+  /* ── shell ─────────────────────────────────────────────────────────── */
+  #app { height: 100dvh; display: flex; flex-direction: column; }
+  header.top {
+    flex: none; display: flex; align-items: center; gap: 4px;
+    padding: calc(var(--top) + 6px) 8px 6px; background: color-mix(in srgb, var(--bg) 86%, transparent);
+    backdrop-filter: saturate(1.6) blur(14px); -webkit-backdrop-filter: saturate(1.6) blur(14px);
+    border-bottom: 1px solid transparent; transition: border-color .2s; z-index: 5;
+  }
+  header.top.scrolled { border-bottom-color: var(--line); }
+  .icon-btn {
+    width: 42px; height: 42px; border-radius: 50%; display: grid; place-items: center;
+    color: var(--ink2); transition: background .15s, transform .1s;
+  }
+  .icon-btn:active { background: var(--tint); transform: scale(.94); }
+  .engine-btn {
+    flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: center;
+    padding: 4px 8px; border-radius: 14px; transition: background .15s;
+  }
+  .engine-btn:active { background: var(--tint); }
+  .engine-btn .name { display: flex; align-items: center; gap: 4px; font-weight: 650; font-size: 16px;
+    letter-spacing: -.2px; max-width: 100%; }
+  .engine-btn .name span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .engine-btn .sub { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); flex: none; }
+  .dot.on { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 22%, transparent); }
+  .dot.off { background: var(--bad); }
+
+  main#scroll { flex: 1; overflow-y: auto; overflow-x: hidden; -webkit-overflow-scrolling: touch;
+    scroll-behavior: smooth; overscroll-behavior: contain; }
+  #thread { max-width: 760px; margin: 0 auto; padding: 8px 14px 24px; display: flex; flex-direction: column; gap: 18px; }
+
+  /* ── empty state ───────────────────────────────────────────────────── */
+  .hero { padding: 7vh 6px 8px; text-align: center; }
+  .mark { width: 62px; height: 62px; margin: 0 auto 16px; border-radius: 19px;
+    background: linear-gradient(140deg, var(--accent), var(--accent2)); display: grid; place-items: center;
+    box-shadow: 0 10px 30px color-mix(in srgb, var(--accent) 35%, transparent); }
+  .hero h1 { font-size: 25px; letter-spacing: -.6px; margin: 0 0 6px; font-weight: 700; }
+  .hero p { margin: 0 auto; color: var(--muted); font-size: 14.5px; max-width: 330px; }
+  .tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 26px 0 6px; text-align: left; }
+  .tile { background: var(--bg2); border: 1px solid var(--line); border-radius: var(--r); padding: 13px 14px;
+    display: flex; flex-direction: column; gap: 6px; transition: transform .12s, border-color .15s; }
+  .tile:active { transform: scale(.98); border-color: var(--accent); }
+  .tile .t-ic { width: 30px; height: 30px; border-radius: 9px; background: var(--tint); color: var(--accent);
+    display: grid; place-items: center; }
+  .tile b { font-size: 14px; font-weight: 620; }
+  .tile small { color: var(--muted); font-size: 12.5px; line-height: 1.35; }
+  .app-link { margin-top: 14px; font-size: 13px; color: var(--accent); display: inline-flex; gap: 6px; align-items: center; }
+
+  /* ── messages ──────────────────────────────────────────────────────── */
+  .msg { display: flex; flex-direction: column; gap: 6px; animation: rise .28s cubic-bezier(.2,.8,.2,1); }
+  @keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+  .msg.user { align-items: flex-end; }
+  .bubble-user {
+    background: var(--user); color: var(--on-user); padding: 10px 15px; border-radius: 20px 20px 6px 20px;
+    max-width: 86%; white-space: pre-wrap; word-wrap: break-word; font-size: 15.5px;
+  }
+  .ctx-chip { font-size: 12.5px; color: var(--muted); background: var(--bg2); border: 1px solid var(--line);
+    padding: 5px 10px; border-radius: 10px; max-width: 86%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .msg.ai .body { font-size: 15.5px; color: var(--ink); word-wrap: break-word; overflow-wrap: anywhere; }
+  .body > :first-child { margin-top: 0; }
+  .body > :last-child { margin-bottom: 0; }
+  .body p { margin: 0 0 .75em; }
+  .body h1, .body h2, .body h3 { margin: 1.1em 0 .45em; line-height: 1.3; letter-spacing: -.2px; }
+  .body h1 { font-size: 1.25em; } .body h2 { font-size: 1.15em; } .body h3 { font-size: 1.04em; }
+  .body ul, .body ol { margin: 0 0 .75em; padding-left: 1.35em; }
+  .body li { margin: .22em 0; }
+  .body li::marker { color: var(--muted); }
+  .body a { color: var(--accent); text-decoration: none; border-bottom: 1px solid color-mix(in srgb, var(--accent) 35%, transparent); }
+  .body blockquote { margin: 0 0 .75em; padding: 2px 0 2px 12px; border-left: 3px solid var(--line2); color: var(--ink2); }
+  .body hr { border: 0; border-top: 1px solid var(--line); margin: 1.1em 0; }
+  .body code { background: var(--code-bg); padding: .1em .38em; border-radius: 6px; font-size: .86em; }
+  .body .tbl { overflow-x: auto; margin: 0 0 .8em; border: 1px solid var(--line); border-radius: 12px; }
+  .body table { border-collapse: collapse; font-size: .9em; min-width: 100%; }
+  .body th, .body td { padding: 7px 11px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+  .body th { background: var(--code-bg); font-weight: 620; }
+  .body tr:last-child td { border-bottom: 0; }
+  .codeblock { margin: 0 0 .8em; border-radius: 14px; background: var(--code-bg); border: 1px solid var(--line); overflow: hidden; }
+  .codeblock .bar { display: flex; justify-content: space-between; align-items: center; padding: 5px 6px 5px 12px;
+    font-size: 11.5px; color: var(--muted); border-bottom: 1px solid var(--line); }
+  .codeblock .bar button { padding: 4px 9px; border-radius: 8px; font-size: 11.5px; }
+  .codeblock .bar button:active { background: var(--tint2); }
+  .codeblock pre { margin: 0; padding: 11px 13px; overflow-x: auto; font-size: 12.8px; line-height: 1.55; }
+  .codeblock code { background: none; padding: 0; font-size: inherit; }
+  details.think { margin: 0 0 .7em; color: var(--muted); font-size: 13.5px; border-left: 2px solid var(--line2); padding-left: 10px; }
+  details.think summary { cursor: pointer; list-style: none; font-weight: 560; }
+  details.think summary::before { content: "› "; }
+  details.think[open] summary::before { content: "⌄ "; }
+  .caret { display: inline-block; width: 8px; height: 1.05em; background: var(--accent); border-radius: 2px;
+    vertical-align: -2px; margin-left: 2px; animation: blink 1s steps(2) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  .typing { display: inline-flex; gap: 4px; padding: 8px 0; }
+  .typing i { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); animation: bounce 1.2s infinite; }
+  .typing i:nth-child(2) { animation-delay: .15s; } .typing i:nth-child(3) { animation-delay: .3s; }
+  @keyframes bounce { 0%, 60%, 100% { transform: none; opacity: .5; } 30% { transform: translateY(-5px); opacity: 1; } }
+  .status-line { color: var(--muted); font-size: 13.5px; display: flex; align-items: center; gap: 8px; }
+  .spinner { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--line2); border-top-color: var(--accent);
+    animation: spin .8s linear infinite; flex: none; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .meta { display: flex; align-items: center; gap: 2px; flex-wrap: wrap; margin-top: 2px; }
+  .receipt { font-size: 11.5px; color: var(--faint); display: inline-flex; gap: 6px; align-items: center; margin-right: auto; padding-left: 1px; }
+  .receipt .tag { padding: 1px 7px; border-radius: 6px; background: var(--tint); color: var(--accent); font-weight: 560; }
+  .receipt .tag.sub { background: color-mix(in srgb, #d97706 14%, transparent); color: #c2410c; }
+  .receipt .tag.cloud { background: color-mix(in srgb, #0ea5e9 14%, transparent); color: #0284c7; }
+  @media (prefers-color-scheme: dark) {
+    .receipt .tag.sub { color: #fdba74; } .receipt .tag.cloud { color: #7dd3fc; }
+  }
+  .act { width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center; color: var(--faint); }
+  .act:active { background: var(--tint); color: var(--accent); }
+
+  .err { background: var(--bad-bg); color: var(--bad); padding: 10px 13px; border-radius: 14px; font-size: 14px; }
+  .sources { display: flex; gap: 8px; overflow-x: auto; padding: 2px 1px 4px; margin: 2px -14px 0; padding-left: 14px; padding-right: 14px;
+    scrollbar-width: none; }
+  .sources::-webkit-scrollbar { display: none; }
+  .src { flex: none; width: 168px; background: var(--bg2); border: 1px solid var(--line); border-radius: 14px; padding: 9px 11px;
+    text-decoration: none; color: inherit; display: flex; flex-direction: column; gap: 3px; }
+  .src:active { border-color: var(--accent); }
+  .src .n { font-size: 11px; color: var(--accent); font-weight: 650; }
+  .src .d { font-size: 13px; font-weight: 560; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .src .p { font-size: 11.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .badge { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 600; padding: 3px 9px; border-radius: 99px; }
+  .badge.ok { background: var(--ok-bg); color: var(--ok); }
+  .badge.warn { background: var(--warn-bg); color: var(--warn); }
+  .verdicts { display: flex; flex-direction: column; gap: 8px; }
+  .verdict { background: var(--bg2); border: 1px solid var(--line); border-radius: 14px; padding: 10px 12px; font-size: 14.5px; }
+  .verdict .v { font-size: 11.5px; font-weight: 700; letter-spacing: .3px; text-transform: uppercase; margin-bottom: 3px; }
+  .verdict .v.supported { color: var(--ok); } .verdict .v.contradicted { color: var(--bad); } .verdict .v.unverified { color: var(--warn); }
+  .verdict .note { color: var(--muted); font-size: 13px; margin-top: 3px; }
+
+  .imgcard { position: relative; border-radius: 20px; overflow: hidden; background: var(--code-bg); border: 1px solid var(--line);
+    max-width: 440px; }
+  .imgcard img { width: 100%; display: block; cursor: zoom-in; animation: develop .9s ease; }
+  @keyframes develop { from { filter: blur(18px) saturate(.4); opacity: .3; } to { filter: none; opacity: 1; } }
+  .imgcard.pending { aspect-ratio: var(--ar, 1); display: grid; place-items: center; }
+  .imgcard.pending::before { content: ""; position: absolute; inset: 0;
+    background: linear-gradient(110deg, transparent 30%, color-mix(in srgb, var(--accent) 16%, transparent) 50%, transparent 70%);
+    background-size: 250% 100%; animation: sweep 1.8s linear infinite; }
+  @keyframes sweep { from { background-position: 120% 0; } to { background-position: -120% 0; } }
+  .imgcard .pend { position: relative; text-align: center; color: var(--muted); font-size: 13.5px; padding: 20px; }
+  .imgcard .pend b { display: block; font-size: 28px; color: var(--ink); font-variant-numeric: tabular-nums; font-weight: 650; letter-spacing: -.5px; }
+  .imgcard .bar2 { position: absolute; left: 0; bottom: 0; height: 3px; background: linear-gradient(90deg, var(--accent), var(--accent2));
+    transition: width 1s linear; }
+
+  /* ── composer ──────────────────────────────────────────────────────── */
+  footer.composer-wrap { flex: none; padding: 6px 10px calc(var(--bot) + 10px); background: linear-gradient(to top, var(--bg) 70%, transparent); }
+  .composer-inner { max-width: 760px; margin: 0 auto; }
+  .modes { display: flex; gap: 6px; margin: 0 0 8px 2px; }
+  .mode { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: 99px; font-size: 13.5px; font-weight: 560;
+    color: var(--muted); background: var(--bg2); border: 1px solid var(--line); transition: all .15s; }
+  .mode[aria-pressed="true"] { color: var(--on-accent); background: var(--accent); border-color: var(--accent); }
+  .mode:active { transform: scale(.96); }
+  .mode .opts { opacity: .8; font-weight: 500; }
+  .share-card { background: var(--bg2); border: 1px solid var(--line); border-radius: var(--r); padding: 10px 12px; margin: 0 0 8px;
+    box-shadow: var(--shadow); animation: rise .25s ease; }
+  .share-card .head { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .4px; }
+  .share-card .head button { margin-left: auto; }
+  .share-card .what { font-size: 14px; margin: 4px 0 9px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; color: var(--ink2); }
+  .chips { display: flex; gap: 7px; overflow-x: auto; scrollbar-width: none; }
+  .chips::-webkit-scrollbar { display: none; }
+  .chip { flex: none; padding: 7px 12px; border-radius: 99px; background: var(--tint); color: var(--accent); font-size: 13.5px; font-weight: 580; }
+  .chip:active { background: var(--tint2); }
+  .attached { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--accent); background: var(--tint);
+    padding: 5px 6px 5px 10px; border-radius: 10px; margin: 0 0 8px; max-width: 100%; }
+  .attached span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .attached button { width: 22px; height: 22px; border-radius: 6px; display: grid; place-items: center; }
+  .composer { display: flex; align-items: flex-end; gap: 6px; background: var(--bg2); border: 1px solid var(--line2);
+    border-radius: 26px; padding: 5px 5px 5px 16px; box-shadow: var(--shadow); transition: border-color .15s; }
+  .composer:focus-within { border-color: color-mix(in srgb, var(--accent) 55%, var(--line2)); }
+  .composer textarea { flex: 1; border: 0; outline: 0; background: none; resize: none; max-height: 34vh; min-height: 24px;
+    padding: 9px 0; font-size: 16px; line-height: 1.45; }
+  .composer textarea::placeholder { color: var(--faint); }
+  .round { width: 42px; height: 42px; border-radius: 50%; display: grid; place-items: center; flex: none; transition: transform .1s, background .15s; }
+  .round:active { transform: scale(.9); }
+  .round.send { background: var(--accent); color: var(--on-accent); }
+  .round.send:disabled { background: var(--line2); color: var(--faint); }
+  .round.mic { color: var(--muted); }
+  .round.mic.live { background: var(--bad); color: #fff; animation: pulse 1.4s infinite; }
+  @keyframes pulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--bad) 55%, transparent); } 100% { box-shadow: 0 0 0 14px transparent; } }
+  .round.stop { background: var(--ink); color: var(--bg); }
+  .hint-line { text-align: center; font-size: 11.5px; color: var(--faint); margin-top: 7px; min-height: 16px; }
+  .jump { position: absolute; left: 50%; transform: translateX(-50%); bottom: 100%; margin-bottom: 8px; width: 38px; height: 38px;
+    border-radius: 50%; background: var(--bg2); border: 1px solid var(--line); box-shadow: var(--shadow); display: grid; place-items: center; color: var(--ink2); }
+  footer.composer-wrap { position: relative; }
+
+  /* ── sheets ────────────────────────────────────────────────────────── */
+  .scrim { position: fixed; inset: 0; background: rgba(5, 5, 15, .38); opacity: 0; pointer-events: none; transition: opacity .22s; z-index: 20; }
+  .scrim.open { opacity: 1; pointer-events: auto; }
+  .sheet { position: fixed; left: 0; right: 0; bottom: 0; z-index: 21; background: var(--bg2); border-radius: 24px 24px 0 0;
+    padding: 8px 16px calc(var(--bot) + 18px); max-height: 86dvh; overflow-y: auto; transform: translateY(105%);
+    transition: transform .3s cubic-bezier(.2,.85,.25,1); box-shadow: var(--shadow); max-width: 640px; margin: 0 auto; }
+  .sheet.open { transform: none; }
+  .grab { width: 38px; height: 5px; border-radius: 3px; background: var(--line2); margin: 2px auto 12px; }
+  .sheet h2 { font-size: 18px; margin: 2px 4px 12px; letter-spacing: -.3px; }
+  .sheet h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); margin: 18px 4px 8px; font-weight: 650; }
+  .opt { display: flex; align-items: center; gap: 12px; width: 100%; text-align: left; padding: 11px 12px; border-radius: 14px; }
+  .opt:active { background: var(--tint); }
+  .opt .o-ic { width: 36px; height: 36px; border-radius: 11px; display: grid; place-items: center; flex: none; background: var(--tint); color: var(--accent); }
+  .opt .o-ic.sub { background: color-mix(in srgb, #d97706 14%, transparent); color: #c2410c; }
+  .opt .o-ic.cloud { background: color-mix(in srgb, #0ea5e9 14%, transparent); color: #0284c7; }
+  .opt .o-tx { flex: 1; min-width: 0; }
+  .opt .o-tx b { display: block; font-weight: 600; font-size: 15px; }
+  .opt .o-tx small { display: block; color: var(--muted); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .opt .check { color: var(--accent); opacity: 0; }
+  .opt[aria-checked="true"] .check { opacity: 1; }
+  .opt[aria-checked="true"] { background: var(--tint); }
+  .seg { display: flex; background: var(--bg); border-radius: 12px; padding: 3px; gap: 3px; margin: 0 2px; }
+  .seg button { flex: 1; padding: 8px 6px; border-radius: 9px; font-size: 13.5px; font-weight: 560; color: var(--muted); }
+  .seg button[aria-pressed="true"] { background: var(--bg2); color: var(--ink); box-shadow: 0 1px 4px rgba(0,0,0,.1); }
+  .field { width: 100%; background: var(--bg); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; outline: 0; font-size: 15px; }
+  .field:focus { border-color: var(--accent); }
+  textarea.field { resize: vertical; min-height: 84px; }
+  .row-btn { display: flex; gap: 8px; margin-top: 12px; }
+  .btn { padding: 11px 16px; border-radius: 13px; font-weight: 600; font-size: 14.5px; background: var(--tint); color: var(--accent); flex: 1; }
+  .btn.primary { background: var(--accent); color: var(--on-accent); }
+  .btn.danger { background: var(--bad-bg); color: var(--bad); }
+  .note { color: var(--muted); font-size: 13px; margin: 8px 4px; line-height: 1.5; }
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; font-size: 13.5px; margin: 0 4px; }
+  .kv dt { color: var(--muted); } .kv dd { margin: 0; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* drawer */
+  .drawer { position: fixed; top: 0; bottom: 0; left: 0; width: min(86vw, 340px); background: var(--bg2); z-index: 21;
+    transform: translateX(-102%); transition: transform .28s cubic-bezier(.2,.85,.25,1); display: flex; flex-direction: column;
+    padding: calc(var(--top) + 12px) 10px calc(var(--bot) + 12px); box-shadow: var(--shadow); }
+  .drawer.open { transform: none; }
+  .drawer .brand { display: flex; align-items: center; gap: 10px; padding: 4px 8px 14px; }
+  .drawer .brand .mark { width: 34px; height: 34px; border-radius: 11px; margin: 0; box-shadow: none; }
+  .drawer .brand b { font-size: 17px; letter-spacing: -.3px; }
+  .drawer .brand small { display: block; color: var(--muted); font-size: 12px; font-weight: 400; }
+  .drawer .list { flex: 1; overflow-y: auto; margin: 6px -2px; }
+  .drawer .grp { font-size: 11.5px; text-transform: uppercase; letter-spacing: .6px; color: var(--faint); padding: 14px 12px 6px; font-weight: 650; }
+  .conv { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; padding: 10px 12px; border-radius: 12px; font-size: 14.5px; }
+  .conv span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .conv[aria-current="true"] { background: var(--tint); color: var(--accent); font-weight: 580; }
+  .conv:active { background: var(--tint); }
+  .conv .del { width: 28px; height: 28px; border-radius: 8px; display: grid; place-items: center; color: var(--faint); opacity: 0; }
+  .conv[aria-current="true"] .del { opacity: 1; }
+  .drawer .foot { display: flex; flex-direction: column; gap: 2px; border-top: 1px solid var(--line); padding-top: 8px; }
+  .drawer .foot .opt { padding: 9px 10px; }
+  .drawer .foot .opt .o-ic { width: 32px; height: 32px; border-radius: 10px; }
+
+  /* gallery + lightbox */
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; margin: 0 -8px; }
+  .grid button { aspect-ratio: 1; border-radius: 10px; overflow: hidden; background: var(--code-bg); }
+  .grid img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .lightbox { position: fixed; inset: 0; z-index: 30; background: rgba(0,0,0,.94); display: flex; flex-direction: column;
+    opacity: 0; pointer-events: none; transition: opacity .2s; }
+  .lightbox.open { opacity: 1; pointer-events: auto; }
+  .lightbox .lb-img { flex: 1; display: grid; place-items: center; padding: calc(var(--top) + 50px) 8px 8px; min-height: 0; }
+  .lightbox img { max-width: 100%; max-height: 100%; border-radius: 10px; object-fit: contain; }
+  .lightbox .lb-close { position: absolute; top: calc(var(--top) + 8px); right: 8px; color: #fff; }
+  .lightbox .lb-cap { color: #d4d4dc; font-size: 13.5px; padding: 6px 18px; text-align: center; max-height: 22vh; overflow-y: auto; }
+  .lightbox .lb-acts { display: flex; justify-content: center; gap: 10px; padding: 8px 12px calc(var(--bot) + 16px); }
+  .lightbox .lb-acts button { color: #fff; background: rgba(255,255,255,.12); padding: 10px 16px; border-radius: 14px; font-size: 14px;
+    font-weight: 560; display: inline-flex; align-items: center; gap: 7px; }
+
+  .toast { position: fixed; left: 50%; bottom: calc(var(--bot) + 96px); transform: translate(-50%, 20px); background: var(--ink); color: var(--bg);
+    padding: 9px 16px; border-radius: 12px; font-size: 14px; font-weight: 560; opacity: 0; transition: all .22s; z-index: 40; pointer-events: none;
+    max-width: 88vw; text-align: center; }
+  .toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+  .offline { margin: 12vh 10px 0; text-align: center; }
+  .offline .ic { width: 64px; height: 64px; border-radius: 20px; background: var(--bad-bg); color: var(--bad); display: grid; place-items: center; margin: 0 auto 16px; }
+  .offline h2 { margin: 0 0 6px; font-size: 21px; letter-spacing: -.4px; }
+  .offline p { color: var(--muted); font-size: 14.5px; max-width: 320px; margin: 0 auto 18px; }
+
+  @media (min-width: 900px) {
+    #thread { padding-top: 24px; }
+    .tiles { grid-template-columns: repeat(4, 1fr); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <header class="top" id="top">
+    <button class="icon-btn" id="btn-menu" aria-label="Conversations"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h11M4 17h16"/></svg></button>
+    <button class="engine-btn" id="btn-engine" aria-label="Choose model">
+      <span class="name"><span id="engine-name">Auto</span><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg></span>
+      <span class="sub"><i class="dot" id="conn-dot"></i><span id="engine-sub">connecting…</span></span>
+    </button>
+    <button class="icon-btn" id="btn-new" aria-label="New conversation"><svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg></button>
+  </header>
+
+  <main id="scroll"><div id="thread"></div></main>
+
+  <footer class="composer-wrap">
+    <button class="jump" id="btn-jump" hidden aria-label="Scroll to latest"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12l7 7 7-7"/></svg></button>
+    <div class="composer-inner">
+      <div id="share-slot"></div>
+      <div id="attach-slot"></div>
+      <div class="modes" role="group" aria-label="Mode">
+        <button class="mode" data-mode="chat" aria-pressed="true"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a8 8 0 0 1-11.7 7.1L4 20l1-4.6A8 8 0 1 1 21 12Z"/></svg>Chat</button>
+        <button class="mode" data-mode="web" aria-pressed="false"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg>Web</button>
+        <button class="mode" data-mode="image" aria-pressed="false" id="mode-image"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="4"/><circle cx="9" cy="9" r="2"/><path d="m21 15-5-5L5 21"/></svg>Image<span class="opts" id="image-opts"></span></button>
+      </div>
+      <div class="composer">
+        <textarea id="input" rows="1" placeholder="Message" enterkeyhint="send" autocomplete="off"></textarea>
+        <button class="round mic" id="btn-mic" aria-label="Speak" hidden><svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg></button>
+        <button class="round send" id="btn-send" aria-label="Send" disabled><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button>
+      </div>
+      <div class="hint-line" id="hint"></div>
+    </div>
+  </footer>
+</div>
+
+<div class="scrim" id="scrim"></div>
+
+<nav class="drawer" id="drawer" aria-label="Conversations">
+  <div class="brand"><div class="mark"><svg width="20" height="20" viewBox="0 0 24 24"><circle cx="10" cy="12" r="6" fill="#fff"/><circle cx="19.2" cy="12" r="3" fill="#fff" opacity=".75"/></svg></div>
+    <div><b>Sidecar</b><small id="drawer-host">your Mac</small></div></div>
+  <button class="opt" id="d-new"><span class="o-ic"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></span><span class="o-tx"><b>New conversation</b></span></button>
+  <div class="list" id="conv-list"></div>
+  <div class="foot">
+    <button class="opt" id="d-gallery"><span class="o-ic"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="4"/><circle cx="9" cy="9" r="2"/><path d="m21 15-5-5L5 21"/></svg></span><span class="o-tx"><b>Images</b><small>made on your Mac</small></span></button>
+    <button class="opt" id="d-settings"><span class="o-ic"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/></svg></span><span class="o-tx"><b>Settings</b><small id="d-ver"></small></span></button>
+  </div>
+</nav>
+
+<section class="sheet" id="sheet-engine" aria-label="Choose model"><div class="grab"></div><div id="engine-list"></div></section>
+<section class="sheet" id="sheet-image" aria-label="Image options"><div class="grab"></div><div id="image-panel"></div></section>
+<section class="sheet" id="sheet-gallery" aria-label="Images"><div class="grab"></div><h2>Images</h2><div class="grid" id="gallery-grid"></div><p class="note" id="gallery-note"></p></section>
+<section class="sheet" id="sheet-settings" aria-label="Settings"><div class="grab"></div><div id="settings-panel"></div></section>
+<section class="sheet" id="sheet-token" aria-label="Token"><div class="grab"></div>
+  <h2>This sidecar wants a token</h2>
+  <p class="note">It was started with <span class="mono">LLM_SIDECAR_TOKEN</span>. Enter the same value. It is kept on this phone only.</p>
+  <input class="field mono" id="token-in" type="password" autocomplete="off" placeholder="token">
+  <div class="row-btn"><button class="btn primary" id="token-save">Save</button></div>
+</section>
+
+<div class="lightbox" id="lightbox">
+  <button class="icon-btn lb-close" id="lb-close" aria-label="Close"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+  <div class="lb-img"><img id="lb-img" alt=""></div>
+  <div class="lb-cap" id="lb-cap"></div>
+  <div class="lb-acts">
+    <button id="lb-save"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>Save</button>
+    <button id="lb-share"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="m8.6 13.5 6.8 4M15.4 6.5l-6.8 4"/></svg>Share</button>
+    <button id="lb-remix"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>Again</button>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+"use strict";
+
+// ── small utilities ─────────────────────────────────────────────────────────
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g,
+  (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const store = {
+  // Every access guarded: a private tab or blocked storage throws, and the
+  // app must still work — it just forgets on reload.
+  get(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch { return d; } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
+};
+
+// The Android app adds this to the user agent and a JavaScript channel named
+// SidecarNative. Everything native is optional: in Chrome the page uses the
+// web equivalent or hides the control.
+const NATIVE = typeof window.SidecarNative !== "undefined" || /LLMSidecarApp/.test(navigator.userAgent);
+function native(msg) {
+  try { window.SidecarNative.postMessage(JSON.stringify(msg)); return true; } catch { return false; }
+}
+function haptic(kind = "light") {
+  if (NATIVE && native({ type: "haptic", kind })) return;
+  try { navigator.vibrate && navigator.vibrate(kind === "heavy" ? 18 : 8); } catch {}
+}
+let toastTimer;
+function toast(text) {
+  const t = $("toast"); t.textContent = text; t.classList.add("show");
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove("show"), 2200);
+}
+
+const ICON = {
+  copy: '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="3"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></svg>',
+  again: '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>',
+  share: '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="m8.6 13.5 6.8 4M15.4 6.5l-6.8 4"/></svg>',
+  speak: '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H3v6h3l5 4V5Z"/><path d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13"/></svg>',
+  check: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5L20 7"/></svg>',
+  trash: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/></svg>',
+  x: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg>',
+  auto: '<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3 1.9 5.8L20 10l-5 3.8L16.5 20 12 16.6 7.5 20 9 13.8 4 10l6.1-1.2Z"/></svg>',
+  mac: '<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M2 20h20"/></svg>',
+  claude: '<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 3v18M3 12h18M5.6 5.6l12.8 12.8M18.4 5.6 5.6 18.4"/></svg>',
+  cloud: '<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 19a4.5 4.5 0 1 0-1.4-8.8A6 6 0 0 0 4.3 12.6 3.5 3.5 0 0 0 6.5 19Z"/></svg>',
+  web: '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg>',
+  image: '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="4"/><circle cx="9" cy="9" r="2"/><path d="m21 15-5-5L5 21"/></svg>',
+  lock: '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>',
+  check2: '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M9 12l2 2 4-4"/><circle cx="12" cy="12" r="9"/></svg>',
+  off: '<svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 2l20 20M8.5 16.4a5 5 0 0 1 7 0M5 12.9a10 10 0 0 1 3.2-2M19 12.9a10 10 0 0 0-2.4-1.6M2 9a15 15 0 0 1 4.5-2.9M22 9a15 15 0 0 0-12.4-4M12 20h.01"/></svg>',
+};
+
+// ── API ─────────────────────────────────────────────────────────────────────
+
+let token = store.get("sc.token", "");
+let tokenWaiters = [];
+
+async function http(path, opts = {}) {
+  const headers = Object.assign({ "Content-Type": "application/json" }, opts.headers || {});
+  if (token) headers.Authorization = "Bearer " + token;
+  const res = await fetch(path, Object.assign({}, opts, { headers }));
+  if (res.status === 401) {
+    await askToken();
+    return http(path, opts);
+  }
+  if (!res.ok) {
+    let detail = res.statusText || ("HTTP " + res.status);
+    try { const j = await res.json(); detail = j.detail || detail; } catch {}
+    const e = new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+    e.status = res.status; throw e;
+  }
+  return res;
+}
+const getJSON = async (p) => (await http(p)).json();
+const postJSON = async (p, body, signal) => (await http(p, { method: "POST", body: JSON.stringify(body), signal })).json();
+const imgSrc = (url) => token ? url + (url.includes("?") ? "&" : "?") + "t=" + encodeURIComponent(token) : url;
+
+function askToken() {
+  return new Promise((resolve) => {
+    tokenWaiters.push(resolve);
+    openSheet("sheet-token");
+    setTimeout(() => $("token-in").focus(), 250);
+  });
+}
+$("token-save").onclick = () => {
+  token = $("token-in").value.trim();
+  store.set("sc.token", token);
+  closeSheets();
+  tokenWaiters.splice(0).forEach((r) => r());
+};
+
+// ── state ───────────────────────────────────────────────────────────────────
+
+let engines = null;           // /app/api/engines
+let online = null;
+const settings = Object.assign({
+  engine: { kind: "auto" },
+  mode: "chat",
+  system: "",
+  budget: "",                  // "" = the sidecar's default
+  image: { profile: "standard", aspect: "square" },
+  speakReplies: false,
+}, store.get("sc.settings", {}));
+const saveSettings = () => store.set("sc.settings", settings);
+
+let convs = store.get("sc.convs", []);
+let current = null;            // the open conversation
+let busy = null;               // { abort, kind }
+let attached = null;           // { title, url, text } context for the next message
+let shared = null;             // pending share card
+
+const saveConvs = () => {
+  // Bounded: localStorage is ~5 MB and a phone keeps it forever.
+  convs = convs.slice(0, 80);
+  store.set("sc.convs", convs);
+};
+
+function newConv() {
+  current = { id: uid(), title: "", at: Date.now(), messages: [] };
+  attached = null; renderAttach();
+  render();
+  renderConvList();
+}
+function persistCurrent() {
+  if (!current || !current.messages.length) return;
+  current.at = Date.now();
+  if (!current.title) {
+    const first = current.messages.find((m) => m.role === "user");
+    current.title = (first?.text || "Conversation").slice(0, 64);
+  }
+  convs = [current, ...convs.filter((c) => c.id !== current.id)];
+  saveConvs(); renderConvList();
+}
+
+// ── engines ─────────────────────────────────────────────────────────────────
+
+const pretty = (id) => {
+  if (!id) return "";
+  if (id.startsWith("claude/")) return "Claude " + id.slice(7).replace(/^./, (c) => c.toUpperCase());
+  if (id.startsWith("ollama/")) return id.slice(7).replace(/:latest$/, "");
+  return id.split("/").pop().replace(/:free$/, "");
+};
+function engineLabel(e = settings.engine) {
+  switch (e.kind) {
+    case "local":  return { name: pretty(e.model), sub: "on your Mac", cls: "" };
+    case "claude": return { name: pretty(e.model), sub: "Claude subscription", cls: "sub" };
+    case "cloud":  return { name: "Cloud · " + e.tier, sub: "OpenRouter · " + (e.budget || "free"), cls: "cloud" };
+    default:       return { name: "Auto", sub: "the sidecar decides", cls: "" };
+  }
+}
+function engineRequest(e = settings.engine) {
+  switch (e.kind) {
+    case "local": case "claude": return { model: e.model };
+    case "cloud": return { model: e.tier, budget: e.budget || "free" };
+    default: return settings.budget ? { model: "auto", budget: settings.budget } : { model: "auto" };
+  }
+}
+function renderEngine() {
+  const l = engineLabel();
+  $("engine-name").textContent = l.name;
+  $("engine-sub").textContent = online === false ? "can't reach your Mac" : online == null ? "connecting…" : l.sub;
+  $("conn-dot").className = "dot " + (online ? "on" : online === false ? "off" : "");
+  $("hint").textContent = listening ? "Listening… tap the mic to stop" : hintText();
+}
+
+function engineSheet() {
+  const e = settings.engine;
+  const opt = (ic, cls, title, sub, sel, data) =>
+    `<button class="opt" role="menuitemradio" aria-checked="${sel}" data-engine='${esc(JSON.stringify(data))}'>
+       <span class="o-ic ${cls}">${ic}</span><span class="o-tx"><b>${esc(title)}</b><small>${esc(sub)}</small></span>
+       <span class="check">${ICON.check}</span></button>`;
+  let h = `<h2>Who answers</h2>`;
+  h += opt(ICON.auto, "", "Auto", "The sidecar picks a working model for you", e.kind === "auto", { kind: "auto" });
+  const local = engines?.local || [];
+  if (local.length) {
+    h += `<h3>On your Mac · private, free</h3>`;
+    for (const m of local) h += opt(ICON.mac, "", pretty(m), "Ollama · never leaves the Mac", e.kind === "local" && e.model === m, { kind: "local", model: m });
+  }
+  const claude = engines?.claude || [];
+  if (claude.length) {
+    h += `<h3>Claude · your subscription</h3>`;
+    const blurb = { "claude/haiku": "Fastest", "claude/sonnet": "Best balance", "claude/opus": "Most capable" };
+    for (const m of claude) h += opt(ICON.claude, "sub", pretty(m), (blurb[m] || "") + " · via claude -p", e.kind === "claude" && e.model === m, { kind: "claude", model: m });
+  }
+  if (engines?.cloud?.configured) {
+    h += `<h3>Cloud · OpenRouter</h3>`;
+    const tiers = [["fast", "Quick replies"], ["balanced", "Everyday"], ["powerful", "Hard problems"]];
+    for (const [t, d] of tiers) h += opt(ICON.cloud, "cloud", "Cloud · " + t, d + " · " + (e.budget || "free") + " models", e.kind === "cloud" && e.tier === t, { kind: "cloud", tier: t, budget: e.kind === "cloud" ? e.budget : "free" });
+    h += `<div class="seg" style="margin-top:8px" id="cloud-budget">` +
+      ["free", "cheap", "best"].map((b) => `<button data-b="${b}" aria-pressed="${(e.kind === "cloud" ? e.budget || "free" : "free") === b}">${b}</button>`).join("") + `</div>
+      <p class="note">Free uses OpenRouter's free models. Cheap and best spend from your OpenRouter credit.</p>`;
+  } else if (engines) {
+    h += `<p class="note">Add an OpenRouter key on the Mac's dashboard to use cloud models too.</p>`;
+  }
+  $("engine-list").innerHTML = h;
+  $("engine-list").querySelectorAll("[data-engine]").forEach((b) => b.onclick = () => {
+    settings.engine = JSON.parse(b.dataset.engine);
+    saveSettings(); renderEngine(); haptic(); closeSheets();
+  });
+  $("engine-list").querySelectorAll("#cloud-budget button").forEach((b) => b.onclick = () => {
+    const tier = settings.engine.kind === "cloud" ? settings.engine.tier : "balanced";
+    settings.engine = { kind: "cloud", tier, budget: b.dataset.b };
+    saveSettings(); renderEngine(); engineSheet(); haptic();
+  });
+}
+
+// ── connection ──────────────────────────────────────────────────────────────
+
+async function connect() {
+  try {
+    engines = await getJSON("/app/api/engines");
+    online = true;
+    $("d-ver").textContent = "v" + engines.version + " · " + location.host.split(".")[0];
+    $("drawer-host").textContent = location.hostname === "localhost" || location.hostname === "127.0.0.1" ? "this computer" : location.hostname.split(".")[0];
+    // A remembered engine that has since gone away (model removed, Claude
+    // turned off) silently failing every message would be worse than
+    // falling back to Auto and saying so.
+    const e = settings.engine;
+    if ((e.kind === "local" && !engines.local.includes(e.model)) ||
+        (e.kind === "claude" && !engines.claude.includes(e.model)) ||
+        (e.kind === "cloud" && !engines.cloud.configured)) {
+      settings.engine = { kind: "auto" }; saveSettings();
+      toast("That model isn't available any more — using Auto");
+    }
+    const img = engines.images || {};
+    $("mode-image").hidden = !img.available;
+    if (!img.available && settings.mode === "image") setMode("chat");
+    renderImageOpts();
+  } catch (err) {
+    online = false;
+  }
+  renderEngine();
+  if (!current?.messages.length) render();
+}
+setInterval(() => { if (document.visibilityState === "visible") connect(); }, 30000);
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") connect(); });
+
+// ── markdown ────────────────────────────────────────────────────────────────
+// Small and strict: escape everything first, then add back a known set of
+// tags. Links are http(s) only. Good enough for model output, and nothing a
+// model writes can become script.
+
+function inline(s) {
+  const codes = [];
+  s = s.replace(/`([^`\n]+)`/g, (_, c) => { codes.push(c); return "\u0000" + (codes.length - 1) + "\u0000"; });
+  s = s.replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, (_, t, u) => `<a href="${u}" target="_blank" rel="noopener noreferrer">${t}</a>`);
+  s = s.replace(/(^|[\s(])(https?:\/\/[^\s<)]+[^\s<).,;:!?'"])/g, (_, p, u) => `${p}<a href="${u}" target="_blank" rel="noopener noreferrer">${u.replace(/^https?:\/\/(www\.)?/, "").slice(0, 48)}</a>`);
+  s = s.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>").replace(/__([^_\n]+)__/g, "<strong>$1</strong>");
+  s = s.replace(/(^|[^*\w])\*([^*\n]+)\*(?!\w)/g, "$1<em>$2</em>").replace(/(^|[^_\w])_([^_\n]+)_(?!\w)/g, "$1<em>$2</em>");
+  s = s.replace(/~~([^~\n]+)~~/g, "<del>$1</del>");
+  return s.replace(/\u0000(\d+)\u0000/g, (_, i) => `<code>${codes[+i]}</code>`);
+}
+
+function markdown(src, streaming = false) {
+  let think = "";
+  // Reasoning models (deepseek-r1 and friends) wrap their chain of thought
+  // in <think>. Folded away rather than shown as the answer.
+  src = src.replace(/<think>([\s\S]*?)(<\/think>|$)/, (_, t, close) => { think = t.trim(); return close ? "" : ""; });
+  const blocks = [];
+  src = src.replace(/```([\w+-]*)[^\n]*\n([\s\S]*?)(```|$)/g, (_, lang, code) => {
+    blocks.push({ lang, code: code.replace(/\n$/, "") });
+    return "\n\u0001" + (blocks.length - 1) + "\u0001\n";
+  });
+  const lines = esc(src).split("\n");
+  let out = "", i = 0;
+  const para = [];
+  const flush = () => { if (para.length) { out += "<p>" + inline(para.join("<br>")) + "</p>"; para.length = 0; } };
+  while (i < lines.length) {
+    const l = lines[i];
+    let m;
+    if ((m = l.match(/^\u0001(\d+)\u0001$/))) {
+      flush(); const b = blocks[+m[1]];
+      out += `<div class="codeblock"><div class="bar"><span>${esc(b.lang || "code")}</span><button data-copy="${+m[1]}">Copy</button></div><pre><code>${esc(b.code)}</code></pre></div>`;
+      i++; continue;
+    }
+    if (!l.trim()) { flush(); i++; continue; }
+    if ((m = l.match(/^(#{1,4})\s+(.*)$/))) { flush(); const n = Math.min(3, m[1].length); out += `<h${n}>${inline(m[2])}</h${n}>`; i++; continue; }
+    if (/^\s*([-*_])\s*\1\s*\1[\s\1]*$/.test(l)) { flush(); out += "<hr>"; i++; continue; }
+    if (/^&gt;\s?/.test(l)) {
+      flush(); const q = [];
+      while (i < lines.length && /^&gt;\s?/.test(lines[i])) q.push(lines[i++].replace(/^&gt;\s?/, ""));
+      out += "<blockquote>" + inline(q.join("<br>")) + "</blockquote>"; continue;
+    }
+    if (/^\s*\|.*\|\s*$/.test(l) && i + 1 < lines.length && /^\s*\|?\s*:?-{2,}/.test(lines[i + 1])) {
+      flush();
+      const cells = (r) => r.trim().replace(/^\||\|$/g, "").split("|").map((c) => inline(c.trim()));
+      const head = cells(l); i += 2;
+      let t = "<div class='tbl'><table><thead><tr>" + head.map((c) => `<th>${c}</th>`).join("") + "</tr></thead><tbody>";
+      while (i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i])) t += "<tr>" + cells(lines[i++]).map((c) => `<td>${c}</td>`).join("") + "</tr>";
+      out += t + "</tbody></table></div>"; continue;
+    }
+    if ((m = l.match(/^(\s*)([-*+]|\d+[.)])\s+/))) {
+      flush();
+      const ordered = /\d/.test(m[2]);
+      let list = ordered ? "<ol>" : "<ul>";
+      while (i < lines.length && (m = lines[i].match(/^(\s*)([-*+]|\d+[.)])\s+(.*)$/))) {
+        let item = m[3]; i++;
+        while (i < lines.length && /^\s{2,}\S/.test(lines[i]) && !/^\s*([-*+]|\d+[.)])\s+/.test(lines[i])) item += "<br>" + lines[i++].trim();
+        const nested = m[1].length >= 2;
+        list += `<li${nested ? ' style="margin-left:1.1em"' : ""}>${inline(item)}</li>`;
+      }
+      out += list + (ordered ? "</ol>" : "</ul>"); continue;
+    }
+    para.push(l); i++;
+  }
+  flush();
+  if (streaming) out = out.replace(/(<\/(p|li|h\d|code)>)(?![\s\S]*<\/(p|li|h\d|code)>)/, '<span class="caret"></span>$1') || out + '<span class="caret"></span>';
+  const th = think ? `<details class="think"><summary>Thought it through</summary>${inline(esc(think)).replace(/\n/g, "<br>")}</details>` : "";
+  return { html: th + out, blocks };
+}
+
+// ── rendering ───────────────────────────────────────────────────────────────
+
+function receiptHTML(meta = {}) {
+  if (!meta.model) return "";
+  const id = meta.model;
+  let tag;
+  if (id.startsWith("claude/")) tag = `<span class="tag sub">subscription</span>`;
+  else if (meta.local || id.startsWith("ollama/")) tag = `<span class="tag">on your Mac</span>`;
+  else tag = `<span class="tag cloud">${meta.cost ? "$" + meta.cost.toFixed(meta.cost < 0.01 ? 4 : 3) : "free"}</span>`;
+  const bits = [esc(pretty(id)), tag];
+  if (meta.cached) bits.push("cached");
+  if (meta.seconds != null) bits.push(meta.seconds.toFixed(1) + "s");
+  return `<span class="receipt">${bits.join(" ")}</span>`;
+}
+
+function actionsHTML(m, last) {
+  let a = "";
+  if (m.kind !== "image" && m.kind !== "error") a += `<button class="act" data-act="copy" aria-label="Copy">${ICON.copy}</button>`;
+  if (m.kind !== "error") a += `<button class="act" data-act="share" aria-label="Share">${ICON.share}</button>`;
+  if (m.kind === "text" && canSpeak()) a += `<button class="act" data-act="speak" aria-label="Read aloud">${ICON.speak}</button>`;
+  if (last) a += `<button class="act" data-act="again" aria-label="Try again">${ICON.again}</button>`;
+  return a;
+}
+
+function hostOf(u) { try { return new URL(u).hostname.replace(/^www\./, ""); } catch { return u; } }
+function pathOf(u) { try { const x = new URL(u); return decodeURIComponent(x.pathname + x.search).slice(0, 80); } catch { return ""; } }
+
+function aiBody(m, streaming) {
+  if (m.kind === "error") return `<div class="err">${esc(m.text)}</div>`;
+  if (m.kind === "pending") return m.status ? `<div class="status-line"><span class="spinner"></span>${esc(m.status)}</div>` : `<div class="typing"><i></i><i></i><i></i></div>`;
+  if (m.kind === "image") {
+    if (!m.url) {
+      const ar = m.ar || 1;
+      return `<div class="imgcard pending" style="--ar:${ar}"><div class="pend"><b data-elapsed="${m.started}">0s</b>${esc(m.status || "Painting on your Mac")}<br><span style="font-size:12px">${m.expect ? "usually ~" + Math.round(m.expect) + "s" : ""}</span></div><div class="bar2" data-progress="${m.started}" data-expect="${m.expect || 30}" style="width:0"></div></div>`;
+    }
+    return `<div class="imgcard"><img src="${esc(imgSrc(m.url))}" alt="${esc(m.prompt)}" data-lb="${esc(m.url)}" data-prompt="${esc(m.prompt)}" loading="lazy"></div>`;
+  }
+  if (m.kind === "verdicts") {
+    if (!m.results.length) return `<div class="body"><p>No checkable claims found in that.</p></div>`;
+    return `<div class="verdicts">` + m.results.map((r) => `<div class="verdict"><div class="v ${esc(r.verdict)}">${esc(r.verdict.replace(/_/g, " "))}</div>${esc(r.claim)}${r.note ? `<div class="note">${esc(r.note)}</div>` : ""}</div>`).join("") + `</div>`;
+  }
+  let h = "";
+  if (m.kind === "answer") {
+    h += m.grounded ? `<div style="margin-bottom:6px"><span class="badge ok">${ICON.check2} From ${m.sources.length} source${m.sources.length === 1 ? "" : "s"}</span></div>`
+                    : `<div style="margin-bottom:6px"><span class="badge warn">Sources didn't settle it</span></div>`;
+  }
+  h += `<div class="body">${markdown(m.text || "", streaming).html}</div>`;
+  if (m.kind === "answer" && m.sources?.length) {
+    h += `<div class="sources">` + m.sources.map((u, i) => `<a class="src" href="${esc(u)}" target="_blank" rel="noopener noreferrer"><span class="n">${i + 1}</span><span class="d">${esc(hostOf(u))}</span><span class="p">${esc(pathOf(u))}</span></a>`).join("") + `</div>`;
+  }
+  if (m.caveat) h += `<p class="note" style="margin:6px 0 0">${esc(m.caveat)}</p>`;
+  return h;
+}
+
+function msgHTML(m, idx, lastAi) {
+  if (m.role === "user") {
+    return `<div class="msg user" data-i="${idx}">${m.ctx ? `<div class="ctx-chip">📎 ${esc(m.ctx.title || m.ctx.url || "attached text")}</div>` : ""}<div class="bubble-user">${esc(m.text)}</div></div>`;
+  }
+  const streaming = busy && idx === current.messages.length - 1 && m.kind === "text";
+  const done = !streaming && m.kind !== "pending" && !(m.kind === "image" && !m.url);
+  return `<div class="msg ai" data-i="${idx}">${aiBody(m, streaming)}${done ? `<div class="meta">${receiptHTML(m.meta)}${actionsHTML(m, lastAi)}</div>` : ""}</div>`;
+}
+
+function emptyHTML() {
+  if (online === false) {
+    return `<div class="offline"><div class="ic">${ICON.off}</div><h2>Can't reach your Mac</h2>
+      <p>Check Tailscale is connected on this phone, and that the Mac is awake with the sidecar running.</p>
+      <button class="btn primary" style="flex:none;padding:12px 26px" id="retry">Try again</button>
+      ${convs.length ? `<p class="note" style="margin-top:22px">Your conversations are still here — open the menu.</p>` : ""}</div>`;
+  }
+  const img = engines?.images?.available;
+  const local = engines?.local?.length;
+  const tile = (mode, ic, t, s) => `<button class="tile" data-tile="${mode}"><span class="t-ic">${ic}</span><b>${t}</b><small>${s}</small></button>`;
+  const appLink = !NATIVE && /Android/i.test(navigator.userAgent) && !matchMedia("(display-mode: standalone)").matches
+    ? `<a class="app-link" href="llmsidecar://connect?url=${encodeURIComponent(location.origin)}">Use in the Android app →</a>` : "";
+  return `<div class="hero">
+    <div class="mark"><svg width="34" height="34" viewBox="0 0 24 24"><circle cx="10" cy="12" r="6" fill="#fff"/><circle cx="19.2" cy="12" r="3" fill="#fff" opacity=".75"/></svg></div>
+    <h1>${greeting()}</h1>
+    <p>Everything your Mac can reach — its own models, your Claude subscription, and the cloud — from here.</p>
+    <div class="tiles">
+      ${tile("chat", ICON.mac, "Talk privately", local ? local + " models on your Mac" : "on your Mac")}
+      ${tile("web", ICON.web, "Ask the web", "Answers with sources")}
+      ${img ? tile("image", ICON.image, "Make an image", "On your Mac's GPU") : ""}
+      ${tile("share", ICON.share, "Share anything", "Links & text from any app")}
+    </div>
+    ${appLink}
+  </div>`;
+}
+function greeting() {
+  const h = new Date().getHours();
+  return h < 5 ? "Up late?" : h < 12 ? "Good morning" : h < 18 ? "Good afternoon" : "Good evening";
+}
+
+let stickBottom = true;
+function render() {
+  // A streaming frame still queued would land after this and overwrite the
+  // finished message with its mid-stream version.
+  if (frame) { cancelAnimationFrame(frame); frame = 0; }
+  const t = $("thread");
+  if (!current || !current.messages.length) {
+    t.innerHTML = emptyHTML();
+    t.querySelector("#retry")?.addEventListener("click", () => { online = null; renderEngine(); connect(); });
+    t.querySelectorAll("[data-tile]").forEach((b) => b.onclick = () => {
+      const k = b.dataset.tile;
+      if (k === "share") return toast(NATIVE ? "Use Share → Sidecar in any app" : "Install the app (⋮ → Install), then use Share → Sidecar");
+      setMode(k); $("input").focus();
+    });
+    return;
+  }
+  const lastAi = current.messages.map((m) => m.role).lastIndexOf("assistant");
+  t.innerHTML = current.messages.map((m, i) => msgHTML(m, i, i === lastAi && !busy)).join("");
+  if (stickBottom) scrollToEnd();
+}
+// Streaming re-renders only the last message, once per frame.
+let frame = 0;
+function renderLast() {
+  if (frame) return;
+  frame = requestAnimationFrame(() => {
+    frame = 0;
+    const t = $("thread"), i = current.messages.length - 1;
+    const el = t.querySelector(`.msg[data-i="${i}"]`);
+    if (!el) return render();
+    el.outerHTML = msgHTML(current.messages[i], i, false);
+    if (stickBottom) scrollToEnd(false);
+  });
+}
+function scrollToEnd(smooth = true) {
+  const s = $("scroll");
+  s.style.scrollBehavior = smooth ? "smooth" : "auto";
+  s.scrollTop = s.scrollHeight;
+}
+$("scroll").addEventListener("scroll", () => {
+  const s = $("scroll");
+  const gap = s.scrollHeight - s.scrollTop - s.clientHeight;
+  stickBottom = gap < 80;
+  $("btn-jump").hidden = gap < 240;
+  $("top").classList.toggle("scrolled", s.scrollTop > 4);
+}, { passive: true });
+$("btn-jump").onclick = () => { stickBottom = true; scrollToEnd(); };
+
+// Ticking clocks on pending image cards.
+setInterval(() => {
+  document.querySelectorAll("[data-elapsed]").forEach((el) => {
+    el.textContent = Math.floor((Date.now() - +el.dataset.elapsed) / 1000) + "s";
+  });
+  document.querySelectorAll("[data-progress]").forEach((el) => {
+    const f = (Date.now() - +el.dataset.progress) / 1000 / +el.dataset.expect;
+    // Eases toward 95% and waits there: a bar that reaches 100% and then
+    // sits is worse than one that never claims to know exactly.
+    el.style.width = (95 * (1 - Math.exp(-2.2 * f))).toFixed(1) + "%";
+  });
+}, 500);
+
+// ── thread interactions ─────────────────────────────────────────────────────
+
+$("thread").addEventListener("click", async (ev) => {
+  const btn = ev.target.closest("button, img[data-lb]");
+  if (!btn) return;
+  if (btn.dataset.copy != null) {
+    const msgEl = btn.closest(".msg"); const m = current.messages[+msgEl.dataset.i];
+    const { blocks } = markdown(m.text || "");
+    copy(blocks[+btn.dataset.copy]?.code || ""); btn.textContent = "Copied"; setTimeout(() => btn.textContent = "Copy", 1400);
+    return;
+  }
+  if (btn.dataset.lb) return openLightbox(btn.dataset.lb, btn.dataset.prompt);
+  const act = btn.dataset.act; if (!act) return;
+  const i = +btn.closest(".msg").dataset.i; const m = current.messages[i];
+  haptic();
+  if (act === "copy") { copy(plain(m)); toast("Copied"); }
+  if (act === "share") shareMsg(m);
+  if (act === "speak") speak(plain(m));
+  if (act === "again") regenerate(i);
+});
+
+function plain(m) {
+  if (m.kind === "verdicts") return m.results.map((r) => `${r.verdict.toUpperCase()}: ${r.claim}${r.note ? " — " + r.note : ""}`).join("\n");
+  let t = (m.text || "").replace(/<think>[\s\S]*?<\/think>/, "").trim();
+  if (m.kind === "answer" && m.sources?.length) t += "\n\nSources:\n" + m.sources.map((u, i) => `${i + 1}. ${u}`).join("\n");
+  return t;
+}
+async function copy(text) {
+  try { await navigator.clipboard.writeText(text); }
+  catch { const ta = document.createElement("textarea"); ta.value = text; document.body.appendChild(ta); ta.select(); document.execCommand("copy"); ta.remove(); }
+}
+async function shareMsg(m) {
+  if (m.kind === "image") return shareImage(m.url, m.prompt);
+  const text = plain(m);
+  if (NATIVE && native({ type: "shareText", text })) return;
+  if (navigator.share) { try { await navigator.share({ text }); } catch {} return; }
+  copy(text); toast("Copied");
+}
+
+// ── speech ──────────────────────────────────────────────────────────────────
+
+function canSpeak() { return NATIVE || "speechSynthesis" in window; }
+function speak(text) {
+  const clean = text.replace(/```[\s\S]*?```/g, " (code) ").replace(/[*_#>`|]/g, "").replace(/https?:\/\/\S+/g, "");
+  if (NATIVE && native({ type: "speak", text: clean })) return;
+  try { speechSynthesis.cancel(); const u = new SpeechSynthesisUtterance(clean); speechSynthesis.speak(u); } catch {}
+}
+
+// Voice input: the Android app's recogniser if present, else Chrome's.
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+let rec = null, listening = false, voiceBase = "";
+$("btn-mic").hidden = !(NATIVE || SR);
+function setListening(on) {
+  listening = on; $("btn-mic").classList.toggle("live", on);
+  $("hint").textContent = on ? "Listening… tap the mic to stop" : hintText();
+}
+window.__sidecarVoice = (ev) => {
+  // From the native side: { text, final, error, listening }
+  if (ev.error) { setListening(false); if (ev.error !== "cancelled") toast(ev.error); return; }
+  if (ev.listening === false) setListening(false);
+  if (ev.text != null) { $("input").value = (voiceBase ? voiceBase + " " : "") + ev.text; grow(); updateSend(); }
+  if (ev.final) { setListening(false); if (ev.text && settings.autoSendVoice !== false) send(); }
+};
+$("btn-mic").onclick = () => {
+  haptic();
+  if (listening) {
+    if (NATIVE) native({ type: "stopListening" }); else rec?.stop();
+    setListening(false); return;
+  }
+  voiceBase = $("input").value.trim();
+  if (NATIVE) { native({ type: "listen" }); setListening(true); return; }
+  rec = new SR(); rec.interimResults = true; rec.lang = navigator.language || "en-GB";
+  rec.onresult = (e) => {
+    let txt = ""; for (const r of e.results) txt += r[0].transcript;
+    window.__sidecarVoice({ text: txt, final: e.results[e.results.length - 1].isFinal });
+  };
+  rec.onerror = (e) => window.__sidecarVoice({ error: e.error === "no-speech" ? "Didn't catch that" : e.error });
+  rec.onend = () => setListening(false);
+  try { rec.start(); setListening(true); } catch { toast("Microphone unavailable"); }
+};
+
+// ── composer ────────────────────────────────────────────────────────────────
+
+const coarse = matchMedia("(pointer: coarse)").matches;
+const input = $("input");
+function grow() { input.style.height = "auto"; input.style.height = Math.min(input.scrollHeight, innerHeight * 0.34) + "px"; }
+function updateSend() {
+  const b = $("btn-send");
+  if (busy) {
+    b.className = "round stop"; b.disabled = false; b.setAttribute("aria-label", "Stop");
+    b.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="3" fill="currentColor"/></svg>';
+  } else {
+    b.className = "round send"; b.disabled = !input.value.trim() && !attached; b.setAttribute("aria-label", "Send");
+    b.innerHTML = '<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>';
+  }
+}
+input.addEventListener("input", () => { grow(); updateSend(); store.set("sc.draft", input.value); });
+input.addEventListener("keydown", (e) => {
+  // On a phone, Enter is a new line and the button sends — a chat app that
+  // sends half a thought because the keyboard's return key is where your
+  // thumb was is a bad chat app. With a real keyboard, Enter sends.
+  if (e.key === "Enter" && !e.shiftKey && !coarse && !e.isComposing) { e.preventDefault(); send(); }
+});
+$("btn-send").onclick = () => busy ? stop() : send();
+input.value = store.get("sc.draft", ""); grow();
+
+function hintText() {
+  if (settings.mode === "web") return "Searches the web, reads the pages, answers with sources";
+  if (settings.mode === "image") {
+    const p = currentProfile();
+    return p ? `${p.name} · ${p.measured_s ? "~" + Math.round(p.measured_s) + "s" : ""} on your Mac's GPU` : "On your Mac's GPU";
+  }
+  const l = engineLabel();
+  return settings.engine.kind === "local" ? "Private — this conversation never leaves your Mac" : l.sub;
+}
+function setMode(mode) {
+  settings.mode = mode; saveSettings();
+  document.querySelectorAll(".mode").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.mode === mode)));
+  input.placeholder = mode === "web" ? "Ask anything current…" : mode === "image" ? "Describe an image…" : "Message";
+  $("hint").textContent = hintText();
+}
+document.querySelectorAll(".mode").forEach((b) => b.onclick = () => {
+  haptic();
+  if (b.dataset.mode === "image" && settings.mode === "image") return imageSheet();
+  setMode(b.dataset.mode);
+});
+
+// ── image options ───────────────────────────────────────────────────────────
+
+const ASPECTS = { square: [1024, 1024, "Square"], portrait: [768, 1024, "Portrait"], landscape: [1024, 768, "Landscape"], wide: [1024, 576, "Wide"] };
+function currentProfile() {
+  const ps = engines?.images?.profiles || [];
+  return ps.find((p) => p.name === settings.image.profile) || ps.find((p) => p.name === "standard") || ps[0];
+}
+function renderImageOpts() {
+  const a = ASPECTS[settings.image.aspect] || ASPECTS.square;
+  $("image-opts").textContent = settings.mode === "image" ? " · " + a[2].toLowerCase() : "";
+}
+function imageSheet() {
+  const ps = engines?.images?.profiles || [];
+  const p = currentProfile();
+  let h = `<h2>Image</h2><h3>Shape</h3><div class="seg" id="aspects">` +
+    Object.entries(ASPECTS).map(([k, v]) => `<button data-a="${k}" aria-pressed="${settings.image.aspect === k}">${v[2]}</button>`).join("") + `</div><h3>Style</h3>`;
+  for (const x of ps) {
+    if (x.gated) continue;
+    const sub = [x.measured_s ? "~" + Math.round(x.measured_s) + "s" : "", x.supports_negative ? "honours 'avoid'" : "", x.commercial_ok ? "" : "non-commercial"].filter(Boolean).join(" · ");
+    h += `<button class="opt" aria-checked="${p && p.name === x.name}" data-p="${esc(x.name)}"><span class="o-ic">${ICON.image}</span><span class="o-tx"><b>${esc(x.name)}</b><small>${esc(sub || (x.note || "").slice(0, 60))}</small></span><span class="check">${ICON.check}</span></button>`;
+  }
+  if (p?.supports_negative) h += `<h3>Keep out of the picture</h3><input class="field" id="neg" placeholder="e.g. text, watermark" value="${esc(settings.image.negative || "")}">`;
+  h += `<p class="note">Generated on your Mac and kept there. One at a time — if something else is painting, yours waits its turn.</p>`;
+  $("image-panel").innerHTML = h;
+  $("image-panel").querySelectorAll("#aspects button").forEach((b) => b.onclick = () => { settings.image.aspect = b.dataset.a; saveSettings(); renderImageOpts(); imageSheet(); haptic(); });
+  $("image-panel").querySelectorAll("[data-p]").forEach((b) => b.onclick = () => { settings.image.profile = b.dataset.p; saveSettings(); imageSheet(); $("hint").textContent = hintText(); haptic(); });
+  const neg = $("neg"); if (neg) neg.oninput = () => { settings.image.negative = neg.value; saveSettings(); };
+  openSheet("sheet-image");
+}
+
+// ── sending ─────────────────────────────────────────────────────────────────
+
+function stop() {
+  if (busy) { busy.abort.abort(); haptic("heavy"); }
+}
+
+async function send(textOverride) {
+  if (busy) return;
+  const text = (textOverride ?? input.value).trim();
+  if (!text && !attached) return;
+  if (!current) newConv();
+  const ctx = attached; attached = null; renderAttach();
+  current.messages.push({ role: "user", text: text || "Tell me about this.", ctx, mode: settings.mode });
+  if (textOverride == null) { input.value = ""; store.set("sc.draft", ""); grow(); }
+  stickBottom = true; haptic();
+  const mode = settings.mode;
+  if (mode === "web") return runAnswer(text);
+  if (mode === "image") return runImage(text);
+  return runChat();
+}
+
+function historyMessages() {
+  // Every kind of reply goes back as plain text so a follow-up can refer to
+  // a web answer or an image prompt as naturally as to a chat reply.
+  const msgs = [];
+  if (settings.system.trim()) msgs.push({ role: "system", content: settings.system.trim() });
+  for (const m of current.messages) {
+    if (m.role === "user") {
+      let c = m.text;
+      if (m.ctx) c = `${m.ctx.title ? "Title: " + m.ctx.title + "\n" : ""}${m.ctx.url ? "Source: " + m.ctx.url + "\n" : ""}\n"""\n${m.ctx.text.slice(0, 24000)}\n"""\n\n${m.text}`;
+      msgs.push({ role: "user", content: c });
+    } else if (m.kind === "text" || m.kind === "answer") {
+      if (m.text) msgs.push({ role: "assistant", content: plain(m) });
+    } else if (m.kind === "image" && m.url) {
+      msgs.push({ role: "assistant", content: `[Generated an image of: ${m.prompt}]` });
+    } else if (m.kind === "verdicts") {
+      msgs.push({ role: "assistant", content: plain(m) });
+    }
+  }
+  return msgs;
+}
+
+async function withBusy(kind, fn) {
+  const abort = new AbortController();
+  busy = { abort, kind }; updateSend();
+  try { await fn(abort.signal); }
+  catch (e) {
+    const last = current.messages[current.messages.length - 1];
+    const aborted = e.name === "AbortError";
+    if (aborted && last.kind === "text" && last.text) { last.meta = Object.assign(last.meta || {}, { stopped: true }); }
+    else {
+      const msg = aborted ? "Stopped." : offlineError(e) ? "Couldn't reach your Mac. Check Tailscale and try again." : e.message;
+      Object.assign(last, { kind: "error", text: msg });
+      if (offlineError(e)) { online = false; renderEngine(); }
+    }
+  } finally {
+    busy = null; updateSend(); render(); persistCurrent();
+    haptic();
+  }
+}
+const offlineError = (e) => e instanceof TypeError && /fetch|network|load/i.test(e.message);
+
+async function runChat() {
+  const ai = { role: "assistant", kind: "pending", text: "", meta: {} };
+  current.messages.push(ai); render();
+  const body = Object.assign({ messages: historyMessages(), stream: true, max_tokens: 4096 }, engineRequest());
+  const t0 = performance.now();
+  await withBusy("chat", async (signal) => {
+    const res = await http("/v1/chat/completions", { method: "POST", body: JSON.stringify(body), signal });
+    const reader = res.body.getReader(); const dec = new TextDecoder();
+    let buf = "";
+    ai.kind = "text";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let cut;
+      while ((cut = buf.indexOf("\n\n")) >= 0) {
+        const frameText = buf.slice(0, cut); buf = buf.slice(cut + 2);
+        for (const line of frameText.split("\n")) {
+          if (!line.startsWith("data:")) continue;
+          const data = line.slice(5).trim();
+          if (data === "[DONE]") continue;
+          let j; try { j = JSON.parse(data); } catch { continue; }
+          if (j.model) ai.meta.model = j.model;
+          const d = j.choices?.[0]?.delta?.content;
+          if (d) { ai.text += d; renderLast(); }
+          if (j.x_sidecar) { ai.meta.cost = j.x_sidecar.cost_usd; ai.meta.local = j.x_sidecar.local; ai.meta.cached = j.x_sidecar.cached; }
+        }
+      }
+    }
+    ai.meta.seconds = (performance.now() - t0) / 1000;
+    const err = ai.text.match(/\n*\[llm-sidecar error: ([\s\S]*)\]\s*$/);
+    if (err) {
+      if (ai.text.length - err[0].length < 2) { ai.kind = "error"; ai.text = err[1]; }
+      else ai.text = ai.text.slice(0, ai.text.length - err[0].length) + "\n\n> ⚠︎ Stopped early: " + err[1];
+    }
+    if (!ai.text.trim() && ai.kind === "text") { ai.kind = "error"; ai.text = "The model returned nothing. Try again, or pick another."; }
+    if (settings.speakReplies && ai.kind === "text") speak(ai.text);
+  });
+}
+
+async function runAnswer(question) {
+  const ai = { role: "assistant", kind: "pending", status: "Searching the web", meta: {} };
+  current.messages.push(ai); render();
+  const steps = ["Searching the web", "Reading the pages", "Weighing the sources", "Writing the answer"];
+  let s = 0; const tick = setInterval(() => { if (ai.kind === "pending" && s < steps.length - 1) { ai.status = steps[++s]; renderLast(); } }, 4500);
+  const t0 = performance.now();
+  try {
+    await withBusy("web", async (signal) => {
+      const a = await postJSON("/v1/answer", { question }, signal);
+      Object.assign(ai, { kind: "answer", text: a.text, grounded: a.grounded, sources: a.sources || [], caveat: a.caveat || "",
+        meta: { model: a.model, seconds: (performance.now() - t0) / 1000, local: (a.model || "").startsWith("ollama/") } });
+      if (settings.speakReplies) speak(a.text);
+    });
+  } finally { clearInterval(tick); }
+}
+
+async function runImage(prompt, seed) {
+  const p = currentProfile();
+  const [w, h] = ASPECTS[settings.image.aspect] || ASPECTS.square;
+  const q = engines?.images || {};
+  const ai = { role: "assistant", kind: "image", prompt, started: Date.now(), expect: p?.measured_s || 30, ar: w / h,
+    status: q.busy ? "Waiting for the Mac's GPU" : "Painting on your Mac", meta: {} };
+  current.messages.push(ai); render();
+  await withBusy("image", async (signal) => {
+    const body = { prompt, profile: p?.name || "standard", width: w, height: h };
+    if (seed != null) body.seed = seed;
+    if (p?.supports_negative && settings.image.negative) body.negative = settings.image.negative;
+    const r = await postJSON("/app/api/image", body, signal);
+    Object.assign(ai, { url: r.url, seed: r.seed, meta: { model: r.model, local: true, seconds: r.seconds } });
+  });
+}
+
+function regenerate(i) {
+  // Drop this reply and resend the turn that produced it.
+  const user = current.messages[i - 1];
+  if (!user || user.role !== "user") return;
+  current.messages.splice(i - 1, 2);
+  if (user.share) return shareAction(user.share.kind, user.share.s);
+  const prev = settings.mode;
+  settings.mode = user.mode || "chat";
+  attached = user.ctx || null;
+  send(user.text);
+  settings.mode = prev;
+}
+
+// ── share intake ────────────────────────────────────────────────────────────
+// From Chrome's share target (query string) or the Android app
+// (window.__sidecarShare). Either way it becomes a card with things to do.
+
+function receiveShare({ title = "", text = "", url = "" } = {}) {
+  text = (text || "").trim(); title = (title || "").trim(); url = (url || "").trim();
+  if (!url) { const m = text.match(/https?:\/\/\S+/); if (m && text.length - m[0].length < 120) { url = m[0]; text = text.replace(m[0], "").trim(); } }
+  if (!text && !url) return;
+  shared = { title, text, url };
+  if (current?.messages.length) newConv();
+  renderShare(); haptic("heavy");
+}
+window.__sidecarShare = receiveShare;
+
+function renderShare() {
+  const slot = $("share-slot");
+  if (!shared) { slot.innerHTML = ""; return; }
+  const what = shared.url ? (shared.title || hostOf(shared.url)) : shared.text.slice(0, 160);
+  slot.innerHTML = `<div class="share-card"><div class="head">${ICON.share}<span>Shared ${shared.url ? "link" : "text"}</span>
+      <button class="act" id="share-x" aria-label="Dismiss">${ICON.x}</button></div>
+    <div class="what">${esc(what)}${shared.url ? `<br><span style="font-size:12px;color:var(--muted)">${esc(hostOf(shared.url))}</span>` : ""}</div>
+    <div class="chips">
+      <button class="chip" data-s="summarise">Summarise</button>
+      <button class="chip" data-s="ask">Ask about it</button>
+      <button class="chip" data-s="factcheck">Fact-check</button>
+      <button class="chip" data-s="explain">Explain simply</button>
+      ${shared.url ? "" : `<button class="chip" data-s="reply">Draft a reply</button>`}
+    </div></div>`;
+  $("share-x").onclick = () => { shared = null; renderShare(); };
+  slot.querySelectorAll("[data-s]").forEach((b) => b.onclick = () => shareAction(b.dataset.s));
+}
+
+async function sharedText(s, signal) {
+  if (s.text && !s.url) return s.text;
+  const r = await postJSON("/ops/read-url", { url: s.url, max_chars: 24000 }, signal);
+  return (s.text ? s.text + "\n\n" : "") + r.text;
+}
+
+async function shareAction(kind, again) {
+  if (busy) return;
+  const s = again || shared; shared = null; renderShare();
+  if (!current) newConv();
+  const label = s.url ? (s.title || hostOf(s.url)) : "the shared text";
+  // Follow-ups to a shared page are questions about it, which is chat (the
+  // page travels in the history); Web mode would search afresh instead.
+  setMode("chat");
+  haptic();
+  if (kind === "ask") {
+    attached = { title: s.title, url: s.url, text: s.text };
+    if (s.url) {
+      attached.text = "";
+      attached.loading = true; renderAttach();
+      try { attached.text = await sharedText(s); attached.loading = false; }
+      catch (e) { attached = null; toast("Couldn't read that page: " + e.message); }
+    }
+    setMode("chat"); renderAttach(); input.focus(); return;
+  }
+  const verbs = { summarise: "Summarise", factcheck: "Fact-check", explain: "Explain simply", reply: "Draft a reply to" };
+  // The share is kept on the message so "try again" redoes the action,
+  // rather than sending its label as a chat message.
+  current.messages.push({ role: "user", text: `${verbs[kind]} ${s.url ? label : "this"}`, ctx: { title: s.title, url: s.url, text: s.text.slice(0, 2000) }, mode: "chat", share: { kind, s } });
+  const ai = { role: "assistant", kind: "pending", status: s.url ? "Reading the page" : "Thinking", meta: {} };
+  current.messages.push(ai); render();
+  const t0 = performance.now();
+  await withBusy("share", async (signal) => {
+    const text = await sharedText(s, signal);
+    current.messages[current.messages.length - 2].ctx.text = text;
+    if (kind === "summarise") {
+      ai.status = "Summarising"; renderLast();
+      const r = await postJSON("/ops/summarise", { text }, signal);
+      Object.assign(ai, { kind: "text", text: r.summary, meta: { seconds: (performance.now() - t0) / 1000 } });
+    } else if (kind === "factcheck") {
+      ai.status = "Finding the claims and checking each one"; renderLast();
+      const r = await postJSON("/ops/fact-check", { text }, signal);
+      Object.assign(ai, { kind: "verdicts", results: r.results || [], meta: { seconds: (performance.now() - t0) / 1000 } });
+    } else {
+      current.messages.pop(); render();
+      await runChatInner(signal);
+    }
+  });
+}
+// The chat path, reused by share actions that are just a framed prompt.
+async function runChatInner(signal) {
+  const ai = { role: "assistant", kind: "text", text: "", meta: {} };
+  current.messages.push(ai); render();
+  const body = Object.assign({ messages: historyMessages(), stream: false, max_tokens: 4096 }, engineRequest());
+  const t0 = performance.now();
+  const r = await postJSON("/v1/chat/completions", body, signal);
+  ai.text = r.choices?.[0]?.message?.content || "";
+  ai.meta = { model: r.model, cost: r.x_sidecar?.cost_usd, local: r.x_sidecar?.local, cached: r.x_sidecar?.cached, seconds: (performance.now() - t0) / 1000 };
+}
+
+function renderAttach() {
+  const slot = $("attach-slot");
+  if (!attached) { slot.innerHTML = ""; updateSend(); return; }
+  slot.innerHTML = `<div class="attached">${attached.loading ? '<span class="spinner"></span>' : "📎"}<span>${esc(attached.title || (attached.url ? hostOf(attached.url) : attached.text.slice(0, 60)))}</span><button id="attach-x" aria-label="Remove">${ICON.x}</button></div>`;
+  $("attach-x").onclick = () => { attached = null; renderAttach(); };
+  updateSend();
+}
+
+// ── images: lightbox, gallery, save ─────────────────────────────────────────
+
+let lbUrl = "", lbPrompt = "";
+function openLightbox(url, prompt) {
+  lbUrl = url; lbPrompt = prompt || "";
+  $("lb-img").src = imgSrc(url); $("lb-cap").textContent = lbPrompt;
+  $("lightbox").classList.add("open"); haptic();
+  history.pushState({ lb: 1 }, "");
+}
+function closeLightbox() { $("lightbox").classList.remove("open"); }
+$("lb-close").onclick = () => history.back();
+$("lb-save").onclick = () => saveImage(lbUrl);
+$("lb-share").onclick = () => shareImage(lbUrl, lbPrompt);
+$("lb-remix").onclick = () => {
+  history.back(); setMode("image"); if (!current) newConv();
+  current.messages.push({ role: "user", text: lbPrompt, mode: "image" });
+  runImage(lbPrompt);
+};
+async function saveImage(url) {
+  const full = new URL(imgSrc(url), location.href).href;
+  if (NATIVE && native({ type: "saveImage", url: full })) return;
+  const a = document.createElement("a"); a.href = full; a.download = url.split("/").pop(); document.body.appendChild(a); a.click(); a.remove();
+}
+async function shareImage(url, prompt) {
+  const full = new URL(imgSrc(url), location.href).href;
+  if (NATIVE && native({ type: "shareImage", url: full, text: prompt })) return;
+  try {
+    const blob = await (await fetch(full)).blob();
+    const file = new File([blob], url.split("/").pop(), { type: "image/png" });
+    if (navigator.canShare?.({ files: [file] })) return await navigator.share({ files: [file], text: prompt });
+  } catch {}
+  saveImage(url);
+}
+async function openGallery() {
+  closeSheets(); openSheet("sheet-gallery");
+  $("gallery-grid").innerHTML = ""; $("gallery-note").textContent = "Loading…";
+  try {
+    const g = await getJSON("/app/api/gallery?limit=120");
+    $("gallery-grid").innerHTML = g.images.map((x) => `<button data-lb="${esc(x.url)}" data-prompt="${esc(x.prompt)}"><img src="${esc(imgSrc(x.url))}" loading="lazy" alt="${esc(x.prompt)}"></button>`).join("");
+    $("gallery-note").textContent = g.images.length ? `${g.images.length} image${g.images.length === 1 ? "" : "s"}, stored on your Mac.` : "Nothing yet. Switch to Image and describe something.";
+    $("gallery-grid").querySelectorAll("[data-lb]").forEach((b) => b.onclick = () => openLightbox(b.dataset.lb, b.dataset.prompt));
+  } catch (e) { $("gallery-note").textContent = e.message; }
+}
+
+// ── sheets, drawer, back button ─────────────────────────────────────────────
+// Android's back gesture should close what is open before it leaves the app,
+// so every overlay pushes a history entry and popstate closes it.
+
+let openOverlay = null;
+function openSheet(id) {
+  closeSheets(true);
+  $(id).classList.add("open"); $("scrim").classList.add("open"); openOverlay = id;
+  history.pushState({ sheet: id }, "");
+}
+function closeSheets(silent) {
+  document.querySelectorAll(".sheet.open, .drawer.open").forEach((s) => s.classList.remove("open"));
+  $("scrim").classList.remove("open");
+  if (!silent && openOverlay) { openOverlay = null; if (history.state?.sheet || history.state?.drawer) history.back(); }
+  openOverlay = null;
+}
+window.addEventListener("popstate", () => {
+  if ($("lightbox").classList.contains("open")) return closeLightbox();
+  if (openOverlay) { openOverlay = null; document.querySelectorAll(".sheet.open, .drawer.open").forEach((s) => s.classList.remove("open")); $("scrim").classList.remove("open"); }
+});
+$("scrim").onclick = () => closeSheets();
+$("btn-engine").onclick = () => { haptic(); engineSheet(); openSheet("sheet-engine"); };
+$("btn-new").onclick = () => { haptic(); newConv(); input.focus(); };
+$("btn-menu").onclick = () => {
+  haptic(); renderConvList();
+  closeSheets(true); $("drawer").classList.add("open"); $("scrim").classList.add("open"); openOverlay = "drawer";
+  history.pushState({ drawer: 1 }, "");
+};
+$("d-new").onclick = () => { closeSheets(); newConv(); };
+$("d-gallery").onclick = () => openGallery();
+$("d-settings").onclick = () => { settingsSheet(); };
+
+// Swipe from the left edge opens the drawer; swipe it left to close.
+let sx = null, sy = null;
+addEventListener("touchstart", (e) => { const t = e.touches[0]; sx = t.clientX; sy = t.clientY; }, { passive: true });
+addEventListener("touchend", (e) => {
+  if (sx == null) return; const t = e.changedTouches[0]; const dx = t.clientX - sx, dy = Math.abs(t.clientY - sy);
+  if (sx < 28 && dx > 70 && dy < 60 && !openOverlay) $("btn-menu").click();
+  else if (openOverlay === "drawer" && dx < -70 && dy < 60) closeSheets();
+  sx = null;
+}, { passive: true });
+
+function renderConvList() {
+  const day = 864e5, now = Date.now();
+  const groups = [["Today", (c) => now - c.at < day], ["This week", (c) => now - c.at < 7 * day], ["Earlier", () => true]];
+  const seen = new Set(); let h = "";
+  for (const [name, test] of groups) {
+    const items = convs.filter((c) => !seen.has(c.id) && test(c));
+    if (!items.length) continue;
+    h += `<div class="grp">${name}</div>`;
+    for (const c of items) {
+      seen.add(c.id);
+      h += `<div class="conv" role="button" tabindex="0" data-c="${c.id}" aria-current="${current?.id === c.id}"><span>${esc(c.title || "Conversation")}</span><button class="del" data-del="${c.id}" aria-label="Delete">${ICON.trash}</button></div>`;
+    }
+  }
+  $("conv-list").innerHTML = h || `<p class="note" style="padding:8px 12px">Conversations are kept on this phone.</p>`;
+  $("conv-list").querySelectorAll("[data-c]").forEach((el) => el.onclick = (e) => {
+    if (e.target.closest("[data-del]")) return;
+    current = JSON.parse(JSON.stringify(convs.find((c) => c.id === el.dataset.c)));
+    stickBottom = true; closeSheets(); render();
+  });
+  $("conv-list").querySelectorAll("[data-del]").forEach((b) => b.onclick = () => {
+    convs = convs.filter((c) => c.id !== b.dataset.del); saveConvs();
+    if (current?.id === b.dataset.del) newConv(); else renderConvList();
+    haptic(); toast("Deleted");
+  });
+}
+
+function settingsSheet() {
+  const e = engines || {};
+  const host = location.hostname;
+  let h = `<h2>Settings</h2>
+    <h3>Instructions for every chat</h3>
+    <textarea class="field" id="set-system" placeholder="e.g. Be brief. I'm on my phone.">${esc(settings.system)}</textarea>
+    <h3>Auto's budget</h3>
+    <div class="seg" id="set-budget">${[["", "Default"], ["free", "Free"], ["cheap", "Cheap"], ["best", "Best"]].map(([v, l]) => `<button data-v="${v}" aria-pressed="${settings.budget === v}">${l}</button>`).join("")}</div>
+    <p class="note">What Auto may spend. Default follows the sidecar (${esc(e.budget || "free")}).</p>
+    <h3>Voice</h3>
+    <button class="opt" id="set-speak" aria-checked="${settings.speakReplies}"><span class="o-ic">${ICON.speak}</span><span class="o-tx"><b>Read replies aloud</b><small>Hands-free while you walk around</small></span><span class="check">${ICON.check}</span></button>
+    <button class="opt" id="set-autosend" aria-checked="${settings.autoSendVoice !== false}"><span class="o-ic">${ICON.check2}</span><span class="o-tx"><b>Send when I stop talking</b><small>Otherwise the text waits for you to edit</small></span><span class="check">${ICON.check}</span></button>
+    <h3>Connected to</h3>
+    <dl class="kv">
+      <dt>Mac</dt><dd class="mono">${esc(host)}</dd>
+      <dt>Sidecar</dt><dd>${e.version ? "v" + esc(e.version) : "—"}</dd>
+      <dt>Local models</dt><dd>${(e.local || []).length}</dd>
+      <dt>Claude</dt><dd>${(e.claude || []).length ? "signed in here" : "off"}</dd>
+      <dt>OpenRouter</dt><dd>${e.cloud?.configured ? "key set" : "no key"}</dd>
+      <dt>Images</dt><dd>${e.images?.available ? "available" : "not on this Mac"}</dd>
+    </dl>
+    ${/\.ts\.net$/.test(host) ? `<p class="note">${ICON.lock.replace('width="17" height="17"', 'width="13" height="13" style="display:inline;vertical-align:-2px"')} Private to your Tailscale devices. Nothing here is on the internet.</p>` : ""}
+    ${!NATIVE && /Android/i.test(navigator.userAgent) ? `<div class="row-btn"><a class="btn" style="text-align:center;text-decoration:none" href="llmsidecar://connect?url=${encodeURIComponent(location.origin)}">Use in the Android app</a></div>` : ""}
+    ${NATIVE ? `<div class="row-btn"><button class="btn" id="set-switch">Connect to a different Mac</button></div>` : ""}
+    <div class="row-btn"><button class="btn danger" id="set-clear">Delete all conversations</button></div>`;
+  $("settings-panel").innerHTML = h;
+  $("set-system").oninput = (ev) => { settings.system = ev.target.value; saveSettings(); };
+  $("settings-panel").querySelectorAll("#set-budget button").forEach((b) => b.onclick = () => { settings.budget = b.dataset.v; saveSettings(); settingsSheet(); haptic(); });
+  $("set-speak").onclick = () => { settings.speakReplies = !settings.speakReplies; saveSettings(); settingsSheet(); haptic(); };
+  $("set-autosend").onclick = () => { settings.autoSendVoice = settings.autoSendVoice === false; saveSettings(); settingsSheet(); haptic(); };
+  $("set-switch")?.addEventListener("click", () => native({ type: "reconfigure" }));
+  $("set-clear").onclick = () => {
+    if (!confirm("Delete every conversation on this phone?")) return;
+    convs = []; saveConvs(); newConv(); closeSheets(); toast("All conversations deleted");
+  };
+  if (!$("sheet-settings").classList.contains("open")) openSheet("sheet-settings");
+}
+
+// ── boot ────────────────────────────────────────────────────────────────────
+
+setMode(settings.mode);
+renderEngine();
+newConv();
+connect();
+{
+  const q = new URLSearchParams(location.search);
+  if (q.get("text") || q.get("url")) {
+    receiveShare({ title: q.get("title") || "", text: q.get("text") || "", url: q.get("url") || "" });
+    history.replaceState(null, "", location.pathname);
+  }
+}
+if ("serviceWorker" in navigator && !NATIVE) {
+  navigator.serviceWorker.register("/app/sw.js", { scope: "/app/" }).catch(() => {});
+}
+</script>
+</body>
+</html>

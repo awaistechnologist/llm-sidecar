@@ -9,3 +9,6 @@ llm_sidecar/tests
 __pycache__
 **/__pycache__
 .github
+# The Android app: a Flutter project, never part of the Python image.
+mobile
+scripts

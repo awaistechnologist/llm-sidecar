@@ -76,6 +76,24 @@ MLX_CACHE_LIMIT = 4 * GIB
 # sitting on 10-31 GiB of someone's laptop.
 IDLE_UNLOAD_S = 10 * 60
 
+# A model that takes most of the machine is dropped after a minute instead:
+# a 27 GiB Z-Image sitting idle for ten minutes is ten minutes of every other
+# app on a 36 GiB laptop being squeezed into the compressor.
+BIG_IDLE_UNLOAD_S = 60
+BIG_SHARE = 0.6  # of usable memory
+
+# Kept free beyond the profile's peak when deciding whether to start a job.
+SAFETY_GIB = 2.0
+
+# How long to wait for memory to come back after asking Ollama to unload.
+FREE_WAIT_S = 10.0
+
+# After a GPU fault, refuse image work this long. The fault is a symptom of
+# a machine already thrashing; starting the next 28 GiB job straight into it
+# is what turned a failed image into a kernel panic on 25 Nov 2026.
+FAULT_COOLDOWN_S = 60
+FAULT_FILE = CONFIG_DIR / "images.fault"
+
 
 class ImageUnavailable(ImageError):
     """mflux is not installed, or not installable on this platform."""
@@ -83,6 +101,21 @@ class ImageUnavailable(ImageError):
 
 class OutOfMemory(ImageError):
     """This machine cannot hold the profile's weights."""
+
+
+class MemoryBusy(ImageError):
+    """The machine could hold the weights, but not right now: other programs
+    are using the memory. Retry later. Distinct from OutOfMemory, which no
+    amount of waiting fixes."""
+
+    retry_after_s = 60
+
+
+class EngineFault(ImageError):
+    """The GPU failed mid-generation and the engine is restarting. Retry
+    shortly."""
+
+    retry_after_s = 30
 
 
 def available() -> bool:
@@ -291,7 +324,14 @@ class _Resident:
         self.loaded_at = 0.0
         self.last_used = 0.0
         self.load_s = 0.0
+        # Generations in flight. Expiry must never fire during one: last_used
+        # is stamped when a generation starts, so a job that runs longer than
+        # IDLE_UNLOAD_S — a 28 GiB model on a swapping 36 GiB machine does —
+        # looked idle to the next status poll, which unloaded it mid-job.
+        self.in_use = 0
+        self.peak_gib = 0.0
         self._lock = threading.RLock()
+        self._reaper: threading.Thread | None = None
 
     def unload(self) -> None:
         with self._lock:
@@ -300,14 +340,46 @@ class _Resident:
             logger.info("unloading image model %s", self.key)
             self.model = None
             self.key = None
+            self.peak_gib = 0.0
             mx = _mx()
             if mx is not None:
                 mx.clear_cache()
 
-    def expire_if_idle(self, idle_s: float = IDLE_UNLOAD_S) -> None:
+    def idle_limit(self) -> float:
+        from .. import hardware
+        usable = hardware.usable_gib()
+        if usable and self.peak_gib > usable * BIG_SHARE:
+            return BIG_IDLE_UNLOAD_S
+        return IDLE_UNLOAD_S
+
+    def expire_if_idle(self, idle_s: float | None = None) -> None:
         with self._lock:
-            if self.model is not None and (time.time() - self.last_used) > idle_s:
+            if self.in_use or self.model is None:
+                return
+            limit = self.idle_limit() if idle_s is None else idle_s
+            if (time.time() - self.last_used) > limit:
                 self.unload()
+
+    def start_reaper(self) -> None:
+        """Expire on a timer, not only when someone polls status.
+
+        Before this, expiry ran only inside status(), so a daemon whose
+        callers never polled kept the last model resident indefinitely —
+        27 GiB, in the case that crashed this machine."""
+        with self._lock:
+            if self._reaper is not None and self._reaper.is_alive():
+                return
+
+            def loop():
+                while True:
+                    time.sleep(15)
+                    try:
+                        self.expire_if_idle()
+                    except Exception:
+                        logger.debug("idle reaper failed", exc_info=True)
+
+            self._reaper = threading.Thread(target=loop, name="image-reaper", daemon=True)
+            self._reaper.start()
 
     @staticmethod
     def key_for(profile: Profile) -> str:
@@ -355,6 +427,7 @@ class _Resident:
             cap_mlx_cache(profile.peak_gib)
             self.load_s = round(time.time() - t, 2)
             self.key = key
+            self.peak_gib = profile.peak_gib
             self.loaded_at = self.last_used = time.time()
             logger.info("constructed image model %s in %.1fs", key, self.load_s)
             return self.model, self.load_s, False
@@ -567,6 +640,143 @@ def _call(model, profile: Profile, *, prompt: str, negative: str | None,
     return model.generate_image(**kwargs)
 
 
+# ── memory right now, faults, and the MLX thread ──────────────────────────
+
+
+def _mlx_held_gib() -> float:
+    """What this process's MLX already holds, which loading frees first."""
+    mx = _mx()
+    if mx is None or RESIDENT.model is None:
+        return 0.0
+    try:
+        return (mx.get_active_memory() + mx.get_cache_memory()) / GIB
+    except Exception:
+        return 0.0
+
+
+def _unload_ollama(config: Config | None) -> list[str]:
+    """Ask Ollama to drop every model it holds. Returns the names asked.
+
+    keep_alive=0 unloads once any in-flight request finishes, so a chat that
+    is mid-answer completes; the model reloads on its next use."""
+    import httpx
+
+    from .. import config as config_mod
+    from .. import hardware
+
+    cfg = config or config_mod.load()
+    names = sorted(hardware.loaded_models(cfg))
+    for name in names:
+        try:
+            httpx.post(f"{cfg.ollama_host}/api/generate",
+                       json={"model": name, "keep_alive": 0}, timeout=5.0)
+        except Exception:
+            logger.debug("could not unload %s", name, exc_info=True)
+    return names
+
+
+def ensure_memory(profile: Profile, config: Config | None = None) -> dict:
+    """Refuse to start a job the machine cannot hold *right now*.
+
+    guard() asks whether the machine could ever hold the profile. This asks
+    whether it can at this moment, with whatever else is running. They differ
+    by everything else on the laptop: zimage-negprompt passed guard() as
+    "tight" with ~33 GiB usable, then loaded 27 GiB beside a browser, Ollama
+    and Docker, and the machine panicked from memory starvation.
+
+    In order: count what this process already holds (it is freed before
+    loading), ask Ollama to unload its models if that is not enough, wait
+    briefly for the memory to come back, then refuse with MemoryBusy."""
+    from .. import hardware
+
+    if _fault_remaining() > 0:
+        raise MemoryBusy(
+            f"Recovering from a GPU fault; image generation resumes in "
+            f"{int(_fault_remaining())}s.")
+
+    held = _mlx_held_gib()
+    need = max(0.0, profile.peak_gib - held) + SAFETY_GIB
+    have = hardware.available_now_gib()
+    if have is None or have >= need:
+        return {"available_gib": have, "needed_gib": round(need, 1)}
+
+    asked = _unload_ollama(config)
+    if asked:
+        logger.info("freeing memory for %s: asked Ollama to unload %s",
+                    profile.name, ", ".join(asked))
+        deadline = time.time() + FREE_WAIT_S
+        while time.time() < deadline:
+            time.sleep(1.0)
+            have = hardware.available_now_gib() or 0.0
+            if have >= need:
+                return {"available_gib": have, "needed_gib": round(need, 1),
+                        "unloaded": asked}
+
+    fits = ", ".join(n for n in _fitting_profiles()
+                     if n != profile.name) or "none"
+    raise MemoryBusy(
+        f"Not enough free memory right now for {profile.name!r}: it needs about "
+        f"{need:.0f} GiB and {have:.0f} GiB is free. Starting it anyway is what "
+        f"makes the Mac swap and crash. Close something and retry, or use a "
+        f"lighter profile ({fits}).")
+
+
+def _fault_remaining() -> float:
+    try:
+        return max(0.0, FAULT_COOLDOWN_S - (time.time() - FAULT_FILE.stat().st_mtime))
+    except OSError:
+        return 0.0
+
+
+def is_gpu_fault(e: BaseException) -> bool:
+    """Errors after which this process's MLX state cannot be trusted."""
+    msg = str(e)
+    return ("Command buffer execution failed" in msg
+            or "kIOGPUCommandBuffer" in msg
+            or "There is no Stream(" in msg)
+
+
+def _on_fault(e: BaseException) -> None:
+    """Drop the model, start the cooldown, and restart if launchd will
+    bring us back.
+
+    A Metal command-buffer timeout leaves MLX's streams unusable, and every
+    later job in the same process failed. A fresh process is the only clean
+    state, so under the service (launchd, KeepAlive) the daemon exits a
+    moment after answering. Run by hand, it stays up and refuses images
+    until the cooldown passes."""
+    logger.error("GPU fault during image generation: %s", e)
+    try:
+        RESIDENT.unload()
+    except Exception:
+        pass
+    try:
+        FAULT_FILE.parent.mkdir(parents=True, exist_ok=True)
+        FAULT_FILE.write_text(f"{time.time()}\n{str(e)[:300]}\n", encoding="utf-8")
+    except OSError:
+        pass
+    if os.environ.get("XPC_SERVICE_NAME", "").startswith("com.llm-sidecar"):
+        logger.error("restarting the sidecar to recover the GPU (launchd restarts it)")
+        threading.Timer(2.0, os._exit, args=(75,)).start()
+
+
+# Every MLX call on one thread. MLX streams are per-thread: a model built on
+# one of the server's worker threads and then used from another fails with
+# "There is no Stream(cpu, N) in current thread". 35 image jobs failed that
+# way here before this existed.
+_MLX_EXECUTOR = None
+_MLX_EXECUTOR_LOCK = threading.Lock()
+
+
+def _on_mlx_thread(fn):
+    global _MLX_EXECUTOR
+    with _MLX_EXECUTOR_LOCK:
+        if _MLX_EXECUTOR is None:
+            from concurrent.futures import ThreadPoolExecutor
+            _MLX_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mlx")
+    return _MLX_EXECUTOR.submit(fn).result()
+
+
 def run(profile: Profile, *, prompt: str, negative: str | None, seed: int,
         width: int, height: int, steps: int, refs: list[Path],
         resolution: int | None, out: Path, config: Config | None = None) -> dict:
@@ -575,18 +785,40 @@ def run(profile: Profile, *, prompt: str, negative: str | None, seed: int,
     guard(profile)
 
     with SCHEDULER.slot(RESIDENT.key_for(profile)), MACHINE_LOCK:
-        model, load_s, warm = RESIDENT.get(profile)
-        reset_peak()
-        t = time.time()
-        image = _call(model, profile, prompt=prompt, negative=negative, seed=seed,
-                      width=width, height=height, steps=steps, refs=refs,
-                      resolution=resolution)
-        generate_s = round(time.time() - t, 2)
+        # Inside the lock: memory is measured when this job is next, not
+        # when it joined the queue behind three others.
+        ensure_memory(profile, config)
+        with RESIDENT._lock:
+            RESIDENT.in_use += 1
 
-        out.parent.mkdir(parents=True, exist_ok=True)
-        image.save(path=str(out))
-        RESIDENT.last_used = time.time()
-        retune_mlx_cache(profile)
+        def work():
+            model, load_s, warm = RESIDENT.get(profile)
+            reset_peak()
+            t = time.time()
+            image = _call(model, profile, prompt=prompt, negative=negative, seed=seed,
+                          width=width, height=height, steps=steps, refs=refs,
+                          resolution=resolution)
+            generate_s = round(time.time() - t, 2)
+            out.parent.mkdir(parents=True, exist_ok=True)
+            image.save(path=str(out))
+            retune_mlx_cache(profile)
+            return load_s, warm, generate_s
+
+        try:
+            load_s, warm, generate_s = _on_mlx_thread(work)
+        except Exception as e:
+            if is_gpu_fault(e):
+                _on_fault(e)
+                raise EngineFault(
+                    "The GPU failed during this image (usually memory pressure). "
+                    "The image engine is restarting; retry in about a minute."
+                ) from e
+            raise
+        finally:
+            with RESIDENT._lock:
+                RESIDENT.in_use -= 1
+                RESIDENT.last_used = time.time()
+        RESIDENT.start_reaper()
 
     if profile.post == "lineart":
         _lineart(out)

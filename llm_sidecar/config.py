@@ -119,6 +119,11 @@ class Config:
     # deployment, or if you'd rather not have an unauthenticated page on the
     # port at all.
     ui_enabled: bool = True
+    # Extra Host names the daemon answers to, beyond loopback, *.ts.net and
+    # the Docker host aliases. See phone.allowed_host() for why there is a
+    # list at all: a loopback port is reachable from any web page through
+    # DNS rebinding unless the Host header is checked.
+    allowed_hosts: list[str] = field(default_factory=list)
 
     # ── network ───────────────────────────────────────────────────────────
     request_timeout: float = 300.0
@@ -191,6 +196,9 @@ def _from_env() -> dict:
     if os.getenv("LLM_SIDECAR_CORS_ORIGINS"):
         out["cors_origins"] = [o.strip() for o in
                                os.environ["LLM_SIDECAR_CORS_ORIGINS"].split(",") if o.strip()]
+    if os.getenv("LLM_SIDECAR_HOSTS"):
+        out["allowed_hosts"] = [h.strip().lower() for h in
+                                os.environ["LLM_SIDECAR_HOSTS"].split(",") if h.strip()]
     if os.getenv("LLM_SIDECAR_EMBED_MODEL"):
         out["embed_model"] = os.environ["LLM_SIDECAR_EMBED_MODEL"]
     if _flag("LLM_SIDECAR_CLAUDE_CLI") is not None:

@@ -105,6 +105,47 @@ def probe() -> dict:
     return info
 
 
+def available_now_gib() -> float | None:
+    """Memory that can be handed to a new allocation right now without
+    pushing anything else into the compressor or swap.
+
+    Not probe()'s free + inactive: on macOS inactive includes app memory that
+    can only be reclaimed by compressing it, which is exactly how a 28 GiB
+    image model starved this machine into a watchdog panic. This is what
+    Activity Monitor calls the opposite of "Memory Used": total, minus wired,
+    minus app memory (anonymous pages that are not purgeable), minus what the
+    compressor already occupies. Cached files count as available, because
+    the kernel drops them without writing anything.
+
+    None where it cannot be read (not macOS, or vm_stat missing)."""
+    system = platform.system()
+    if system == "Linux":
+        return probe().get("available_ram_gib")
+    if system != "Darwin":
+        return None
+    raw = _run(["sysctl", "-n", "hw.memsize"])
+    vm = _run(["vm_stat"])
+    if not raw or not raw.isdigit() or not vm:
+        return None
+    page = 4096
+    m = re.search(r"page size of (\d+) bytes", vm)
+    if m:
+        page = int(m.group(1))
+    pages = {}
+    for line in vm.splitlines():
+        k, _, v = line.partition(":")
+        digits = re.sub(r"\D", "", v)
+        if digits:
+            pages[k.strip().strip('"')] = int(digits)
+    try:
+        used = (pages["Pages wired down"]
+                + max(0, pages["Anonymous pages"] - pages.get("Pages purgeable", 0))
+                + pages.get("Pages occupied by compressor", 0))
+    except KeyError:
+        return None
+    return round(max(0, int(raw) - used * page) / GIB, 1)
+
+
 def usable_gib(hw: dict | None = None) -> float | None:
     """Memory we can realistically give a model, after headroom.
 

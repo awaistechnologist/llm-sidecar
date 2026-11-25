@@ -41,7 +41,8 @@ from __future__ import annotations
 
 import logging
 import random
-from dataclasses import dataclass, field
+import time
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from ..config import Config
@@ -52,13 +53,14 @@ from .profiles import (  # noqa: F401  (re-exported)
     LicenceError,
     ProfileError,
 )
-from .engine import ImageUnavailable, OutOfMemory  # noqa: F401
+from .engine import EngineFault, ImageUnavailable, MemoryBusy, OutOfMemory  # noqa: F401
 
 logger = logging.getLogger("llm_sidecar.images")
 
 __all__ = [
     "generate", "ImageRequest", "ImageResult", "ImageError", "ProfileError",
-    "LicenceError", "ImageUnavailable", "OutOfMemory", "DEFAULT_PROFILE",
+    "LicenceError", "ImageUnavailable", "OutOfMemory", "MemoryBusy",
+    "EngineFault", "DEFAULT_PROFILE",
 ]
 
 MAX_SEED = 2 ** 31 - 1
@@ -110,6 +112,81 @@ class ImageResult:
     height: int = 0
 
 
+
+# How long to wait for the daemon to say it is alive. Short: this runs before
+# every generation, and a daemon that cannot answer in a second is not one we
+# want to hand a job to.
+DAEMON_PROBE_TIMEOUT = 1.0
+# How long to wait for the image itself. Generation is minutes, not seconds.
+DAEMON_REQUEST_TIMEOUT = 1800.0
+# Probe result cache. Without it a batch pays a round trip per image.
+_daemon_seen: tuple[bool, float] | None = None
+_DAEMON_TTL = 5.0
+
+
+def _daemon_base(config: Config) -> str:
+    return f"http://{config.daemon_host}:{config.daemon_port}"
+
+
+def daemon_available(config: Config) -> bool:
+    """Whether a local daemon is up and should own the model."""
+    global _daemon_seen
+    now = time.time()
+    if _daemon_seen and (now - _daemon_seen[1]) < _DAEMON_TTL:
+        return _daemon_seen[0]
+    ok = False
+    try:
+        import httpx
+        r = httpx.get(_daemon_base(config) + "/health", timeout=DAEMON_PROBE_TIMEOUT)
+        ok = r.status_code == 200
+    except Exception:
+        ok = False
+    _daemon_seen = (ok, now)
+    return ok
+
+
+# The daemon reports which exception it raised in this header, because an
+# HTTP status cannot tell a licence refusal from a bad profile name and a
+# caller caching on LicenceError should not have to parse prose.
+ERROR_HEADER = "X-Sidecar-Error"
+_ERRORS = {
+    "ImageUnavailable": ImageUnavailable,
+    "LicenceError": LicenceError,
+    "ProfileError": ProfileError,
+    "OutOfMemory": OutOfMemory,
+    "MemoryBusy": MemoryBusy,
+    "EngineFault": EngineFault,
+    "ImageError": ImageError,
+}
+
+
+def _generate_via_daemon(req: ImageRequest, config: Config) -> ImageResult:
+    """Hand the job to the daemon, which owns the model.
+
+    A refusal is re-raised as the same exception the daemon raised, and is
+    NOT retried locally: a non-commercial profile or a missing reference is
+    just as wrong in this process, and falling back would quietly defeat the
+    licence check."""
+    import httpx
+
+    headers = {}
+    if config.daemon_token:
+        headers["Authorization"] = f"Bearer {config.daemon_token}"
+
+    r = httpx.post(_daemon_base(config) + "/v1/images/generate",
+                   json=asdict(req), headers=headers,
+                   timeout=DAEMON_REQUEST_TIMEOUT)
+    if r.status_code == 200:
+        return ImageResult(**r.json())
+
+    try:
+        detail = r.json().get("detail", r.text)
+    except Exception:
+        detail = r.text
+    kind = _ERRORS.get(r.headers.get(ERROR_HEADER, ""), ImageError)
+    raise kind(str(detail))
+
+
 def _resolve_refs(paths: list[str]) -> list[Path]:
     out = []
     for p in paths:
@@ -120,8 +197,30 @@ def _resolve_refs(paths: list[str]) -> list[Path]:
     return out
 
 
-def generate(req: ImageRequest, config: Config | None = None) -> ImageResult:
-    """One image. Blocking, and serialised machine-wide by the engine lock."""
+def generate(req: ImageRequest, config: Config | None = None, *,
+             allow_daemon: bool = True) -> ImageResult:
+    """One image.
+
+    If the local daemon is running, the job goes to it and this process
+    never loads a model. That is the same arrangement every other capability
+    here already uses: inference goes to Ollama, embeddings go to Ollama,
+    and the heavy weights live in one process that owns them. Images were
+    the exception only because mflux is a library rather than a server, so
+    whichever process called it paid the ~12 GiB itself — and four MCP
+    servers each answering an image request could load four copies.
+
+    Without a daemon it still works, in-process, serialised by a
+    machine-wide file lock. That is the fallback, not the design.
+
+    `allow_daemon=False` forces the local path. The daemon's own route
+    passes it, or it would call itself."""
+    from .. import config as config_mod
+
+    config = config or config_mod.load()
+    if allow_daemon and daemon_available(config):
+        logger.debug("delegating image generation to the daemon")
+        return _generate_via_daemon(req, config)
+
     profile = profiles.get(req.profile)
     refs = _resolve_refs(req.refs)
     # Licence and reference checks come before `require()` so a caller on a
@@ -180,7 +279,17 @@ def generate(req: ImageRequest, config: Config | None = None) -> ImageResult:
     )
 
 
-def status() -> dict:
+def status(config: Config | None = None) -> dict:
     """Engine state plus the profile table — one call for a caller deciding
-    whether to bother."""
-    return {**engine.status(), "profiles": profiles.describe()}
+    whether to bother.
+
+    `delegating` says whether a generation from *this* process would be
+    handed to the daemon rather than loading a model here."""
+    from .. import config as config_mod
+
+    config = config or config_mod.load()
+    return {
+        **engine.status(),
+        "delegating_to_daemon": daemon_available(config),
+        "profiles": profiles.describe(),
+    }

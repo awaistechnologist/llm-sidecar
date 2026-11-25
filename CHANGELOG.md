@@ -13,6 +13,112 @@ aimed at whoever reported it. State what changed, what now breaks, and what
 to do instead. Anything that does not demand a change belongs in Added,
 Fixed or Changed.
 
+## [0.10.0] — 2026-11-18
+
+### Changed
+- **Image generation now goes to the daemon, so one process owns the model.**
+  Every caller — the CLI, the MCP server, the Python library, another repo —
+  posts the job to the local service and does not load a model itself.
+
+  This is what every other capability here already did. Chat and embeddings
+  go to Ollama, which owns those weights. Images were the exception only
+  because mflux is a library rather than a server, so whichever process
+  called it paid the ~12 GiB: four MCP servers each answering an image
+  request could hold four copies of the same model on one machine.
+
+  With no daemon running it still works in-process, serialised by the
+  machine-wide file lock, which is the fallback rather than the design.
+  `GET /v1/images/status` and `images.status()` report
+  `delegating_to_daemon` so a caller can tell which path it is on.
+
+  A refusal from the daemon — a non-commercial profile, a missing reference
+  — is re-raised as the same exception class and is **not** retried locally.
+  Falling back on a refusal would mean `commercial=true` is enforced only
+  when the service happens to be down.
+
+### Added
+- **The sidecar on your phone.** `llm-sidecar phone` puts the daemon on your
+  Tailscale network with `tailscale serve` — never `funnel` — on its own
+  HTTPS port, 8443, so it cannot replace anything already served on 443.
+  Only your own signed-in devices can reach it; it refuses and undoes the
+  setup if that port turns out to be on Funnel, which would make it public.
+
+  The daemon serves a phone-first app at `/app/`: chat with any engine,
+  grouped by where it runs (on the Mac, the Claude subscription, OpenRouter);
+  web answers with their sources; image generation on the Mac's GPU; links
+  and text shared from any app to summarise, ask about or fact-check; voice
+  in and replies read aloud. It installs from Chrome with a Share entry, and
+  like the dashboard it loads nothing from anywhere else.
+
+  `mobile/` is an Android app around the same page. It adds the system
+  speech recogniser, saving images to the gallery, links opening in their
+  own apps, and an offline screen that retries when you come back.
+
+### Action required
+- **You call the daemon by a name other than `localhost`, `127.0.0.1`, `::1`,
+  a `*.ts.net` name, or `host.docker.internal` / `host.containers.internal`**
+  — a LAN hostname, a custom `/etc/hosts` entry, a reverse proxy that passes
+  its own Host through. The daemon now checks the Host header and answers
+  those with a 403 whose message names the fix. Test it with
+  `curl -i http://<the-name-you-use>:4001/health`; if it is refused, add the
+  name with `LLM_SIDECAR_HOSTS=name1,name2`. A daemon bound to `0.0.0.0` does
+  not check, because binding every interface already says it is reachable by
+  any name.
+
+  The check exists because Tailscale delivers phone requests to 127.0.0.1,
+  making the Host header the only thing that tells them apart — and because
+  without it any web page could reach a loopback daemon by DNS rebinding,
+  re-pointing its own domain at 127.0.0.1.
+- **You call the Python library or the CLI with `out_dir` pointing somewhere
+  the daemon cannot write.** The job now runs in the daemon's process, so
+  the image is written by the daemon's user with the daemon's file-access
+  permissions, not yours. On macOS this bites with privacy-protected
+  folders: a service installed under launchd may have no access to
+  `~/Documents`, `~/Desktop` or `~/Downloads` even though your shell does.
+  Test it by generating one image into your real output directory with the
+  service running; if it fails where it used to work, grant the service
+  Full Disk Access or write somewhere outside those folders.
+- **You import `llm_sidecar` and relied on image generation happening in
+  your own process** — to pre-warm the engine, to read MLX memory figures
+  after a call, or to measure the engine itself. Those now describe a
+  process that never loaded a model. Pass `allow_daemon=False` to
+  `images.generate()` to force the local path. (`llm-sidecar image bench`
+  already does this, because it measures the engine.)
+
+### Fixed
+- **Image jobs could crash the whole Mac.** A profile that fits "tight"
+  (zimage-negprompt: ~28 GiB on a 36 GiB machine) was allowed to load
+  whatever else was running, with only a log warning. Beside a browser,
+  Ollama and Docker that starved macOS of memory until its watchdog
+  restarted the machine (twice, 18 and 25 Nov). Now, when a job is next
+  in the queue, the engine checks the memory free at that moment. If there
+  is not enough it asks Ollama to unload its models, and if there is still
+  not enough it refuses with `MemoryBusy`: HTTP 503 with `Retry-After`,
+  re-raised as `images.MemoryBusy` for library callers. **A pipeline that
+  treated every non-200 as fatal should retry on 503.**
+- **After a GPU timeout, the next job went into a broken engine.** A Metal
+  command-buffer timeout leaves MLX unusable in that process. The engine
+  now unloads the model, refuses image work for 60 seconds
+  (`MemoryBusy`), and, when it runs as the launchd service, exits so
+  launchd starts a clean process. The job that hit the fault gets
+  `EngineFault` (503). Other requests in flight at that moment are cut
+  off too.
+- **"There is no Stream(cpu, N) in current thread"**: 35 image jobs failed
+  with this. MLX streams belong to one thread, and the server ran each
+  request on whichever worker thread was free, so a model built on one
+  thread was later used from another. All MLX work now runs on a single
+  dedicated thread.
+- **An idle model was only unloaded when someone polled status**, so a
+  daemon nobody polled could keep 27 GiB resident indefinitely. A timer
+  now unloads it, and a model that takes more than 60% of usable memory
+  goes after 1 idle minute instead of 10.
+- The test module had 21 duplicated test definitions from a bad edit, and
+  because Python keeps the last definition of a name, the copies that ran
+  were the stale ones. One of them had no isolation from the local service,
+  so running the suite on a machine with the daemon up posted real
+  generation jobs to it and then blocked on a 1800s timeout. Deduplicated,
+  and the fixture that drives images now pins `daemon_available` to False.
+
 ## [0.9.3] — 2026-11-18
 
 ### Fixed

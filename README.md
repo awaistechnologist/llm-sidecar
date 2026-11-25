@@ -276,6 +276,7 @@ llm-sidecar sum report.md --style bullets
 llm-sidecar models                                  # local models vs your RAM
 llm-sidecar usage --days 30
 llm-sidecar searxng up                              # better search, one command
+llm-sidecar phone                                   # use it from your phone, over Tailscale
 ```
 
 ---
@@ -577,6 +578,71 @@ export LLM_SIDECAR_CORS_ORIGINS="chrome-extension://your-id,http://localhost:300
 
 `*` is accepted and logs a warning. If you use it, set `LLM_SIDECAR_TOKEN` too.
 
+## On your phone
+
+Everything the sidecar can reach — its own Ollama models, the Claude
+subscription signed in on this machine, OpenRouter — from your phone, at home
+or away, with nothing exposed to your Wi-Fi or the internet.
+
+```bash
+llm-sidecar service install   # keep the daemon running
+llm-sidecar phone             # put it on your tailnet; prints the address
+```
+
+That uses [Tailscale](https://tailscale.com): install it on this machine and
+on the phone, signed in to the same account. `llm-sidecar phone` runs
+`tailscale serve` — never `funnel`, which would make it public — on its own
+HTTPS port (8443), so it cannot replace anything you already serve on 443.
+Only devices in your tailnet can open the address. `llm-sidecar phone off`
+stops it.
+
+Open the address on the phone and you get a phone-first app at `/app/`:
+
+- **Chat** with any engine, picked by where it runs rather than by model id:
+  *on your Mac* (private, free), *Claude* (your subscription, via `claude -p`),
+  or *Cloud* (OpenRouter, by tier and budget). Every reply says which one
+  answered and what it cost.
+- **Web** — a question answered from live pages, with the sources as cards.
+- **Image** — generated on the Mac's GPU, kept on the Mac, shown on the phone,
+  saved to your gallery on request. Appears only where images are available.
+- **Share** a link or text from any app → summarise it, ask about it,
+  fact-check it, or explain it simply.
+- **Voice** in and replies read aloud, for using it while you walk around.
+
+In Chrome, **⋮ → Install app** makes it an app with a Share entry.
+[`mobile/`](mobile/) is an Android app around the same page that adds the
+system speech recogniser, saving straight to the gallery, links opening in
+their own apps, and a proper offline screen. Conversations stay on the phone;
+the sidecar keeps nothing of them.
+
+Like the dashboard it is one file with no external requests, and a test
+asserts that.
+
+### Why the daemon now checks the Host header
+
+Tailscale delivers the phone's requests to `127.0.0.1`, so they look exactly
+like requests from this machine. That is the intended boundary — your tailnet
+is your devices — but it means the only thing distinguishing a request is the
+name it was sent to.
+
+So the daemon answers only to `localhost`, `127.0.0.1`, `::1`, `*.ts.net`
+(which resolve only inside your own tailnet) and the Docker and Podman host
+aliases. That check was overdue regardless of phones. Without it, any web
+page you visit could reach a loopback daemon through **DNS rebinding** —
+re-pointing its own domain at `127.0.0.1` so its scripts become same-origin
+with a process that holds an API key and spends money on request.
+
+If you call the daemon by another name, add it:
+
+```bash
+export LLM_SIDECAR_HOSTS="mac.lan,studio.local"
+```
+
+Binding to `0.0.0.0` turns the check off, because you have then decided it is
+reachable by whatever names your network uses. Anyone in your tailnet can use
+the phone app; if you share devices in your tailnet with other people, set
+`LLM_SIDECAR_TOKEN` and the app will ask for it.
+
 ## Configuration
 
 Precedence: defaults < `~/.config/llm-sidecar/config.json` < environment <
@@ -592,6 +658,7 @@ keyword arguments to `Sidecar(...)`.
 | `SEARXNG_URL` | `http://localhost:8888` | Where to find SearXNG |
 | `LLM_SIDECAR_HOST` / `_PORT` | `127.0.0.1` / `4001` | Daemon bind |
 | `LLM_SIDECAR_TOKEN` | — | Require `Authorization: Bearer …` |
+| `LLM_SIDECAR_HOSTS` | — | Extra Host names to answer to, beyond loopback, `*.ts.net` and the Docker aliases |
 | `LLM_SIDECAR_NO_UI` | — | API only, no dashboard |
 | `LLM_SIDECAR_NO_CACHE` / `_NO_LEDGER` | — | Turn those off |
 
@@ -662,12 +729,38 @@ on every image in the subprocess callers, per-directory locks that stopped a
 repo racing itself but not two repos racing each other, and five provenance
 formats.
 
+- **One process owns the model.** If the daemon is running, every caller —
+  the CLI, the MCP server, the Python library, another repo — posts the job
+  to it and never loads a model itself. This is the arrangement the rest of
+  the sidecar already used and images did not: chat and embeddings go to
+  Ollama, which owns those weights. mflux is a library rather than a server,
+  so for a while whichever process called it paid the ~12 GiB, and four MCP
+  servers answering four image requests could hold four copies.
+
+  Without a daemon it still works in-process, serialised by the
+  machine-wide lock below. That is the fallback, not the design — and
+  `GET /v1/images/status` reports `delegating_to_daemon` so you can tell
+  which one you are on.
+
+  A refusal from the daemon — a non-commercial profile, a missing reference
+  — is **not** retried locally. It would be just as wrong here, and falling
+  back would mean the licence check only applies when the service happens
+  to be down.
 - **One model resident at a time**, swapped on demand, dropped after 10 idle
-  minutes. `draft` peaks near 31 GiB; holding two is how a 36 GiB machine
-  starts swapping.
+  minutes (1 minute for a model that takes most of the machine). `draft`
+  peaks near 31 GiB; holding two is how a 36 GiB machine starts swapping.
+- **No job starts without room for it.** When a job is next, the engine
+  checks the memory free right then, not just the machine's size. If it
+  is short, it asks Ollama to unload, then refuses with HTTP 503 and
+  `Retry-After` rather than load 28 GiB into a machine that is already
+  full. That is what crashed a 36 GiB Mac twice before this check existed.
+  Retry on 503.
+- **A GPU fault restarts the engine.** After a Metal timeout MLX is not
+  usable in that process, so image work pauses for 60 seconds and the
+  service exits for launchd to restart it.
 - **A machine-wide lock**, taken through a file so it holds across
-  processes. The daemon and a library-mode caller in another repo are not
-  the same process, and it is two repos at once that causes the problem.
+  processes. It is what makes the no-daemon path safe, and it covers the
+  case where a library-mode caller starts before the service does.
 - **Never overwrite.** The service owns naming: `<stem>_<seed>.png`, with a
   collision becoming `-2` rather than a clobber or a refusal.
 - **One manifest** beside each image, carrying the request, the model, the
@@ -853,6 +946,8 @@ an explanation rather than a stack trace.
 | `search/` | Provider dispatch, DDG, SearXNG, `read_url` |
 | `cache.py` · `ledger.py` · `hardware.py` | Cache, spend record, memory fit |
 | `daemon.py` · `mcp_server.py` · `cli.py` · `ui/` | The four doors |
+| `phone.py` · `ui/app.html` | The phone app, the Host check, `llm-sidecar phone` |
+| `mobile/` | The Android app (Flutter); not part of the Python package |
 
 The core imports nothing but `httpx`. FastAPI and `mcp` are optional extras,
 pulled in only by the doors that need them:

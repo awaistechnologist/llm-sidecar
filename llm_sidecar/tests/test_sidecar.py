@@ -10,6 +10,7 @@ live providers, but they don't belong in a suite that has to pass on a plane.
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import re
 import time
@@ -421,7 +422,7 @@ def api(cfg, monkeypatch):
             text=json.dumps(messages), model=model, usage=Usage(1, 2, 3, 0.001),
         ),
     )
-    return TestClient(daemon.create_app(cfg))
+    return TestClient(daemon.create_app(cfg), base_url="http://localhost")
 
 
 def test_unknown_model_name_is_ignored(api):
@@ -486,7 +487,7 @@ def test_token_gate(cfg, monkeypatch):
     from llm_sidecar import daemon
 
     cfg.daemon_token = "s3cret"
-    c = TestClient(daemon.create_app(cfg))
+    c = TestClient(daemon.create_app(cfg), base_url="http://localhost")
     assert c.get("/v1/models").status_code == 401
     assert c.get("/v1/models", headers={"Authorization": "Bearer wrong"}).status_code == 401
     assert c.get("/v1/models", headers={"Authorization": "Bearer s3cret"}).status_code == 200
@@ -498,7 +499,7 @@ def test_health_needs_no_token(cfg):
     from llm_sidecar import daemon
 
     cfg.daemon_token = "s3cret"
-    assert TestClient(daemon.create_app(cfg)).get("/health").status_code == 200
+    assert TestClient(daemon.create_app(cfg), base_url="http://localhost").get("/health").status_code == 200
 
 
 # ── messages ──────────────────────────────────────────────────────────────────
@@ -1121,7 +1122,7 @@ def test_dashboard_needs_no_token(cfg):
     from llm_sidecar import daemon
 
     cfg.daemon_token = "s3cret"
-    c = TestClient(daemon.create_app(cfg))
+    c = TestClient(daemon.create_app(cfg), base_url="http://localhost")
     assert c.get("/").status_code == 200
     assert c.get("/local-models").status_code == 401
     assert c.post("/config/tier", json={"tier": "fast", "model": "x"}).status_code == 401
@@ -1255,7 +1256,7 @@ def test_ui_can_be_disabled_without_touching_the_api(cfg):
     from llm_sidecar import daemon
 
     cfg.ui_enabled = False
-    c = TestClient(daemon.create_app(cfg))
+    c = TestClient(daemon.create_app(cfg), base_url="http://localhost")
     r = c.get("/")
     assert r.status_code == 404
     assert "disabled" in r.json()["detail"]
@@ -1646,7 +1647,7 @@ def test_setting_a_key_drops_stale_resolution(cfg, monkeypatch):
 
     cfg.openrouter_api_key = None
     app = daemon.create_app(cfg)
-    c = TestClient(app)
+    c = TestClient(app, base_url="http://localhost")
     c.post("/config/api-key", json={"key": "sk-or-abcd1234"})
     assert c.get("/status").json()["resolved_tiers"] == {}
 
@@ -1658,7 +1659,7 @@ def test_persist_writes_the_key_only_when_asked(cfg, tmp_path, monkeypatch):
 
     monkeypatch.setattr(config_mod, "CONFIG_DIR", tmp_path)
     monkeypatch.setattr(config_mod, "CONFIG_FILE", tmp_path / "config.json")
-    c = TestClient(daemon.create_app(cfg))
+    c = TestClient(daemon.create_app(cfg), base_url="http://localhost")
 
     c.post("/config/api-key", json={"key": "sk-or-abcd1234", "persist": False})
     assert not (tmp_path / "config.json").exists()
@@ -1904,7 +1905,7 @@ def test_preview_explains_a_keyless_free_budget(cfg, monkeypatch):
     from llm_sidecar import daemon
 
     cfg.openrouter_api_key = None
-    c = TestClient(daemon.create_app(cfg))
+    c = TestClient(daemon.create_app(cfg), base_url="http://localhost")
     r = c.get("/resolve-preview?tier=fast&budget=free").json()
 
     assert r["state"] == "unresolved"
@@ -1927,7 +1928,7 @@ def test_preview_reports_a_pin_and_says_budget_is_moot(cfg):
     from llm_sidecar import daemon
 
     cfg.models = {"fast": "ollama/pinned"}
-    c = TestClient(daemon.create_app(cfg))
+    c = TestClient(daemon.create_app(cfg), base_url="http://localhost")
     r = c.get("/resolve-preview?tier=fast&budget=best").json()
     assert r["state"] == "pinned"
     assert r["model"] == "ollama/pinned"
@@ -1940,7 +1941,7 @@ def test_preview_flags_a_paid_budget_with_no_key(cfg):
     from llm_sidecar import daemon
 
     cfg.openrouter_api_key = None
-    c = TestClient(daemon.create_app(cfg))
+    c = TestClient(daemon.create_app(cfg), base_url="http://localhost")
     r = c.get("/resolve-preview?tier=fast&budget=best").json()
     assert r["would_try"] == []
     assert "api key" in r["note"].lower()
@@ -1956,7 +1957,7 @@ def test_preview_does_not_probe(cfg, monkeypatch):
 
     from llm_sidecar import daemon
 
-    TestClient(daemon.create_app(cfg)).get("/resolve-preview?tier=fast&budget=free")
+    TestClient(daemon.create_app(cfg), base_url="http://localhost").get("/resolve-preview?tier=fast&budget=free")
 
 
 def test_dashboard_shows_key_state_as_a_badge():
@@ -2462,7 +2463,7 @@ def test_cors_is_closed_by_default(cfg):
     from llm_sidecar import daemon
 
     assert cfg.cors_origins == []
-    c = TestClient(daemon.create_app(cfg))
+    c = TestClient(daemon.create_app(cfg), base_url="http://localhost")
     r = c.get("/v1/models", headers={"Origin": "https://evil.example"})
     assert "access-control-allow-origin" not in {k.lower() for k in r.headers}
 
@@ -2473,7 +2474,7 @@ def test_cors_allows_only_named_origins(cfg):
     from llm_sidecar import daemon
 
     cfg.cors_origins = ["chrome-extension://abc123"]
-    c = TestClient(daemon.create_app(cfg))
+    c = TestClient(daemon.create_app(cfg), base_url="http://localhost")
 
     ok = c.get("/v1/models", headers={"Origin": "chrome-extension://abc123"})
     assert ok.headers.get("access-control-allow-origin") == "chrome-extension://abc123"
@@ -3896,6 +3897,14 @@ def fake_engine(monkeypatch, tmp_path):
     monkeypatch.setattr(engine, "require", lambda: None)
     monkeypatch.setattr(engine, "run", fake_run)
     monkeypatch.setattr(engine, "mflux_version", lambda: "0.24.0")
+
+    # Force the in-process path. generate() hands the job to a running
+    # daemon when it finds one, and on a developer's machine it will — the
+    # first run of this suite after that change reached the real daemon on
+    # :4001 and started generating actual images, then hung on a 1800s
+    # timeout. A test must not depend on what else is running.
+    from llm_sidecar import images as images_mod
+    monkeypatch.setattr(images_mod, "daemon_available", lambda config: False)
     return calls
 
 
@@ -4125,426 +4134,561 @@ def test_mcp_server_answers_introspection_over_stdio():
             proc.kill()
 
 
-def test_server_json_matches_the_package():
-    """server.json pins a version, and the registry listing shows whatever
-    it said at publish time. If it drifts from the package, the listing
-    advertises a version that may not exist — the same staleness that let an
-    MCP tool describe a profile renamed two releases earlier."""
-    import json
-    import pathlib
-    import re
-
-    root = pathlib.Path(__file__).resolve().parents[2]
-    sj, pp = root / "server.json", root / "pyproject.toml"
-    if not sj.exists():
-        pytest.skip("server.json not present in an installed package")
-
-    d = json.loads(sj.read_text(encoding="utf-8"))
-    pkg_version = re.search(r'^version = "([^"]+)"',
-                            pp.read_text(encoding="utf-8"), re.M).group(1)
-
-    assert d["version"] == pkg_version, "server.json version != package version"
-    pypi = [p for p in d["packages"] if p["registryType"] == "pypi"]
-    assert pypi, "server.json declares no PyPI package"
-    assert pypi[0]["identifier"] == "llm-sidecar"
-    assert pypi[0]["version"] == pkg_version
-
-    # The registry rejects anything longer, and does so only at publish time.
-    assert len(d["description"]) <= 100, len(d["description"])
-
-
-# ── the MCP surface ───────────────────────────────────────────────────────
+# ── images go to the daemon, so one process owns the model ────────────────
 #
-# These tools are what every agent touches, and an exception escaping one is
-# a bad experience for a consumer who cannot see the traceback. A failure has
-# to come back as data.
-
-# Minimal valid arguments per tool, so the test drives the real signature
-# rather than a guess at it.
-_MCP_TOOL_ARGS = {
-    "search_web": {"query": "x"},
-    "answer_question": {"question": "x"},
-    "read_url": {"url": "https://example.com"},
-    "verify_claims": {"claims": ["x"]},
-    "extract_claims": {"text": "x"},
-    "delegate": {"prompt": "x"},
-    "summarise": {"text": "x"},
-    "classify": {"items": ["x"], "labels": ["a", "b"]},
-    "extract_fields": {"text": "x", "fields": {"a": "desc"}},
-    "fact_check_document": {"text": "x"},
-    "usage_report": {},
-    "sidecar_status": {},
-    "list_image_profiles": {},
-    "generate_image": {"prompt": "x", "out_dir": "/tmp/nope"},
-    "edit_with_references": {"prompt": "x", "refs": ["/tmp/a.png"],
-                             "out_dir": "/tmp/nope"},
-    "upscale_image": {"image_path": "/tmp/a.png", "out_dir": "/tmp/nope"},
-    "whats_new": {},
-}
+# Every other capability here already works this way: inference and
+# embeddings go to Ollama, and the weights live in whichever process owns
+# them. Images were the exception only because mflux is a library, so each
+# caller paid ~12 GiB itself and four MCP servers could load four copies.
 
 
-def _mcp_tool_names():
-    import inspect
-    import re
+class _FakeResponse:
+    def __init__(self, status_code, payload=None, headers=None, text=""):
+        self.status_code = status_code
+        self._payload = payload
+        self.headers = headers or {}
+        self.text = text
 
-    from llm_sidecar import mcp_server
-    return re.findall(r"@mcp\.tool\(\)\s*\ndef (\w+)", inspect.getsource(mcp_server))
-
-
-def test_every_mcp_tool_has_arguments_in_this_test():
-    """If a tool is added, this file must learn about it — otherwise the
-    guarantees below quietly stop covering the new surface."""
-    missing = set(_mcp_tool_names()) - set(_MCP_TOOL_ARGS)
-    assert not missing, f"new MCP tool(s) not covered by these tests: {missing}"
-
-
-def test_no_mcp_tool_raises_when_everything_underneath_fails(monkeypatch):
-    """An agent calling a tool gets a result or an error dict — never a
-    traceback it cannot act on. This is the behavioural version of the
-    guarantee; reading the source for `except Exception` only proves someone
-    typed it."""
-    from llm_sidecar import changes, mcp_server
-    from llm_sidecar import images as images_mod
-
-    def boom(*a, **k):
-        raise RuntimeError("everything is on fire")
-
-    # Break every path a tool could take. Missing one here does not fail the
-    # test — it silently stops covering that tool, which is how the first
-    # version of this passed while list_image_profiles went untested.
-    from llm_sidecar.images import engine as image_engine
-    from llm_sidecar.images import profiles as image_profiles
-
-    monkeypatch.setattr(mcp_server, "sidecar", boom)
-    monkeypatch.setattr(images_mod, "generate", boom)
-    monkeypatch.setattr(changes, "since", boom)
-    monkeypatch.setattr(image_profiles, "describe", boom)
-    monkeypatch.setattr(image_engine, "available", boom)
-
-    for name in _mcp_tool_names():
-        fn = getattr(mcp_server, name)
-        try:
-            out = fn(**_MCP_TOOL_ARGS[name])
-        except Exception as e:  # noqa: BLE001 - the thing under test
-            raise AssertionError(f"{name} raised instead of returning: {e!r}")
-        assert isinstance(out, dict), f"{name} returned {type(out).__name__}"
-        assert "error" in out, f"{name} swallowed a failure without saying so"
-
-
-def test_every_mcp_tool_describes_itself():
-    """The description is what an agent reads before choosing. An empty or
-    stub one makes the tool invisible in practice."""
-    from llm_sidecar import mcp_server
-
-    for name in _mcp_tool_names():
-        doc = (getattr(mcp_server, name).__doc__ or "").strip()
-        assert len(doc) > 40, f"{name} has no usable description"
-        # Agents need to know what they get back, not just what it does.
-        assert "\n" in doc, f"{name}'s description is a single line"
-
-
-def test_changelog_degrades_honestly_when_it_cannot_be_read(monkeypatch):
-    """If the changelog is missing from a build, `whats_new` must say so
-    rather than report an empty list — "nothing changed" and "I cannot tell
-    you what changed" are different answers, and a consumer acts differently
-    on each."""
-    from llm_sidecar import changes
-
-    monkeypatch.setattr(changes, "_source", lambda: "")
-    out = changes.since("0.1.0")
-    assert out["releases"] == []
-    assert "No changelog" in out["note"], out["note"]
-    assert out["action_required"] == []
-    assert out["current"]          # the version is still known
-
-
-def test_changelog_survives_an_unreadable_file(monkeypatch, tmp_path):
-    """A permissions problem or a half-written file must not take the
-    server down — this is read on a tool call, not at startup."""
-    from llm_sidecar import changes
-
-    bad = tmp_path / "CHANGELOG.md"
-    bad.write_text("# nothing parseable here\n", encoding="utf-8")
-    monkeypatch.setattr(changes, "_CANDIDATES", (tmp_path / "missing.md", bad))
-
-    assert changes.releases() == []
-    out = changes.since()
-    assert out["releases"] == [] and "No changelog" in out["note"]
-
-    class Exploding:
-        def exists(self): return True
-        def read_text(self, **k): raise OSError("permission denied")
-
-    monkeypatch.setattr(changes, "_CANDIDATES", (Exploding(),))
-    assert changes.releases() == []          # must not raise
-
-
-def test_changelog_parsing_is_robust_to_formatting(monkeypatch):
-    """The changelog is hand-written prose. Parsing must not depend on it
-    being perfectly uniform, or a stray edit stops consumers being told
-    anything."""
-    from llm_sidecar import changes
-
-    text = """# Changelog
-
-## [2.0.0] — 2026-01-01
-
-### Breaking
-- the `old_thing` parameter is gone
-
-### Added
-* a bullet with an asterisk
-- **bold** and `code` should be stripped
-
-## [1.0.0] - 2025-01-01
-
-### Fixed
-- something
-"""
-    monkeypatch.setattr(changes, "_source", lambda: text)
-    rels = changes.releases()
-    assert [r["version"] for r in rels] == ["2.0.0", "1.0.0"]
-    # Both bullet styles, and an em dash or a hyphen in the heading.
-    assert len(rels[0]["sections"]["Added"]) == 2
-    assert "bold and code should be stripped" in rels[0]["sections"]["Added"][1]
-    # "Breaking" counts as action required, not just a section named exactly
-    # "Action required".
-    assert rels[0]["action_required"] == ["the old_thing parameter is gone"]
-
-    out = changes.since("1.0.0")
-    assert [r["version"] for r in out["releases"]] == ["2.0.0"]
-    assert out["behind_by"] == 1
-    assert len(out["action_required"]) == 1
-
-
-def test_since_handles_a_version_ahead_of_the_changelog(monkeypatch):
-    """A consumer pinned to something newer than we know about — a local
-    build, say — must not get a wall of history it has already seen."""
-    from llm_sidecar import changes
-
-    assert changes.since("999.0.0")["releases"] == []
-
-
-# ── the image path every consumer takes ───────────────────────────────────
+    def json(self):
+        if self._payload is None:
+            raise ValueError("not json")
+        return self._payload
 
 
 @pytest.fixture
-def fake_engine(monkeypatch, tmp_path):
-    """images.generate with the model swapped out, so the orchestration
-    around it — licences, digests, naming, manifests — can be tested on a
-    machine with no mflux, which includes all of CI."""
-    from llm_sidecar.images import engine
+def no_probe(monkeypatch):
+    """Stop the probe cache leaking between tests.
 
-    calls = []
-
-    def fake_run(profile, *, out, **kw):
-        calls.append({"profile": profile.name, "out": out, **kw})
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_bytes(b"\x89PNG fake")
-        return {"load_s": 0.0, "generate_s": 1.5, "warm": True, "path": str(out)}
-
-    monkeypatch.setattr(engine, "require", lambda: None)
-    monkeypatch.setattr(engine, "run", fake_run)
-    monkeypatch.setattr(engine, "mflux_version", lambda: "0.24.0")
-    return calls
-
-
-def test_generate_writes_image_and_manifest_together(fake_engine, tmp_path):
+    daemon_available() memoises for 5 seconds, which is right in production
+    and wrong here: one test that lets a real probe through would decide the
+    next one's answer."""
     from llm_sidecar import images as im
+    monkeypatch.setattr(im, "_daemon_seen", None, raising=False)
+    yield
+    monkeypatch.setattr(im, "_daemon_seen", None, raising=False)
+
+
+def test_generate_delegates_to_the_daemon_when_one_is_running(
+        fake_engine, monkeypatch, tmp_path):
+    """The whole point. With a daemon up, this process must not load a
+    model — it must post the job and return what comes back."""
+    import httpx
+
+    from llm_sidecar import images as im
+
+    monkeypatch.setattr(im, "daemon_available", lambda config: True)
+    posted = {}
+
+    def fake_post(url, **kw):
+        posted["url"] = url
+        posted["json"] = kw.get("json")
+        posted["timeout"] = kw.get("timeout")
+        return _FakeResponse(200, {
+            "path": str(tmp_path / "from_daemon_7.png"),
+            "manifest_path": str(tmp_path / "from_daemon_7.png.json"),
+            "profile": "standard", "model": "klein-4b", "seed": 7,
+            "digest": "abc", "seconds": 23.4, "warm": True,
+            "skipped": False, "width": 1024, "height": 1024,
+        })
+
+    monkeypatch.setattr(httpx, "post", fake_post)
 
     r = im.generate(im.ImageRequest(prompt="an apple", out_dir=str(tmp_path),
                                     stem="shot", seed=7, project="demo"))
 
-    assert r.path.endswith("shot_7.png")
-    assert pathlib.Path(r.path).exists()
-    m = json.loads(pathlib.Path(r.manifest_path).read_text(encoding="utf-8"))
-    # Provenance has to travel with the image, not live in an index.
-    assert m["digest"] == r.digest
-    assert m["request"]["project"] == "demo"
-    assert m["mflux_version"] == "0.24.0"
-    assert m["licence"] and m["model_id"]
-
-
-def test_generate_refuses_a_non_commercial_profile_before_loading_anything(
-        fake_engine, tmp_path):
-    """The licence check must come before the model does — refusing after a
-    10 GiB load wastes a minute to say no."""
-    from llm_sidecar import images as im
-
-    with pytest.raises(im.LicenceError):
-        im.generate(im.ImageRequest(prompt="x", profile="cinematic",
-                                    out_dir=str(tmp_path), commercial=True))
-    assert fake_engine == [], "the engine was asked to run a refused profile"
-
-
-def test_generate_skips_an_identical_request(fake_engine, tmp_path):
-    from llm_sidecar import images as im
-
-    req = im.ImageRequest(prompt="an apple", out_dir=str(tmp_path),
-                          stem="shot", seed=7)
-    first = im.generate(req)
-    assert first.skipped is False
-
-    second = im.generate(req)
-    assert second.skipped is True
-    assert second.seconds == 0.0
-    assert second.path == first.path
-    assert len(fake_engine) == 1, "a skipped request still ran the model"
-
-
-def test_generate_does_not_skip_when_the_request_differs(fake_engine, tmp_path):
-    """Changing anything that changes the pixels must defeat the skip —
-    resolution was missing from the digest and a stale upscale survived."""
-    from llm_sidecar import images as im
-
-    base = dict(out_dir=str(tmp_path), stem="shot", seed=7)
-    im.generate(im.ImageRequest(prompt="an apple", **base))
-
-    for change in (
-        {"prompt": "a pear"},
-        {"prompt": "an apple", "width": 512},
-        {"prompt": "an apple", "steps": 9},
-        {"prompt": "an apple", "resolution": 1500},
-    ):
-        before = len(fake_engine)
-        r = im.generate(im.ImageRequest(**{**base, **change}))
-        assert r.skipped is False, f"wrongly skipped after {change}"
-        assert len(fake_engine) == before + 1
-
-
-def test_generate_honours_an_exact_filename(fake_engine, tmp_path):
-    from llm_sidecar import images as im
-
-    r = im.generate(im.ImageRequest(prompt="x", out_dir=str(tmp_path),
-                                    stem="ignored", filename="S001.png", seed=1))
-    assert pathlib.Path(r.path).name == "S001.png"
-    assert pathlib.Path(str(r.path) + ".json").exists()
-
-
-def test_generate_rejects_a_missing_reference(fake_engine, tmp_path):
-    """A typo'd reference path must fail immediately, not after a model
-    load, and must say which file."""
-    from llm_sidecar import images as im
-
-    with pytest.raises(im.ProfileError) as e:
-        im.generate(im.ImageRequest(prompt="x", profile="characters-consistent",
-                                    refs=[str(tmp_path / "nope.png")],
-                                    out_dir=str(tmp_path)))
-    assert "nope.png" in str(e.value)
+    assert r.path.endswith("from_daemon_7.png")
+    assert r.seconds == 23.4
+    # The local engine was never touched: no model loaded in this process.
     assert fake_engine == []
+    assert posted["url"].endswith("/v1/images/generate")
+    assert posted["json"]["prompt"] == "an apple"
+    # Generation is minutes. A default client timeout would abandon a job
+    # the daemon then finishes, leaving an image nobody collected.
+    assert posted["timeout"] == im.DAEMON_REQUEST_TIMEOUT
 
 
-def test_generate_passes_the_profile_defaults_through(fake_engine, tmp_path):
-    """A caller who specifies nothing gets the profile's own size and steps,
-    and the engine is told the same numbers that go in the manifest."""
+def test_a_daemon_refusal_is_not_retried_locally(
+        fake_engine, monkeypatch, tmp_path):
+    """A licence refusal must not be laundered by a local retry.
+
+    Falling back on refusal would mean `commercial=true` is enforced only
+    when a daemon happens to be down, which is worse than not enforcing it:
+    it would pass in CI and fail in production, or the reverse."""
+    import httpx
+
     from llm_sidecar import images as im
-    from llm_sidecar.images import profiles as pf
 
-    r = im.generate(im.ImageRequest(prompt="x", out_dir=str(tmp_path), seed=3))
-    default = pf.get(pf.DEFAULT_PROFILE)
-    assert (r.width, r.height) == (default.width, default.height)
-    assert fake_engine[0]["steps"] == default.steps
-    assert fake_engine[0]["width"] == default.width
+    monkeypatch.setattr(im, "daemon_available", lambda config: True)
+    monkeypatch.setattr(httpx, "post", lambda url, **kw: _FakeResponse(
+        403, {"detail": "refused by the daemon"},
+        headers={im.ERROR_HEADER: "LicenceError"}))
 
-
-def test_listing_metadata_files_are_valid_and_consistent():
-    """server.json and glama.json are read by directories, not by us, so a
-    syntax error or a wrong username is invisible here and breaks a listing
-    nobody thinks to re-check."""
-    root = pathlib.Path(__file__).resolve().parents[2]
-    if not (root / "server.json").exists():
-        pytest.skip("not a source checkout")
-
-    glama = root / "glama.json"
-    assert glama.exists(), "glama.json is how the Glama listing is claimed"
-    g = json.loads(glama.read_text(encoding="utf-8"))
-    assert g["$schema"] == "https://glama.ai/mcp/schemas/server.json"
-    assert isinstance(g["maintainers"], list) and g["maintainers"]
-
-    # The GitHub owner appears in three places; they must agree, or one of
-    # the listings points somewhere else.
-    owner = g["maintainers"][0]
-    srv = json.loads((root / "server.json").read_text(encoding="utf-8"))
-    assert srv["name"] == f"io.github.{owner}/llm-sidecar"
-    assert owner in srv["repository"]["url"]
+    # `standard` deliberately: it is commercial-safe, so the local path
+    # would have SUCCEEDED here. An earlier version of this test used
+    # `cinematic`, which the local licence check refuses too — so it passed
+    # whether or not the refusal was retried, and proved nothing.
+    with pytest.raises(im.LicenceError) as e:
+        im.generate(im.ImageRequest(prompt="x", out_dir=str(tmp_path),
+                                    stem="s", profile="standard",
+                                    project="demo"))
+    assert "refused by the daemon" in str(e.value)
+    assert fake_engine == []
+    assert list(tmp_path.glob("*.png")) == []
 
 
-def test_readme_lists_every_mcp_tool():
-    """The README's tool list is what a person reads before installing, and
-    it had drifted to 12 tools when there were 17 — the image tools and
-    whats_new were missing. A reader cannot tell a short list from a
-    complete one."""
-    import asyncio
-    import pathlib
+def test_a_refusal_keeps_its_exception_type_across_the_wire(
+        fake_engine, monkeypatch, tmp_path):
+    """An HTTP status cannot tell a licence refusal from a bad profile name,
+    and a caller branching on the type should not have to parse prose."""
+    import httpx
 
-    from llm_sidecar.mcp_server import mcp
+    from llm_sidecar import images as im
 
-    readme = pathlib.Path(__file__).resolve().parents[2] / "README.md"
-    if not readme.exists():
-        pytest.skip("README not present in an installed package")
-    text = readme.read_text(encoding="utf-8")
-
-    tools = asyncio.run(mcp.list_tools())
-    missing = [t.name for t in tools if f"`{t.name}`" not in text]
-    assert not missing, f"README does not mention: {missing}"
-    assert f"**{len(tools)} tools**" in text, \
-        f"README's tool count is stale; there are {len(tools)}"
+    monkeypatch.setattr(im, "daemon_available", lambda config: True)
+    for name, kind in (("ProfileError", im.ProfileError),
+                       ("OutOfMemory", im.OutOfMemory),
+                       ("ImageUnavailable", im.ImageUnavailable)):
+        monkeypatch.setattr(httpx, "post", lambda url, _n=name, **kw:
+                            _FakeResponse(400, {"detail": "nope"},
+                                          headers={im.ERROR_HEADER: _n}))
+        with pytest.raises(kind):
+            im.generate(im.ImageRequest(prompt="x", out_dir=str(tmp_path),
+                                        stem="s", project="demo"))
 
 
-def test_readme_mcp_config_has_no_placeholder():
-    """A config block with /path/to/... in it cannot be copy-pasted by a
-    person or used by a directory scraping for a runnable command."""
-    import pathlib
+def test_an_unlabelled_failure_is_still_an_ImageError(
+        fake_engine, monkeypatch, tmp_path):
+    """A proxy, a 502 or an older daemon sends no header and no JSON. That
+    must raise the base type, not AttributeError."""
+    import httpx
 
-    readme = pathlib.Path(__file__).resolve().parents[2] / "README.md"
-    if not readme.exists():
-        pytest.skip("README not present in an installed package")
-    text = readme.read_text(encoding="utf-8")
+    from llm_sidecar import images as im
 
-    assert "/path/to/" not in text, "README still contains a placeholder path"
-    # Both documented launch paths must name the real console script.
-    assert '"command": "llm-sidecar-mcp"' in text
-    assert '"llm-sidecar", "llm-sidecar-mcp"' in text
+    monkeypatch.setattr(im, "daemon_available", lambda config: True)
+    monkeypatch.setattr(httpx, "post", lambda url, **kw: _FakeResponse(
+        502, None, text="<html>bad gateway</html>"))
+
+    with pytest.raises(im.ImageError) as e:
+        im.generate(im.ImageRequest(prompt="x", out_dir=str(tmp_path),
+                                    stem="s", project="demo"))
+    assert "bad gateway" in str(e.value)
 
 
-def test_mcp_server_answers_introspection_over_stdio():
-    """A directory listing the server starts it and asks for its tools —
-    that is all Glama's checks require, and it is what a Dockerfile in this
-    repo exists to let them do.
+def test_allow_daemon_false_runs_locally_even_with_a_daemon_up(
+        fake_engine, monkeypatch, tmp_path):
+    """The daemon's own route and `image bench` pass this. Without it the
+    daemon would post the job to itself and deadlock on its own queue."""
+    from llm_sidecar import images as im
 
-    Driven as a real client would: write, read, write, read. Piping every
-    message at once and closing stdin looks like a failure because the
-    server sees EOF before it handles the later messages, which briefly had
-    me debugging a server that was working correctly."""
-    import json
-    import subprocess
-    import sys
+    monkeypatch.setattr(im, "daemon_available", lambda config: True)
 
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "llm_sidecar.mcp_server"],
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL, text=True, bufsize=1,
-    )
-    try:
-        def send(obj):
-            proc.stdin.write(json.dumps(obj) + "\n")
-            proc.stdin.flush()
+    r = im.generate(im.ImageRequest(prompt="an apple", out_dir=str(tmp_path),
+                                    stem="shot", seed=7, project="demo"),
+                    allow_daemon=False)
 
-        send({"jsonrpc": "2.0", "id": 1, "method": "initialize",
-              "params": {"protocolVersion": "2024-11-05", "capabilities": {},
-                         "clientInfo": {"name": "test", "version": "1"}}})
-        init = json.loads(proc.stdout.readline())
-        assert "result" in init, init
+    assert os.path.exists(r.path)
+    assert len(fake_engine) == 1
 
-        send({"jsonrpc": "2.0", "method": "notifications/initialized"})
-        send({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
-        listed = json.loads(proc.stdout.readline())
 
-        assert listed.get("id") == 2, listed
-        names = [t["name"] for t in listed["result"]["tools"]]
-        assert len(names) >= 17, f"only {len(names)} tools over stdio"
-        # No model, no key, no network needed to answer this.
-        assert "whats_new" in names and "search_web" in names
-    finally:
-        proc.terminate()
-        proc.wait(timeout=10)
+def test_the_daemons_image_route_does_not_call_itself(api, monkeypatch, tmp_path):
+    """Checked at the route, because a self-call is invisible until a real
+    request hangs: the daemon would POST to itself, wait on the queue slot
+    it is already holding, and time out after 1800s."""
+    from llm_sidecar import images as im
+
+    seen = {}
+
+    def spy(req, config=None, *, allow_daemon=True):
+        seen["allow_daemon"] = allow_daemon
+        return im.ImageResult(
+            path=str(tmp_path / "a_1.png"),
+            manifest_path=str(tmp_path / "a_1.png.json"),
+            profile="standard", model="klein-4b", seed=1, digest="d",
+            seconds=1.0, warm=True)
+
+    monkeypatch.setattr(im, "generate", spy)
+
+    r = api.post("/v1/images/generate",
+                    json={"prompt": "an apple", "out_dir": str(tmp_path),
+                          "stem": "a", "project": "demo"})
+    assert r.status_code == 200, r.text
+    assert seen["allow_daemon"] is False
+
+
+def test_the_daemon_labels_the_error_type_it_refused_with(
+        api, monkeypatch, tmp_path):
+    """The other half of the type-preservation above: the header has to be
+    set, or every refusal arrives as a bare ImageError."""
+    from llm_sidecar import images as im
+
+    def boom(req, config=None, *, allow_daemon=True):
+        raise im.LicenceError("cinematic is non-commercial")
+
+    monkeypatch.setattr(im, "generate", boom)
+
+    r = api.post("/v1/images/generate",
+                    json={"prompt": "x", "out_dir": str(tmp_path),
+                          "stem": "a", "profile": "cinematic",
+                          "project": "demo"})
+    assert r.status_code >= 400
+    assert r.headers.get(im.ERROR_HEADER) == "LicenceError"
+
+
+def test_the_probe_is_cheap_and_cached(no_probe, monkeypatch):
+    """One round trip per image would be paid on every generation in a
+    batch, and the probe has to be short: a daemon that cannot answer in a
+    second is not one to hand a 20-minute job to."""
+    import httpx
+
+    from llm_sidecar import config as config_mod
+    from llm_sidecar import images as im
+
+    gets = []
+
+    def fake_get(url, **kw):
+        gets.append(kw.get("timeout"))
+        return _FakeResponse(200, {})
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+    config = config_mod.load()
+
+    assert im.daemon_available(config) is True
+    assert im.daemon_available(config) is True
+    assert len(gets) == 1, "the probe should be cached within its TTL"
+    assert gets[0] == im.DAEMON_PROBE_TIMEOUT
+
+
+def test_a_dead_daemon_is_not_an_error(no_probe, monkeypatch):
+    """Falling back in-process is the whole reason the local path still
+    exists. A refused connection must read as 'no daemon', not as a
+    failure."""
+    import httpx
+
+    from llm_sidecar import config as config_mod
+    from llm_sidecar import images as im
+
+    def refuse(url, **kw):
+        raise httpx.ConnectError("nope")
+
+    monkeypatch.setattr(httpx, "get", refuse)
+    assert im.daemon_available(config_mod.load()) is False
+
+
+def test_status_says_whether_it_is_delegating(monkeypatch):
+    """A consumer debugging memory use needs to know which process is about
+    to load 12 GiB."""
+    from llm_sidecar import images as im
+
+    monkeypatch.setattr(im, "daemon_available", lambda config: True)
+    assert im.status()["delegating_to_daemon"] is True
+    monkeypatch.setattr(im, "daemon_available", lambda config: False)
+    assert im.status()["delegating_to_daemon"] is False
+
+
+def test_a_long_generation_is_not_unloaded_by_a_status_poll(monkeypatch, tmp_path):
+    """Found in production: a 28 GiB model on a swapping 36 GiB machine took
+    longer than the 10-minute idle timeout to generate one image. last_used
+    was stamped when the job started, so the next status poll — consumers
+    poll constantly — judged it idle and unloaded it mid-generation."""
+    from llm_sidecar.images import engine, profiles
+
+    R = engine._Resident()
+    monkeypatch.setattr(engine, "RESIDENT", R)
+    monkeypatch.setattr(engine, "require", lambda: None)
+    monkeypatch.setattr(engine, "guard", lambda p: None)
+    monkeypatch.setattr(engine, "ensure_memory", lambda p, c=None: {})
+    monkeypatch.setattr(engine, "reset_peak", lambda: None)
+    monkeypatch.setattr(engine, "retune_mlx_cache", lambda p: None)
+    # The real lock is machine-wide (a file lock): on a machine whose daemon
+    # is generating, this test would wait for that job to finish.
+    import contextlib
+    monkeypatch.setattr(engine, "MACHINE_LOCK", contextlib.nullcontext())
+
+    def fake_get(profile):
+        R.model, R.key = object(), R.key_for(profile)
+        R.last_used = 0.0           # "started" a very long time ago
+        return R.model, 0.0, False
+
+    monkeypatch.setattr(R, "get", fake_get)
+    seen = {}
+
+    class Img:
+        def save(self, path):
+            pathlib.Path(path).write_bytes(b"png")
+
+    def slow_call(model, profile, **kw):
+        # A status poll arriving mid-generation, long past the idle timeout.
+        R.expire_if_idle(idle_s=0)
+        seen["still_loaded"] = R.model is not None
+        return Img()
+
+    monkeypatch.setattr(engine, "_call", slow_call)
+    engine.run(profiles.get("standard"), prompt="x", negative=None, seed=1, width=64,
+               height=64, steps=1, refs=[], resolution=None, out=tmp_path / "a.png")
+
+    assert seen["still_loaded"], "the model was unloaded during its own generation"
+    assert R.in_use == 0
+    # Once the job is over, idle expiry works as before.
+    R.last_used = 0.0
+    R.expire_if_idle(idle_s=0)
+    assert R.model is None
+
+
+# ── memory right now, GPU faults, the MLX thread (crash fixes, 0.10.0) ─────
+
+
+VM_STAT = """Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                                   100000.
+Pages active:                                 800000.
+Pages inactive:                               500000.
+Pages wired down:                             200000.
+Pages purgeable:                               50000.
+"Translation faults":                        8017509.
+Anonymous pages:                              850000.
+Pages occupied by compressor:                 100000.
+"""
+
+
+def test_available_now_counts_app_memory_and_the_compressor_as_used(monkeypatch):
+    """free + inactive (what probe() reports) overstates what a new 28 GiB
+    allocation can have: inactive app memory is only reclaimed by
+    compressing it. 36 GiB - (wired + anon - purgeable + compressor)."""
+    from llm_sidecar import hardware
+
+    monkeypatch.setattr(hardware.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(hardware, "_run", lambda cmd: {
+        "sysctl": str(36 * 2 ** 30), "vm_stat": VM_STAT}[cmd[0]])
+    used = (200000 + 850000 - 50000 + 100000) * 16384 / 2 ** 30
+    assert hardware.available_now_gib() == round(36 - used, 1)
+
+
+def test_available_now_is_unknown_when_vm_stat_is_missing(monkeypatch):
+    from llm_sidecar import hardware
+
+    monkeypatch.setattr(hardware.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(hardware, "_run", lambda cmd: None)
+    assert hardware.available_now_gib() is None
+
+
+@pytest.fixture
+def memory(monkeypatch, tmp_path):
+    """Control free memory, Ollama, and the fault file for ensure_memory."""
+    from llm_sidecar import hardware
+    from llm_sidecar.images import engine
+
+    state = {"free": 40.0, "after_unload": None, "asked": []}
+    monkeypatch.setattr(hardware, "available_now_gib", lambda: state["free"])
+
+    def unload(config):
+        state["asked"].append(True)
+        if state["after_unload"] is not None:
+            state["free"] = state["after_unload"]
+        return ["qwen3:30b"] if state["after_unload"] is not None else []
+
+    monkeypatch.setattr(engine, "_unload_ollama", unload)
+    monkeypatch.setattr(engine, "FREE_WAIT_S", 0.05)
+    monkeypatch.setattr(engine.time, "sleep", lambda s: None)
+    monkeypatch.setattr(engine, "FAULT_FILE", tmp_path / "images.fault")
+    monkeypatch.setattr(engine, "_mlx_held_gib", lambda: 0.0)
+    return state
+
+
+def test_a_job_starts_when_there_is_room(memory):
+    from llm_sidecar.images import engine, profiles
+
+    out = engine.ensure_memory(profiles.get("zimage-negprompt"))
+    assert out["needed_gib"] == 30.0
+    assert memory["asked"] == [], "Ollama was unloaded when nothing needed it"
+
+
+def test_a_job_is_refused_rather_than_starting_into_swap(memory):
+    """The crash on 25 Nov 2026: 27 GiB loaded with ~22 GiB actually free."""
+    from llm_sidecar.images import engine, profiles
+
+    memory["free"] = 22.0
+    with pytest.raises(engine.MemoryBusy) as e:
+        engine.ensure_memory(profiles.get("zimage-negprompt"))
+    assert "22 GiB is free" in str(e.value)
+    assert "standard" in str(e.value), "should point at a lighter profile"
+    assert memory["asked"], "should have tried unloading Ollama first"
+
+
+def test_unloading_ollama_can_make_room(memory):
+    from llm_sidecar.images import engine, profiles
+
+    memory["free"], memory["after_unload"] = 22.0, 31.0
+    out = engine.ensure_memory(profiles.get("zimage-negprompt"))
+    assert out["unloaded"] == ["qwen3:30b"]
+
+
+def test_memory_the_engine_already_holds_counts_as_available(memory, monkeypatch):
+    """The resident model is dropped before the next one loads, so a warm
+    z-image asking for another z-image needs almost nothing new."""
+    from llm_sidecar.images import engine, profiles
+
+    memory["free"] = 4.0
+    monkeypatch.setattr(engine, "_mlx_held_gib", lambda: 27.0)
+    engine.ensure_memory(profiles.get("zimage-negprompt"))
+
+
+def test_unknown_memory_does_not_block(memory):
+    """Linux CI and odd machines: no reading means no refusal."""
+    from llm_sidecar.images import engine, profiles
+
+    memory["free"] = None
+    engine.ensure_memory(profiles.get("zimage-negprompt"))
+
+
+@pytest.mark.parametrize("msg,fault", [
+    ("[METAL] Command buffer execution failed: Caused GPU Timeout Error "
+     "(00000002:kIOGPUCommandBufferCallbackErrorTimeout).", True),
+    ("There is no Stream(cpu, 0) in current thread.", True),
+    ("prompt too long", False),
+])
+def test_gpu_faults_are_recognised(msg, fault):
+    from llm_sidecar.images import engine
+
+    assert engine.is_gpu_fault(RuntimeError(msg)) is fault
+
+
+def _fake_run_env(monkeypatch, call):
+    import contextlib
+
+    from llm_sidecar.images import engine
+
+    R = engine._Resident()
+    monkeypatch.setattr(engine, "RESIDENT", R)
+    monkeypatch.setattr(engine, "require", lambda: None)
+    monkeypatch.setattr(engine, "guard", lambda p: None)
+    monkeypatch.setattr(engine, "reset_peak", lambda: None)
+    monkeypatch.setattr(engine, "retune_mlx_cache", lambda p: None)
+    monkeypatch.setattr(engine, "MACHINE_LOCK", contextlib.nullcontext())
+    monkeypatch.setattr(R, "start_reaper", lambda: None)
+
+    def fake_get(profile):
+        R.model, R.key = object(), R.key_for(profile)
+        return R.model, 0.0, False
+
+    monkeypatch.setattr(R, "get", fake_get)
+    monkeypatch.setattr(engine, "_call", call)
+    return R
+
+
+def _run_once(tmp_path):
+    from llm_sidecar.images import engine, profiles
+
+    return engine.run(profiles.get("standard"), prompt="x", negative=None, seed=1,
+                      width=64, height=64, steps=1, refs=[], resolution=None,
+                      out=tmp_path / "a.png")
+
+
+def test_a_gpu_fault_unloads_cools_down_and_restarts_under_launchd(
+        memory, monkeypatch, tmp_path):
+    """Before: after one GPU timeout the next 28 GiB job went straight into
+    the broken engine, failed, and the machine panicked."""
+    from llm_sidecar.images import engine
+
+    def timeout(model, profile, **kw):
+        raise RuntimeError("[METAL] Command buffer execution failed: Caused GPU "
+                           "Timeout Error (00000002:kIOGPUCommandBufferCallbackErrorTimeout).")
+
+    R = _fake_run_env(monkeypatch, timeout)
+    timers = []
+
+    class Timer:
+        def __init__(self, delay, fn, args=()):
+            timers.append((delay, fn, args))
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(engine.threading, "Timer", Timer)
+    monkeypatch.setenv("XPC_SERVICE_NAME", "com.llm-sidecar.daemon")
+
+    with pytest.raises(engine.EngineFault):
+        _run_once(tmp_path)
+    assert R.model is None and R.in_use == 0
+    assert timers and timers[0][1] is engine.os._exit, "should restart via launchd"
+    # Cooling down: the next job is refused instead of run.
+    with pytest.raises(engine.MemoryBusy, match="GPU fault"):
+        _run_once(tmp_path)
+
+
+def test_a_gpu_fault_outside_launchd_does_not_exit(memory, monkeypatch, tmp_path):
+    from llm_sidecar.images import engine
+
+    def boom(model, profile, **kw):
+        raise RuntimeError("There is no Stream(cpu, 3) in current thread.")
+
+    _fake_run_env(monkeypatch, boom)
+    monkeypatch.delenv("XPC_SERVICE_NAME", raising=False)
+    monkeypatch.setattr(engine.threading, "Timer",
+                        lambda *a, **k: pytest.fail("exited outside launchd"))
+    with pytest.raises(engine.EngineFault):
+        _run_once(tmp_path)
+
+
+def test_every_mlx_call_runs_on_one_thread(memory, monkeypatch, tmp_path):
+    """MLX streams are per-thread. The server ran each request on whichever
+    worker thread was free, so a model built on one was used from another:
+    "There is no Stream(cpu, N) in current thread", 35 times in the log."""
+    import threading
+
+    seen = set()
+
+    class Img:
+        def save(self, path):
+            pathlib.Path(path).write_bytes(b"png")
+
+    def call(model, profile, **kw):
+        seen.add(threading.get_ident())
+        return Img()
+
+    _fake_run_env(monkeypatch, call)
+    threads = [threading.Thread(target=_run_once, args=(tmp_path,)) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(seen) == 1
+
+
+def test_a_model_that_fills_the_machine_is_dropped_after_a_minute(monkeypatch):
+    from llm_sidecar import hardware
+    from llm_sidecar.images import engine
+
+    monkeypatch.setattr(hardware, "usable_gib", lambda hw=None: 33.0)
+    R = engine._Resident()
+    R.peak_gib = 28.0
+    assert R.idle_limit() == engine.BIG_IDLE_UNLOAD_S
+    R.peak_gib = 12.0
+    assert R.idle_limit() == engine.IDLE_UNLOAD_S
+
+
+def test_memory_busy_is_a_503_with_retry_after(api, monkeypatch, tmp_path):
+    """A pipeline should wait and retry, not give up or fall back."""
+    from llm_sidecar import images as im
+
+    def busy(req, config=None, *, allow_daemon=True):
+        raise im.MemoryBusy("not enough free memory right now")
+
+    monkeypatch.setattr(im, "generate", busy)
+    r = api.post("/v1/images/generate",
+                 json={"prompt": "x", "out_dir": str(tmp_path), "stem": "a",
+                       "project": "demo"})
+    assert r.status_code == 503
+    assert r.headers["Retry-After"] == "60"
+    assert r.headers[im.ERROR_HEADER] == "MemoryBusy"
+
+
+def test_a_delegated_caller_gets_memory_busy_back(fake_engine, monkeypatch, tmp_path):
+    import httpx
+
+    from llm_sidecar import images as im
+
+    monkeypatch.setattr(im, "daemon_available", lambda config: True)
+    monkeypatch.setattr(httpx, "post", lambda url, **kw: _FakeResponse(
+        503, {"detail": "busy"}, headers={im.ERROR_HEADER: "MemoryBusy"}))
+    with pytest.raises(im.MemoryBusy):
+        im.generate(im.ImageRequest(prompt="x", out_dir=str(tmp_path), stem="s",
+                                    project="demo"))

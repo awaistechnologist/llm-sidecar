@@ -287,15 +287,29 @@ def _image_bench(args) -> int:
     # actually live with.
     print(f"  {profile} at {args.width or 1024}x{args.height or 1024}, "
           f"{runs} runs\n")
+    # The bench runs in-process on purpose (see below), so while a daemon is
+    # up there can be two models resident at once — which is the memory
+    # pressure this bench exists to detect. Say so rather than let it look
+    # like a property of the profile.
+    from . import config as config_mod
+    if im.daemon_available(config_mod.load()):
+        print("  note: the daemon is running and may hold a model resident.")
+        print("  These runs load their own, so figures include that. Stop")
+        print("  the service for a clean measurement.\n")
     with tempfile.TemporaryDirectory() as tmp:
         engine.RESIDENT.unload()
         times = []
         for i in range(runs):
+            # allow_daemon=False because this command measures THIS
+            # process's engine: it unloads the resident model above and
+            # reads mlx_cache_gib from engine.status() below. Delegating
+            # would do the work in the daemon and report the cache of a
+            # process that never loaded anything — four runs of 0G.
             r = im.generate(im.ImageRequest(
                 prompt=f"{prompt} (take {i})", profile=profile, out_dir=tmp,
                 stem=f"bench{i}", width=args.width or 1024,
                 height=args.height or 1024, seed=100 + i, project="bench",
-            ))
+            ), allow_daemon=False)
             times.append(r.seconds)
             st = engine.status()
             print(f"  run{i + 1} {r.seconds:6.1f}s  "
@@ -545,6 +559,17 @@ def main(argv: list[str] | None = None) -> int:
                     choices=["install", "uninstall", "status"])
     sv.add_argument("--port", type=int, default=4001)
 
+    ph = sub.add_parser(
+        "phone", help="use it from your phone, privately, over Tailscale",
+        description="Put the sidecar on your Tailscale network so your phone can use it "
+                    "at home or away. Only your own signed-in devices can reach it; it is "
+                    "not exposed to your Wi-Fi or the internet. Then open the printed "
+                    "address on the phone, or use the Android app in mobile/.")
+    ph.add_argument("action", nargs="?", default="on", choices=["on", "off", "status"])
+    ph.add_argument("--port", type=int, default=8443,
+                    help="HTTPS port on your tailnet name (default 8443, so it cannot "
+                         "replace anything you already serve on 443)")
+
     sx = sub.add_parser("searxng", help="run a local SearXNG for better search")
     sx.add_argument("action", nargs="?", default="status",
                     choices=["up", "down", "status", "logs"])
@@ -595,6 +620,10 @@ def main(argv: list[str] | None = None) -> int:
         return _config(args)
     if args.cmd == "service":
         return _service(args)
+    if args.cmd == "phone":
+        from . import config as config_mod
+        from . import phone
+        return phone.run(args.action, config_mod.load(), https_port=args.port)
     if args.cmd == "searxng":
         return _searxng(args)
     if args.cmd == "cache":

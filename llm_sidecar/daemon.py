@@ -202,6 +202,12 @@ def create_app(config: Config | None = None) -> FastAPI:
             allow_credentials=False,
         )
 
+    # Before anything else answers: see phone.py for why a loopback daemon
+    # checks the Host header (DNS rebinding, and Tailscale making phone
+    # requests arrive from 127.0.0.1).
+    from . import phone as phone_mod
+    phone_mod.install_host_guard(app, cfg)
+
     def require_token(authorization: str | None = Header(default=None)) -> None:
         """Optional shared-secret gate.
 
@@ -280,6 +286,9 @@ def create_app(config: Config | None = None) -> FastAPI:
         except Exception as e:
             logger.exception("operation failed")
             raise HTTPException(status_code=502, detail=str(e)) from e
+
+    # The phone app: /app/, its manifest and worker, and the image gallery.
+    phone_mod.install_routes(app, cfg, sidecar, require_token, _op)
 
     @app.post("/v1/embeddings")
     def embeddings(req: EmbedRequest, _: None = Depends(require_token)) -> dict:
@@ -528,17 +537,37 @@ def create_app(config: Config | None = None) -> FastAPI:
         20s to several minutes and set their timeouts accordingly."""
         from . import images as images_mod
 
+        def refuse(status: int, e: Exception, retry_after: int | None = None):
+            # The exception type goes in a header because an HTTP status
+            # cannot separate a licence refusal from a bad profile name, and
+            # a library-mode caller delegating to this route needs to re-raise
+            # the same class rather than parse prose. `detail` stays a plain
+            # string so existing clients are unaffected.
+            headers = {images_mod.ERROR_HEADER: type(e).__name__}
+            if retry_after:
+                headers["Retry-After"] = str(retry_after)
+            return HTTPException(status_code=status, detail=str(e), headers=headers)
+
         try:
-            result = images_mod.generate(images_mod.ImageRequest(**req.model_dump()))
+            # allow_daemon=False, or this route would call itself: the
+            # library path delegates to the daemon when one is reachable,
+            # and inside the daemon one always is.
+            result = images_mod.generate(
+                images_mod.ImageRequest(**req.model_dump()), allow_daemon=False,
+            )
         except images_mod.ImageUnavailable as e:
-            raise HTTPException(status_code=501, detail=str(e)) from e
+            raise refuse(501, e) from e
         except (images_mod.LicenceError, images_mod.ProfileError) as e:
-            raise HTTPException(status_code=400, detail=str(e)) from e
+            raise refuse(400, e) from e
         except images_mod.OutOfMemory as e:
-            raise HTTPException(status_code=507, detail=str(e)) from e
+            raise refuse(507, e) from e
+        except (images_mod.MemoryBusy, images_mod.EngineFault) as e:
+            # 503 + Retry-After: the job is fine, the machine is busy. A
+            # pipeline should wait and retry, not give up or fall back.
+            raise refuse(503, e, e.retry_after_s) from e
         except Exception as e:
             logger.exception("image generation failed")
-            raise HTTPException(status_code=500, detail=str(e)) from e
+            raise refuse(500, e) from e
         return result.__dict__
 
     @app.get("/claude-cli/status")
