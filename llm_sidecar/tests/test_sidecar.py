@@ -4396,7 +4396,7 @@ def test_a_long_generation_is_not_unloaded_by_a_status_poll(monkeypatch, tmp_pat
     monkeypatch.setattr(engine, "RESIDENT", R)
     monkeypatch.setattr(engine, "require", lambda: None)
     monkeypatch.setattr(engine, "guard", lambda p: None)
-    monkeypatch.setattr(engine, "ensure_memory", lambda p, c=None: {})
+    monkeypatch.setattr(engine, "ensure_memory", lambda p, c=None, **kw: {})
     monkeypatch.setattr(engine, "reset_peak", lambda: None)
     monkeypatch.setattr(engine, "retune_mlx_cache", lambda p: None)
     # The real lock is machine-wide (a file lock): on a machine whose daemon
@@ -4692,3 +4692,196 @@ def test_a_delegated_caller_gets_memory_busy_back(fake_engine, monkeypatch, tmp_
     with pytest.raises(im.MemoryBusy):
         im.generate(im.ImageRequest(prompt="x", out_dir=str(tmp_path), stem="s",
                                     project="demo"))
+
+
+def test_a_caller_can_wait_for_memory_to_free_up(memory, monkeypatch):
+    """A batch script that quits on any error makes no images if the first
+    one is refused. Waiting lets someone close a browser instead."""
+    from llm_sidecar import hardware
+    from llm_sidecar.images import engine, profiles
+
+    readings = iter([22.0, 22.0, 22.0, 31.0])
+    monkeypatch.setattr(hardware, "available_now_gib", lambda: next(readings))
+    out = engine.ensure_memory(profiles.get("zimage-negprompt"), wait_s=60)
+    assert out["waited"] is True
+
+
+def test_waiting_still_ends_in_a_refusal(memory, monkeypatch):
+    from llm_sidecar.images import engine, profiles
+
+    memory["free"] = 22.0
+    clock = iter(range(0, 10_000, 10))
+    monkeypatch.setattr(engine.time, "time", lambda: next(clock))
+    with pytest.raises(engine.MemoryBusy):
+        engine.ensure_memory(profiles.get("zimage-negprompt"), wait_s=60)
+
+
+def test_the_phone_does_not_wait_for_memory(monkeypatch, tmp_path):
+    """A person is looking at a spinner; tell them at once."""
+    import inspect
+
+    from llm_sidecar import phone
+
+    assert "wait_for_memory_s=0" in inspect.getsource(phone.install_routes)
+
+
+def test_the_wait_reaches_the_engine(fake_engine, monkeypatch, tmp_path):
+    from llm_sidecar import images as im
+    from llm_sidecar.images import engine
+
+    seen = {}
+    real = engine.run
+
+    def spy(*a, **kw):
+        seen["wait"] = kw.get("wait_for_memory_s")
+        return real(*a, **kw)
+
+    monkeypatch.setattr(engine, "run", spy)
+    im.generate(im.ImageRequest(prompt="x", out_dir=str(tmp_path), stem="s",
+                                project="demo", wait_for_memory_s=42),
+                allow_daemon=False)
+    assert seen["wait"] == 42
+
+
+# ── prepared (pre-quantised) models ────────────────────────────────────────
+
+
+@pytest.fixture
+def prepared_env(monkeypatch, tmp_path, memory):
+    """A fake mflux model class, a temp data dir, no real MLX."""
+    import contextlib
+    import sys
+    import types
+
+    from llm_sidecar import ledger
+    from llm_sidecar.images import engine
+
+    monkeypatch.setattr(ledger, "DATA_DIR", tmp_path / "data")
+    built = []
+
+    class FakeModel:
+        def __init__(self, **kw):
+            built.append(kw)
+
+        def save_model(self, path):
+            p = pathlib.Path(path)
+            (p / "transformer").mkdir(parents=True)
+            (p / "transformer" / "0.safetensors").write_bytes(b"x" * 1024)
+
+    mod = types.ModuleType("fake_variant")
+    mod.FakeModel = FakeModel
+    monkeypatch.setitem(sys.modules, "fake_variant", mod)
+    monkeypatch.setitem(engine.VARIANTS, "z-image-turbo", ("fake_variant", "FakeModel"))
+    res = types.ModuleType("mflux.models.common.resolution.config_resolution")
+    res.ConfigResolution = types.SimpleNamespace(resolve=lambda name: name)
+    for name in ("mflux", "mflux.models", "mflux.models.common",
+                 "mflux.models.common.resolution"):
+        monkeypatch.setitem(sys.modules, name, sys.modules.get(name) or types.ModuleType(name))
+    monkeypatch.setitem(sys.modules, res.__name__, res)
+    monkeypatch.setattr(engine, "require", lambda: None)
+    monkeypatch.setattr(engine, "MACHINE_LOCK", contextlib.nullcontext())
+    monkeypatch.setattr(engine, "_mx", lambda: None)
+    monkeypatch.setattr(engine, "RESIDENT", engine._Resident())
+    return built
+
+
+def test_prepare_saves_a_quantised_copy_and_loads_from_it(prepared_env):
+    """mflux quantises in memory after loading bf16 weights; Z-Image's 27.8
+    GiB peak is mostly that. A saved q8 copy loads without the bf16 one."""
+    from llm_sidecar.images import engine, profiles
+
+    p = profiles.get("zimage-negprompt")
+    assert engine.prepared_path(p) is None
+    out = engine.prepare(p)
+    assert out["already"] is False
+    ready = engine.prepared_path(p)
+    assert ready is not None and (ready / "transformer").is_dir()
+    assert not ready.with_name(ready.name + ".partial").exists()
+    assert "model_path" not in prepared_env[0], "the save itself loads from HF"
+
+    engine.RESIDENT.get(p)
+    assert prepared_env[-1]["model_path"] == str(ready)
+    assert engine.prepare(p)["already"] is True
+
+
+def test_until_measured_the_prepared_copy_uses_the_old_peak(prepared_env):
+    from llm_sidecar.images import engine, profiles
+
+    p = profiles.get("zimage-negprompt")
+    engine.prepare(p)
+    assert engine.effective_peak(p) == p.peak_gib
+
+
+def test_the_measured_peak_replaces_the_estimate_and_only_grows(
+        prepared_env, monkeypatch):
+    from llm_sidecar.images import engine, profiles
+
+    p = profiles.get("zimage-negprompt")
+    engine.prepare(p)
+    peak = {"v": 13.5 * 2 ** 30}
+    monkeypatch.setattr(engine, "_mx", lambda: type(
+        "MX", (), {"get_peak_memory": staticmethod(lambda: peak["v"])}))
+    engine._record_peak(p)
+    assert engine.effective_peak(p) == 13.5
+    peak["v"] = 12.0 * 2 ** 30
+    engine._record_peak(p)
+    assert engine.effective_peak(p) == 13.5, "a smaller run must not lower it"
+
+
+def test_a_failed_save_leaves_nothing_half_written(prepared_env, monkeypatch):
+    import sys
+
+    from llm_sidecar.images import engine, profiles
+
+    def broken(self, path):
+        pathlib.Path(path).mkdir(parents=True)
+        raise OSError("disk full")
+
+    monkeypatch.setattr(sys.modules["fake_variant"].FakeModel, "save_model", broken)
+    p = profiles.get("zimage-negprompt")
+    with pytest.raises(OSError):
+        engine.prepare(p)
+    d = engine._prepared_dir(p)
+    assert engine.prepared_path(p) is None
+    assert not d.with_name(d.name + ".partial").exists()
+
+
+def test_the_memory_check_uses_the_prepared_peak(prepared_env, monkeypatch, tmp_path):
+    from llm_sidecar.images import engine, profiles
+
+    p = profiles.get("zimage-negprompt")
+    engine.prepare(p)
+    info = engine.prepared_info(p)
+    info["peak_gib"] = 12.0
+    import json
+    (engine._prepared_dir(p) / "sidecar.json").write_text(json.dumps(info))
+    seen = {}
+
+    def fake_ensure(profile, config=None, wait_s=0):
+        seen["peak"] = profile.peak_gib
+        raise engine.MemoryBusy("stop here")
+
+    monkeypatch.setattr(engine, "ensure_memory", fake_ensure)
+    monkeypatch.setattr(engine, "guard", lambda p: None)
+    with pytest.raises(engine.MemoryBusy):
+        engine.run(p, prompt="x", negative=None, seed=1, width=64, height=64,
+                   steps=1, refs=[], resolution=None, out=tmp_path / "a.png")
+    assert seen["peak"] == 12.0
+
+
+def test_an_idle_model_gives_its_buffer_cache_back(monkeypatch):
+    from llm_sidecar.images import engine
+
+    cleared = []
+    monkeypatch.setattr(engine, "_mx", lambda: type(
+        "MX", (), {"clear_cache": staticmethod(lambda: cleared.append(1))}))
+    R = engine._Resident()
+    R.model, R.key, R.last_used = object(), "k", time.time()
+    assert R.trim_if_idle() is False, "trimmed a model in use moments ago"
+    R.last_used = 0.0
+    R.in_use = 1
+    assert R.trim_if_idle() is False, "trimmed mid-generation"
+    R.in_use = 0
+    assert R.trim_if_idle() is True and R.model is not None
+    assert R.trim_if_idle() is False, "trims once per idle spell"
+    assert cleared == [1]

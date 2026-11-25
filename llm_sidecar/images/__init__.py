@@ -95,6 +95,12 @@ class ImageRequest:
     # as the long edge once, which sent a consumer's first upscales to 3840
     # px wide.
     resolution: int | None = None
+    # How long to wait for memory to free up before refusing with
+    # MemoryBusy. Waiting is the default because the callers that hit it
+    # are batch scripts, which mostly treat any error as fatal: one that
+    # stops at the first refusal makes no images. 0 refuses at once — the
+    # phone app does, because a person is looking at a spinner.
+    wait_for_memory_s: float = 300
 
 
 @dataclass
@@ -257,6 +263,7 @@ def generate(req: ImageRequest, config: Config | None = None, *,
         profile, prompt=req.prompt, negative=req.negative, seed=seed,
         width=width, height=height, steps=steps, refs=refs,
         resolution=req.resolution, out=out, config=config,
+        wait_for_memory_s=req.wait_for_memory_s,
     )
 
     payload = manifest.build(
@@ -279,6 +286,56 @@ def generate(req: ImageRequest, config: Config | None = None, *,
     )
 
 
+def prepare(profile_name: str, config: Config | None = None, *,
+            wait_for_memory_s: float = 0, measure: bool = True,
+            allow_daemon: bool = True) -> dict:
+    """Save a quantised copy of a profile's model so it loads without the
+    full-precision peak (see engine.prepare), then make one image at the
+    profile's size to measure what the prepared copy really peaks at.
+
+    Goes to the daemon when one is running, like generate(): the daemon owns
+    the models, and preparing beside it would hold two."""
+    import tempfile
+
+    import httpx
+
+    from .. import config as config_mod
+
+    config = config or config_mod.load()
+    if allow_daemon and daemon_available(config):
+        headers = {}
+        if config.daemon_token:
+            headers["Authorization"] = f"Bearer {config.daemon_token}"
+        r = httpx.post(_daemon_base(config) + "/v1/images/prepare",
+                       json={"profile": profile_name,
+                             "wait_for_memory_s": wait_for_memory_s,
+                             "measure": measure},
+                       headers=headers, timeout=DAEMON_REQUEST_TIMEOUT)
+        if r.status_code == 200:
+            return r.json()
+        try:
+            detail = r.json().get("detail", r.text)
+        except Exception:
+            detail = r.text
+        raise _ERRORS.get(r.headers.get(ERROR_HEADER, ""), ImageError)(str(detail))
+
+    profile = profiles.get(profile_name)
+    out = engine.prepare(profile, config, wait_for_memory_s=wait_for_memory_s)
+    if measure and not out.get("already"):
+        with tempfile.TemporaryDirectory() as tmp:
+            r = generate(ImageRequest(
+                prompt="a quiet garden at dawn, soft gouache illustration",
+                profile=profile_name, out_dir=tmp, stem="measure",
+                project="llm-sidecar prepare", skip_existing=False,
+                wait_for_memory_s=wait_for_memory_s,
+            ), config, allow_daemon=False)
+        out["measure_s"] = r.seconds
+    info = engine.prepared_info(profile) or {}
+    out["peak_gib"] = info.get("peak_gib")
+    out["was_peak_gib"] = profile.peak_gib
+    return out
+
+
 def status(config: Config | None = None) -> dict:
     """Engine state plus the profile table — one call for a caller deciding
     whether to bother.
@@ -290,6 +347,8 @@ def status(config: Config | None = None) -> dict:
     config = config or config_mod.load()
     return {
         **engine.status(),
+        "prepared": {n: engine.prepared_info(p) for n, p in profiles.PROFILES.items()
+                     if engine.prepared_info(p) is not None},
         "delegating_to_daemon": daemon_available(config),
         "profiles": profiles.describe(),
     }

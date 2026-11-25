@@ -54,6 +54,21 @@ Fixed or Changed.
   speech recogniser, saving images to the gallery, links opening in their
   own apps, and an offline screen that retries when you come back.
 
+- **`llm-sidecar image prepare --profile <name>`** saves an already-quantised
+  copy of a profile's model, and later loads use it. mflux otherwise loads
+  the full-precision weights and quantises them in memory, so both copies
+  are resident at once: that is most of zimage-negprompt's 27.8 GiB peak.
+  Same weights, same images, without the full-precision copy. Preparing
+  costs the old peak once and waits for the memory. It then makes one image
+  to measure the new peak, which the memory check uses from then on.
+  Also `POST /v1/images/prepare`, and `prepared` in `/v1/images/status`.
+- **Image requests wait for memory** (`wait_for_memory_s`, default 300)
+  before refusing, because the callers that hit the limit are batch
+  scripts that stop at the first error. The phone app passes 0.
+- An idle model gives MLX's buffer cache back after a minute and keeps
+  its weights. Idle, `standard` held 12.4 GiB of cache beside 3.2 GiB of
+  weights.
+
 ### Action required
 - **You call the daemon by a name other than `localhost`, `127.0.0.1`, `::1`,
   a `*.ts.net` name, or `host.docker.internal` / `host.containers.internal`**

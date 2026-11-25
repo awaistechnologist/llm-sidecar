@@ -154,6 +154,14 @@ class ImageRequestBody(BaseModel):
     commercial: bool = True
     skip_existing: bool = True
     resolution: int | None = None
+    # Wait this long for free memory before a 503. See ImageRequest.
+    wait_for_memory_s: float = 300
+
+
+class ImagePrepareBody(BaseModel):
+    profile: str
+    wait_for_memory_s: float = 300
+    measure: bool = True
 
 
 class ChatRequest(BaseModel):
@@ -569,6 +577,36 @@ def create_app(config: Config | None = None) -> FastAPI:
             logger.exception("image generation failed")
             raise refuse(500, e) from e
         return result.__dict__
+
+    @app.post("/v1/images/prepare")
+    def image_prepare(req: ImagePrepareBody, _: None = Depends(require_token)) -> dict:
+        """Save a quantised copy of a profile's model, so later loads skip
+        the full-precision peak. Slow (minutes) and needs the memory a cold
+        load does, once."""
+        from . import images as images_mod
+
+        def refuse(status: int, e: Exception, retry_after: int | None = None):
+            headers = {images_mod.ERROR_HEADER: type(e).__name__}
+            if retry_after:
+                headers["Retry-After"] = str(retry_after)
+            return HTTPException(status_code=status, detail=str(e), headers=headers)
+
+        try:
+            return images_mod.prepare(req.profile, wait_for_memory_s=req.wait_for_memory_s,
+                                      measure=req.measure, allow_daemon=False)
+        except images_mod.ImageUnavailable as e:
+            raise refuse(501, e) from e
+        except images_mod.ProfileError as e:
+            raise refuse(400, e) from e
+        except images_mod.OutOfMemory as e:
+            raise refuse(507, e) from e
+        except (images_mod.MemoryBusy, images_mod.EngineFault) as e:
+            raise refuse(503, e, e.retry_after_s) from e
+        except images_mod.ImageError as e:
+            raise refuse(400, e) from e
+        except Exception as e:
+            logger.exception("image prepare failed")
+            raise refuse(500, e) from e
 
     @app.get("/claude-cli/status")
     def claude_cli_status(_: None = Depends(require_token)) -> dict:

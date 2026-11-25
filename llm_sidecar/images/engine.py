@@ -82,11 +82,19 @@ IDLE_UNLOAD_S = 10 * 60
 BIG_IDLE_UNLOAD_S = 60
 BIG_SHARE = 0.6  # of usable memory
 
+# After this long idle, give MLX's buffer cache back but keep the weights.
+# The cache is what makes back-to-back jobs steady; between batches it is
+# just memory taken from everything else (12.4 GiB of it beside 3.2 GiB of
+# klein weights, measured idle).
+CACHE_TRIM_S = 60
+
 # Kept free beyond the profile's peak when deciding whether to start a job.
 SAFETY_GIB = 2.0
 
 # How long to wait for memory to come back after asking Ollama to unload.
 FREE_WAIT_S = 10.0
+# How often to look again while a caller waits for memory.
+WAIT_POLL_S = 5.0
 
 # After a GPU fault, refuse image work this long. The fault is a symptom of
 # a machine already thrashing; starting the next 28 GiB job straight into it
@@ -330,6 +338,7 @@ class _Resident:
         # looked idle to the next status poll, which unloaded it mid-job.
         self.in_use = 0
         self.peak_gib = 0.0
+        self.trimmed = False
         self._lock = threading.RLock()
         self._reaper: threading.Thread | None = None
 
@@ -360,6 +369,19 @@ class _Resident:
             if (time.time() - self.last_used) > limit:
                 self.unload()
 
+    def trim_if_idle(self, idle_s: float = CACHE_TRIM_S) -> bool:
+        with self._lock:
+            if (self.in_use or self.model is None or self.trimmed
+                    or (time.time() - self.last_used) <= idle_s):
+                return False
+            mx = _mx()
+            if mx is None:
+                return False
+            mx.clear_cache()
+            self.trimmed = True
+            logger.debug("trimmed MLX cache for idle %s", self.key)
+            return True
+
     def start_reaper(self) -> None:
         """Expire on a timer, not only when someone polls status.
 
@@ -375,6 +397,7 @@ class _Resident:
                     time.sleep(15)
                     try:
                         self.expire_if_idle()
+                        self.trim_if_idle()
                     except Exception:
                         logger.debug("idle reaper failed", exc_info=True)
 
@@ -423,6 +446,10 @@ class _Resident:
             kwargs = {"model_config": cfg}
             if profile.quantize is not None:
                 kwargs["quantize"] = profile.quantize
+            ready = prepared_path(profile)
+            if ready is not None:
+                # Already quantised on disk: no full-precision copy in memory.
+                kwargs["model_path"] = str(ready)
             self.model = cls(**kwargs)
             cap_mlx_cache(profile.peak_gib)
             self.load_s = round(time.time() - t, 2)
@@ -640,6 +667,126 @@ def _call(model, profile: Profile, *, prompt: str, negative: str | None,
     return model.generate_image(**kwargs)
 
 
+# ── prepared (pre-quantised) copies ───────────────────────────────────────
+#
+# mflux loads a model's full-precision weights and quantises them in memory,
+# so for a moment both copies are resident. For Z-Image that is ~20 GiB of
+# bf16 plus the q8 result: the 27.8 GiB peak, when the q8 weights alone are
+# about a third of that. Saving the quantised weights once and loading those
+# skips the full-precision copy entirely. Same weights, same images.
+
+
+def _prepared_dir(profile: Profile) -> Path:
+    from ..ledger import DATA_DIR
+    safe = RESIDENT.key_for(profile).replace(":", "-").replace("/", "-")
+    return DATA_DIR / "image-models" / safe
+
+
+def prepared_info(profile: Profile) -> dict | None:
+    if profile.quantize is None:
+        return None
+    marker = _prepared_dir(profile) / "sidecar.json"
+    try:
+        import json
+        return json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def prepared_path(profile: Profile) -> Path | None:
+    return _prepared_dir(profile) if prepared_info(profile) is not None else None
+
+
+def effective_peak(profile: Profile) -> float:
+    """The profile's peak, or the measured one for its prepared copy."""
+    info = prepared_info(profile)
+    if info and info.get("peak_gib"):
+        return float(info["peak_gib"])
+    return profile.peak_gib
+
+
+def _record_peak(profile: Profile) -> None:
+    """Keep the highest peak seen from the prepared copy, so the memory
+    check uses a measurement rather than the full-precision estimate."""
+    info = prepared_info(profile)
+    mx = _mx()
+    if info is None or mx is None:
+        return
+    observed = round(mx.get_peak_memory() / GIB, 2)
+    if observed <= 0 or observed <= (info.get("peak_gib") or 0):
+        return
+    import json
+    info["peak_gib"] = observed
+    info["peak_measured_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+    (_prepared_dir(profile) / "sidecar.json").write_text(
+        json.dumps(info, indent=2), encoding="utf-8")
+    logger.info("%s (prepared) peaked at %.1f GiB", profile.name, observed)
+
+
+def prepare(profile: Profile, config: Config | None = None,
+            wait_for_memory_s: float = 0) -> dict:
+    """Save a quantised copy of the profile's model, once.
+
+    Costs the full-precision peak one last time, so it takes the machine
+    lock and the memory check like any job. Then generates one image at the
+    profile's size so the prepared copy's real peak is measured, not guessed."""
+    import json
+    import shutil
+
+    require()
+    if profile.quantize is None:
+        raise ImageError(f"{profile.name!r} is not quantised; nothing to prepare.")
+    if prepared_info(profile) is not None:
+        return {"profile": profile.name, "path": str(_prepared_dir(profile)),
+                "already": True, **prepared_info(profile)}
+
+    final = _prepared_dir(profile)
+    partial = final.with_name(final.name + ".partial")
+    with SCHEDULER.slot("prepare"), MACHINE_LOCK:
+        ensure_memory(profile, config, wait_s=wait_for_memory_s)
+
+        def work():
+            import importlib
+
+            from mflux.models.common.resolution.config_resolution import ConfigResolution
+
+            RESIDENT.unload()
+            module_path, class_name = VARIANTS[profile.variant]
+            cls = getattr(importlib.import_module(module_path), class_name)
+            t = time.time()
+            model = cls(model_config=ConfigResolution.resolve(profile.model),
+                        quantize=profile.quantize)
+            shutil.rmtree(partial, ignore_errors=True)
+            partial.parent.mkdir(parents=True, exist_ok=True)
+            model.save_model(str(partial))
+            del model
+            mx = _mx()
+            if mx is not None:
+                mx.clear_cache()
+            shutil.rmtree(final, ignore_errors=True)
+            partial.rename(final)
+            (final / "sidecar.json").write_text(json.dumps({
+                "profile": profile.name, "model": profile.model,
+                "quantize": profile.quantize, "mflux": mflux_version(),
+                "saved_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "save_s": round(time.time() - t, 1), "peak_gib": None,
+            }, indent=2), encoding="utf-8")
+
+        try:
+            _on_mlx_thread(work)
+        except Exception as e:
+            shutil.rmtree(partial, ignore_errors=True)
+            if is_gpu_fault(e):
+                _on_fault(e)
+                raise EngineFault("The GPU failed while preparing; retry in a minute.") from e
+            raise
+
+    size = sum(f.stat().st_size for f in final.rglob("*") if f.is_file())
+    logger.info("prepared %s at %s (%.1f GiB)", profile.name, final, size / GIB)
+    return {"profile": profile.name, "path": str(final), "already": False,
+            "size_gib": round(size / GIB, 1)}
+
+
 # ── memory right now, faults, and the MLX thread ──────────────────────────
 
 
@@ -675,7 +822,8 @@ def _unload_ollama(config: Config | None) -> list[str]:
     return names
 
 
-def ensure_memory(profile: Profile, config: Config | None = None) -> dict:
+def ensure_memory(profile: Profile, config: Config | None = None,
+                  wait_s: float = 0) -> dict:
     """Refuse to start a job the machine cannot hold *right now*.
 
     guard() asks whether the machine could ever hold the profile. This asks
@@ -686,7 +834,12 @@ def ensure_memory(profile: Profile, config: Config | None = None) -> dict:
 
     In order: count what this process already holds (it is freed before
     loading), ask Ollama to unload its models if that is not enough, wait
-    briefly for the memory to come back, then refuse with MemoryBusy."""
+    briefly for the memory to come back, then keep checking for up to
+    `wait_s` (someone closing a browser), then refuse with MemoryBusy.
+
+    Waiting happens with the machine lock held, so other image jobs queue
+    behind it. That is deliberate: they need memory too, and letting a
+    small job in first would only move the goalposts for the big one."""
     from .. import hardware
 
     if _fault_remaining() > 0:
@@ -711,6 +864,19 @@ def ensure_memory(profile: Profile, config: Config | None = None) -> dict:
             if have >= need:
                 return {"available_gib": have, "needed_gib": round(need, 1),
                         "unloaded": asked}
+
+    if wait_s > 0:
+        logger.warning(
+            "waiting up to %.0fs for memory for %s: needs ~%.0f GiB, %.0f GiB free. "
+            "Close an app to let it start.", wait_s, profile.name, need, have or 0)
+        deadline = time.time() + wait_s
+        while time.time() < deadline:
+            time.sleep(WAIT_POLL_S)
+            have = hardware.available_now_gib() or 0.0
+            if have >= need:
+                logger.info("memory freed; starting %s", profile.name)
+                return {"available_gib": have, "needed_gib": round(need, 1),
+                        "waited": True}
 
     fits = ", ".join(n for n in _fitting_profiles()
                      if n != profile.name) or "none"
@@ -779,15 +945,23 @@ def _on_mlx_thread(fn):
 
 def run(profile: Profile, *, prompt: str, negative: str | None, seed: int,
         width: int, height: int, steps: int, refs: list[Path],
-        resolution: int | None, out: Path, config: Config | None = None) -> dict:
+        resolution: int | None, out: Path, config: Config | None = None,
+        wait_for_memory_s: float = 0) -> dict:
     """One image, start to finish. Returns timing and the path written."""
+    import dataclasses
+
     require()
+    peak = effective_peak(profile)
+    if peak != profile.peak_gib:
+        # A prepared copy: the memory check, the guard and the cache cap
+        # should all use what it actually peaks at.
+        profile = dataclasses.replace(profile, peak_gib=peak)
     guard(profile)
 
     with SCHEDULER.slot(RESIDENT.key_for(profile)), MACHINE_LOCK:
         # Inside the lock: memory is measured when this job is next, not
         # when it joined the queue behind three others.
-        ensure_memory(profile, config)
+        ensure_memory(profile, config, wait_s=wait_for_memory_s)
         with RESIDENT._lock:
             RESIDENT.in_use += 1
 
@@ -802,6 +976,7 @@ def run(profile: Profile, *, prompt: str, negative: str | None, seed: int,
             out.parent.mkdir(parents=True, exist_ok=True)
             image.save(path=str(out))
             retune_mlx_cache(profile)
+            _record_peak(profile)
             return load_s, warm, generate_s
 
         try:
@@ -818,6 +993,7 @@ def run(profile: Profile, *, prompt: str, negative: str | None, seed: int,
             with RESIDENT._lock:
                 RESIDENT.in_use -= 1
                 RESIDENT.last_used = time.time()
+                RESIDENT.trimmed = False
         RESIDENT.start_reaper()
 
     if profile.post == "lineart":

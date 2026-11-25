@@ -230,6 +230,24 @@ def _image(args) -> int:
     if args.action == "bench":
         return _image_bench(args)
 
+    if args.action == "prepare":
+        print(f"Preparing {args.profile}: saving a quantised copy so it loads "
+              f"without the full-precision peak.")
+        print("This loads the model the slow way one last time. It needs the "
+              "same free memory a normal cold load does, and waits for it.")
+        try:
+            r = im.prepare(args.profile, wait_for_memory_s=args.wait)
+        except im.ImageError as e:
+            print(str(e), file=sys.stderr)
+            return 1
+        if r.get("already"):
+            print(f"already prepared: {r['path']}")
+        else:
+            print(f"saved {r.get('size_gib')} GiB to {r['path']}")
+        if r.get("peak_gib"):
+            print(f"peak memory    : {r['peak_gib']} GiB (was {r['was_peak_gib']} GiB)")
+        return 0
+
     if not args.prompt and args.profile != "upscale":
         print("Give a prompt: llm-sidecar image gen \"a red apple\" --out ./pics",
               file=sys.stderr)
@@ -533,7 +551,7 @@ def main(argv: list[str] | None = None) -> int:
 
     img = sub.add_parser("image", help="generate images locally (Apple Silicon)")
     img.add_argument("action", nargs="?", default="status",
-                     choices=["gen", "profiles", "status", "bench"])
+                     choices=["gen", "profiles", "status", "bench", "prepare"])
     img.add_argument("prompt", nargs="?", default="")
     img.add_argument("--profile", default="standard")
     img.add_argument("--out", default=".", help="output directory")
@@ -551,6 +569,8 @@ def main(argv: list[str] | None = None) -> int:
     img.add_argument("--project", default="", help="recorded in the manifest")
     img.add_argument("--runs", type=int, default=4,
                      help="with bench: how many images to time (default 4)")
+    img.add_argument("--wait", type=float, default=600,
+                     help="with prepare: seconds to wait for free memory (default 600)")
     img.add_argument("--non-commercial", action="store_true",
                      help="permit non-commercial profiles (cinematic, kontext-edit)")
 

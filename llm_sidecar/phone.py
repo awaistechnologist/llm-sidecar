@@ -248,7 +248,7 @@ def install_routes(app, cfg, sidecar, require_token, op) -> None:
                 prompt=req.prompt, profile=req.profile, negative=req.negative,
                 width=req.width, height=req.height, seed=req.seed,
                 out_dir=str(image_dir()), stem=f"{time.strftime('%Y%m%d-%H%M%S')}-{stem}",
-                project="phone", skip_existing=False,
+                project="phone", skip_existing=False, wait_for_memory_s=0,
             ), allow_daemon=False)
         except images_mod.ImageUnavailable as e:
             raise HTTPException(status_code=501, detail=str(e)) from e

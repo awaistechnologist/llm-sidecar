@@ -755,6 +755,9 @@ formats.
   `Retry-After` rather than load 28 GiB into a machine that is already
   full. That is what crashed a 36 GiB Mac twice before this check existed.
   Retry on 503.
+- **Big models can be prepared once.** `llm-sidecar image prepare --profile
+  zimage-negprompt` saves the quantised weights, so loads skip mflux's
+  full-precision copy. Run it once with the Mac otherwise quiet.
 - **A GPU fault restarts the engine.** After a Metal timeout MLX is not
   usable in that process, so image work pauses for 60 seconds and the
   service exits for launchd to restart it.
