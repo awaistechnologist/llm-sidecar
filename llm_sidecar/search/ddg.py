@@ -14,6 +14,9 @@ from ..types import SearchResult
 logger = logging.getLogger("llm_sidecar.search.ddg")
 
 
+LAST_ERROR: str | None = None
+
+
 def available(config) -> bool:
     """DDG needs no server, only the `ddgs` package."""
     try:
@@ -24,6 +27,7 @@ def available(config) -> bool:
 
 
 def search(query: str, config, max_results: int = 5, news: bool = False) -> list[SearchResult]:
+    global LAST_ERROR
     from ddgs import DDGS
 
     out: list[SearchResult] = []
@@ -39,6 +43,7 @@ def search(query: str, config, max_results: int = 5, news: bool = False) -> list
                     is_news=True,
                 ))
         except Exception as e:
+            LAST_ERROR = f"DuckDuckGo: {e}"
             logger.warning(f"DDG news search failed: {e}")
 
     try:
@@ -49,6 +54,7 @@ def search(query: str, config, max_results: int = 5, news: bool = False) -> list
                 snippet=r.get("body", ""),
             ))
     except Exception as e:
+        LAST_ERROR = f"DuckDuckGo: {e}"
         logger.warning(f"DDG text search failed: {e}")
 
     return out

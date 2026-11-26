@@ -224,8 +224,16 @@ def install_routes(app, cfg, sidecar, require_token, op) -> None:
         except Exception as e:
             images = {"available": False, "detail": str(e)[:200]}
 
+        try:
+            from .search import health
+            h = health(cfg, fresh=False)
+            search = {"state": h["state"], "message": h["message"]}
+        except Exception as e:
+            search = {"state": "unknown", "message": str(e)[:200]}
+
         return {
             "version": _version(),
+            "search": search,
             "local": local,
             "claude": claude,
             "cloud": {"configured": cfg.has_cloud, "count": len(cloud)},

@@ -578,17 +578,27 @@ async function loadStatus() {
 async function loadSearch() {
   const s = await api("/searxng/status").catch(() => null);
   if (!s || s.error) { kv($("search-kv"), [["provider", '<span class="muted">unknown</span>']]); return; }
-  const live = s.answering_json;
-  kv($("search-kv"), [
-    ["provider", live ? '<span class="pill ok">SearXNG</span>' : '<span class="pill warn">DuckDuckGo</span>'],
+  const h = s.health || {};
+  const n = s.native || {};
+  const pill = { ok: "ok", degraded: "warn", down: "bad" }[h.state] || "warn";
+  const rows = [
+    ["search", `<span class="pill ${pill}">${esc(h.state || "unknown")}</span> ${esc(h.message || "")}`],
     ["searxng url", `<span class="mono">${esc(s.url)}</span>`],
-    ["container", s.container ? esc(s.container.state + " — " + s.container.status)
-                              : '<span class="muted">not created</span>'],
-    ["runtime", esc(s.docker || "unknown")],
-  ]);
-  $("searxng-hint").innerHTML = live
+  ];
+  if (n.installed) {
+    rows.push(["runs as", n.answering ? '<span class="pill ok">native service</span>'
+                                      : '<span class="pill bad">native service, not answering</span>']);
+    rows.push(["version", esc(n.commit || "?") + (n.age_days != null ? ` · ${n.age_days} days old` : "")
+      + (n.stale ? ' <span class="pill warn">run llm-sidecar searxng update</span>' : "")]);
+  } else {
+    rows.push(["container", s.container ? esc(s.container.state + " — " + s.container.status)
+                                        : '<span class="muted">not created</span>']);
+    rows.push(["runtime", esc(s.docker || "unknown")]);
+  }
+  kv($("search-kv"), rows);
+  $("searxng-hint").innerHTML = s.answering_json
     ? `<span class="muted">Aggregated search is active. <a href="${esc(s.url)}" target="_blank" rel="noopener">Open</a></span>`
-    : `<span class="muted">Better search: run <code>llm-sidecar searxng up</code></span>`;
+    : `<span class="muted">Better search: run <code>llm-sidecar searxng install</code></span>`;
 }
 
 async function loadModels() {

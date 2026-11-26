@@ -39,6 +39,8 @@ _NEGATIVE_TTL = 30.0
 # instance as dead and fell back to DuckDuckGo without saying anything.
 PROBE_TIMEOUT = 8.0
 
+LAST_ERROR: str | None = None
+
 
 def available(config) -> bool:
     """Is a SearXNG instance reachable, and does it allow JSON output?
@@ -97,6 +99,8 @@ def search(query: str, config, max_results: int = 5, news: bool = False) -> list
         r.raise_for_status()
         results = r.json().get("results") or []
     except Exception as e:
+        global LAST_ERROR
+        LAST_ERROR = f"SearXNG: {e}"
         logger.warning(f"SearXNG search failed: {e}")
         return []
 

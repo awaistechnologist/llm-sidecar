@@ -121,7 +121,7 @@ cd llm-sidecar && ./install.sh && ./run.sh          # Windows: install.bat, run.
 ```
 
 `install.sh` reports what your machine can actually reach — Ollama and how many
-models, whether a key is set, whether Docker is around for SearXNG — and prints
+models, whether a key is set, whether SearXNG is set up — and prints
 the MCP config with your real paths filled in.
 
 Note that a clone under `~/Documents` or `~/Desktop` **cannot** be run as a
@@ -275,7 +275,7 @@ llm-sidecar verify "the Great Wall is visible from space"
 llm-sidecar sum report.md --style bullets
 llm-sidecar models                                  # local models vs your RAM
 llm-sidecar usage --days 30
-llm-sidecar searxng up                              # better search, one command
+llm-sidecar searxng install                         # better search, one command
 llm-sidecar phone                                   # use it from your phone, over Tailscale
 ```
 
@@ -507,12 +507,35 @@ you — current state, the candidate order, and why — without probing anything
 ### SearXNG
 
 ```bash
-llm-sidecar searxng up
+llm-sidecar searxng install    # native, starts at login
+llm-sidecar searxng status     # is it answering, which engines are failing
+llm-sidecar searxng update     # every few weeks; rolls back if it breaks
 ```
 
-Writes a compose file and settings to `~/.config/llm-sidecar/searxng/`,
-generates a secret, starts the container, and waits until it really answers a
-JSON query before reporting success. Then it's detected automatically.
+`install` clones SearXNG into `~/.local/share/llm-sidecar/searxng/`, gives
+it its own venv, and runs it with `granian`, the server the official
+container uses, as a launchd agent (a systemd user unit on Linux). It waits
+until the instance really answers a JSON query before reporting success, and
+search detects it automatically. The daemon restarts it if it stops
+answering.
+
+Why not Docker: on a Mac a container needs a Linux VM. Docker Desktop's took
+~5 GiB, plus ~1.8 GiB for its own apps, to host a search engine using
+172 MiB; natively it is ~150 MiB. And search no longer depends on Docker
+having been started. Docker still works, for servers or if you prefer it:
+
+```bash
+llm-sidecar searxng up         # Docker or Podman compose
+```
+
+That writes a compose file and settings to `~/.config/llm-sidecar/searxng/`
+and starts the container. Both routes share that `settings.yml`, so running
+`install` over a Docker instance stops the container and takes its place.
+
+The cost of native is updates. SearXNG scrapes other search sites, and when
+they change, engines break until SearXNG ships a fix. `status` runs a real
+query and lists the failing engines, and says when the checkout is over 30
+days old.
 
 Why it needs a command: SearXNG ships with its JSON API **disabled**, so the
 stock image returns 403 to every request, which reads as "unavailable" and
@@ -927,8 +950,10 @@ an explanation rather than a stack trace.
   "5 years Django and FastAPI". Pass `allow_chat_model=True` to override.
 - No vector store or cross-session memory. Storing and retrieving embeddings
   is a different product; producing them is not.
-- `searxng` drives Docker or Podman compose. Anything else: run the compose
-  file yourself and set `SEARXNG_URL`.
+- `searxng install` runs SearXNG natively on macOS (launchd) and Linux
+  (systemd user unit), and needs git and Python 3.10+. `searxng up` drives
+  Docker or Podman compose. Anything else: run SearXNG yourself and set
+  `SEARXNG_URL`.
 - **`claude/` ignores `max_tokens` and `temperature`**, because the CLI has no
   flag for either. They are dropped rather than approximated — a `max_tokens`
   that silently does nothing is worse than one that is documented as absent.
@@ -949,7 +974,8 @@ an explanation rather than a stack trace.
 | `answer.py` | Grounded question answering |
 | `verify.py` | Claim extraction, evidence, grading, escalation |
 | `ops.py` | `summarise` / `classify` / `extract` with pinned schemas |
-| `search/` | Provider dispatch, DDG, SearXNG, `read_url` |
+| `search/` | Provider dispatch, DDG, SearXNG, `read_url`, search health |
+| `searxng_native.py` · `services.py` | SearXNG natively (launchd/systemd) · in Docker |
 | `cache.py` · `ledger.py` · `hardware.py` | Cache, spend record, memory fit |
 | `daemon.py` · `mcp_server.py` · `cli.py` · `ui/` | The four doors |
 | `phone.py` · `ui/app.html` | The phone app, the Host check, `llm-sidecar phone` |

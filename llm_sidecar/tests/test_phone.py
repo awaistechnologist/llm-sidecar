@@ -360,3 +360,18 @@ def test_phone_off(ts):
 def test_phone_warns_about_shared_tailnets_only_without_a_token(ts, daemon_up):
     assert "LLM_SIDECAR_TOKEN" in run()[1]
     assert "LLM_SIDECAR_TOKEN" not in run(config=Config(daemon_token="x"))[1]
+
+
+def test_engines_says_whether_search_works(cfg, monkeypatch):
+    """Web mode warns where the question is typed when search is down."""
+    from llm_sidecar import search
+
+    monkeypatch.setattr(search, "health", lambda config, fresh=True: {
+        "state": "down", "message": "DuckDuckGo is throttling", "fresh": fresh})
+    s = client(cfg).get("/app/api/engines").json()["search"]
+    assert s == {"state": "down", "message": "DuckDuckGo is throttling"}
+
+
+def test_the_app_shows_search_trouble_in_web_mode():
+    html = (Path(phone.__file__).parent / "ui" / "app.html").read_text(encoding="utf-8")
+    assert "Search isn't working right now" in html

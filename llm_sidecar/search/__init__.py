@@ -11,6 +11,7 @@ from __future__ import annotations
 import html
 import logging
 import re
+import time
 
 import httpx
 
@@ -21,6 +22,66 @@ from . import ddg, searxng
 logger = logging.getLogger("llm_sidecar.search")
 
 PROVIDERS = {"ddg": ddg, "searxng": searxng}
+
+# What the last searches did, for status pages. search() still returns []
+# on failure, because callers treat "no evidence" and "search broken" alike
+# and an exception would take down what it feeds. But the dashboard and the
+# phone have to be able to tell the two apart, or a dead search engine looks
+# like a quiet day on the internet — which is how it went unnoticed.
+_HEALTH: dict = {"provider": None, "last_ok": None, "last_empty": None,
+                 "last_error": None}
+RECENT_S = 600
+
+
+def _record(provider_name: str, ok: bool, error: str | None = None) -> None:
+    _HEALTH["provider"] = provider_name
+    if ok:
+        _HEALTH["last_ok"] = time.time()
+    else:
+        _HEALTH["last_empty"] = time.time()
+        if error:
+            _HEALTH["last_error"] = error[:200]
+
+
+def health(config: Config | None = None, fresh: bool = True) -> dict:
+    """Is search working, in words a person can act on.
+
+    `state` is ok, degraded (working, but on the weaker fallback or with
+    recent failures) or down."""
+    from .. import config as config_mod
+    from .. import searxng_native
+
+    config = config or config_mod.load()
+    if fresh:
+        # Status pages want the truth now. The phone passes fresh=False and
+        # takes the provider's cached probe, so opening the app stays quick.
+        searxng._probe_cache.pop(config.searxng_url, None)
+    sx_up = searxng.available(config)
+    native = searxng_native.installed()
+    now = time.time()
+    ok_at, empty_at = _HEALTH["last_ok"], _HEALTH["last_empty"]
+    failing = bool(empty_at and now - empty_at < RECENT_S and (not ok_at or empty_at > ok_at))
+
+    if config.search_provider == "ddg":
+        state, provider = ("degraded" if failing else "ok"), "duckduckgo"
+        message = ("DuckDuckGo is returning nothing (usually throttling)." if failing
+                   else "Using DuckDuckGo, as configured.")
+    elif sx_up:
+        state, provider = ("degraded" if failing else "ok"), "searxng"
+        message = ("SearXNG is up, but recent searches came back empty." if failing
+                   else "Local SearXNG is answering.")
+    else:
+        provider = "duckduckgo"
+        state = "down" if failing else "degraded"
+        if native:
+            message = ("Local SearXNG is not answering; the sidecar is restarting it. "
+                       "Using DuckDuckGo meanwhile, which often throttles.")
+        else:
+            message = ("No local SearXNG, so search uses DuckDuckGo only, which often "
+                       "throttles. `llm-sidecar searxng install` sets one up.")
+    return {"state": state, "provider": provider, "searxng_answering": sx_up,
+            "native_installed": native, "message": message,
+            "last_ok": ok_at, "last_empty": empty_at, "last_error": _HEALTH["last_error"]}
 
 
 def resolve_provider(config: Config):
@@ -60,10 +121,13 @@ def search(
         return [SearchResult(**r) for r in hit]
 
     results = provider.search(query, config, max_results=max_results, news=news)
+    used = name
 
     if not results and provider is searxng:
         logger.info("SearXNG returned nothing; falling back to DuckDuckGo.")
         results = ddg.search(query, config, max_results=max_results, news=news)
+        used = "ddg"
+    _record(used, bool(results), getattr(PROVIDERS.get(used), "LAST_ERROR", None))
 
     # Only cache a non-empty result. An empty list is usually a throttle or a
     # transient failure, and caching that would turn a blip into an hour of

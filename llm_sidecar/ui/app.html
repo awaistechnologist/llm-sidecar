@@ -988,7 +988,14 @@ $("btn-send").onclick = () => busy ? stop() : send();
 input.value = store.get("sc.draft", ""); grow();
 
 function hintText() {
-  if (settings.mode === "web") return "Searches the web, reads the pages, answers with sources";
+  if (settings.mode === "web") {
+    // Said where the question is typed, because a dead search engine
+    // otherwise looks like an answer with no sources.
+    const s = engines && engines.search;
+    if (s && s.state === "down") return "⚠ Search isn't working right now: " + s.message;
+    if (s && s.state === "degraded") return "Search is limited: " + s.message;
+    return "Searches the web, reads the pages, answers with sources";
+  }
   if (settings.mode === "image") {
     const p = currentProfile();
     return p ? `${p.name} · ${p.measured_s ? "~" + Math.round(p.measured_s) + "s" : ""} on your Mac's GPU` : "On your Mac's GPU";

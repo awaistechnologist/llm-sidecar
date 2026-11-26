@@ -504,11 +504,24 @@ def create_app(config: Config | None = None) -> FastAPI:
 
     @app.get("/searxng/status")
     def searxng_status(_: None = Depends(require_token)) -> dict:
-        from . import services
+        """The Docker instance, the native one, and whether search actually
+        works — three separate questions, because an instance can answer
+        while search is still falling back."""
+        from . import searxng_native, services
+        from .search import health
         try:
-            return services.status(cfg)
+            out = services.status(cfg)
         except Exception as e:
-            return {"error": str(e)}
+            out = {"error": str(e)}
+        try:
+            out["native"] = searxng_native.status(cfg)
+        except Exception as e:
+            out["native"] = {"error": str(e)[:200]}
+        try:
+            out["health"] = health(cfg)
+        except Exception as e:
+            out["health"] = {"state": "unknown", "message": str(e)[:200]}
+        return out
 
     @app.get("/changelog")
     def changelog(since: str = "", _: None = Depends(require_token)) -> dict:
@@ -837,7 +850,12 @@ def main(no_ui: bool = False, port: int | None = None) -> None:
         f"(cloud={'yes' if cfg.has_cloud else 'no'}, budget={cfg.default_budget})"
     )
     logger.info(f"dashboard on {base}" if cfg.ui_enabled else "dashboard disabled")
-    uvicorn.run(create_app(cfg), host=cfg.daemon_host, port=cfg.daemon_port, log_level="info")
+    app = create_app(cfg)
+    # Only for a real daemon, not create_app in tests: it restarts the native
+    # SearXNG when it stops answering.
+    from . import searxng_native
+    searxng_native.start_healer(cfg)
+    uvicorn.run(app, host=cfg.daemon_host, port=cfg.daemon_port, log_level="info")
 
 
 if __name__ == "__main__":

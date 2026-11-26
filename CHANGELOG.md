@@ -13,6 +13,45 @@ aimed at whoever reported it. State what changed, what now breaks, and what
 to do instead. Anything that does not demand a change belongs in Added,
 Fixed or Changed.
 
+## [0.11.0] — 2026-11-26
+
+### Added
+- **SearXNG runs natively, no Docker.** `llm-sidecar searxng install` puts
+  SearXNG in the sidecar's data directory (a git checkout, its own venv,
+  and the same `granian` server the official container runs) and starts it
+  at login through launchd, or a systemd user unit on Linux. Measured on a
+  36 GiB Mac: ~150 MiB, against ~5 GiB for Docker Desktop's VM plus ~1.8
+  GiB for Docker's own apps, to host a container using 172 MiB. Search
+  also stops depending on another app being started: every reboot without
+  Docker at login had quietly turned it off.
+
+  Run over an existing Docker instance on the same port, it stops the
+  container and takes its place, keeping the same `settings.yml`.
+- `llm-sidecar searxng update` pulls the latest SearXNG and rolls back if
+  the new version does not answer. SearXNG scrapes other sites and its
+  engines break when they change; Docker hid updates behind `docker pull`.
+  `searxng status` runs a real query and lists failing engines and why
+  (CAPTCHA, timeout), and says when the checkout is over 30 days old.
+- `llm-sidecar searxng uninstall [--purge]`, and `logs` for the native
+  instance.
+- **The daemon restarts SearXNG when it stops answering.** launchd already
+  restarts a crashed process; this covers a wedged one or an unloaded
+  service. At most once every five minutes.
+- **Search says when it is not working.** `search()` still returns `[]` on
+  failure, but now records it, and `search.health()` reports `ok`,
+  `degraded` (on the DuckDuckGo fallback, or recent empty results) or
+  `down`, with a sentence saying what to do. Shown on the dashboard, in
+  `/searxng/status` (`health`, `native`), in `llm-sidecar searxng status`,
+  and in the phone app's Web mode where the question is typed. Before
+  this, a dead search engine looked like an answer with no sources.
+
+### Changed
+- `llm-sidecar searxng status` and `logs` describe the native instance
+  when there is one, or when there is no Docker one either. `--docker`
+  shows the container. `up` and `down` still drive Docker or Podman and
+  remain the route for servers and anyone who prefers containers.
+- The CLI's hints now suggest `searxng install` rather than `searxng up`.
+
 ## [0.10.0] — 2026-11-18
 
 ### Changed

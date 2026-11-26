@@ -9,7 +9,7 @@
     llm-sidecar models           # local models scored against this machine
     llm-sidecar usage            # what you have spent
     llm-sidecar sum FILE         # summarise a file
-    llm-sidecar searxng up       # start a local SearXNG for better search
+    llm-sidecar searxng install  # run SearXNG natively at login, for better search
     llm-sidecar config key KEY   # save your OpenRouter key
     llm-sidecar service install  # run at login, restart on failure
 """
@@ -34,7 +34,7 @@ def _status() -> int:
     print(f"version        : {s['version']}")
     print(f"cloud key      : {'set' if s['cloud_configured'] else 'not set (local only)'}")
     print(f"budget         : {s['default_budget']}")
-    hint = "" if s["search_provider"] == "searxng" else "   (`llm-sidecar searxng up` for better search)"
+    hint = "" if s["search_provider"] == "searxng" else "   (`llm-sidecar searxng install` for better search)"
     print(f"search         : {s['search_provider']}{hint}")
     print(f"machine        : {hw.get('chip') or hw['system']} · {hw.get('total_ram_gib', '?')} GiB")
     print(f"local (fits)   : {usable or 'none'}")
@@ -386,6 +386,59 @@ def _searxng(args) -> int:
     from .types import SidecarError
 
     cfg = config_mod.load()
+    from . import searxng_native as native
+    from .search import health
+
+    native_actions = args.action in ("install", "update", "uninstall") or (
+        args.action in ("status", "logs") and not args.docker
+        and (native.installed() or not services.status(cfg)["installed"]))
+
+    if native_actions:
+        try:
+            if args.action == "install":
+                r = native.install(cfg, port=args.port or native.DEFAULT_PORT)
+                print(f"\nReady at {r['url']}  (SearXNG {r['commit']}, {r['commit_date'][:10]})")
+                print(f"Runs at login, restarts if it dies. Files: {r['home']}")
+                if r["replaced_docker"]:
+                    print("\nThe Docker container is removed (its settings are kept); "
+                          "Docker is no longer needed for search.")
+                if r["hint"]:
+                    print("\n" + r["hint"])
+            elif args.action == "update":
+                r = native.update()
+                if r["updated"]:
+                    print(f"Updated {r['from']} → {r['commit']} ({r['commit_date'][:10]}).")
+                else:
+                    print(f"Already current: {r['commit']} ({r['commit_date'][:10]}).")
+            elif args.action == "uninstall":
+                native.uninstall(purge=args.purge)
+                print("Removed the SearXNG service." + (" Deleted its files." if args.purge
+                      else f" Files kept in {native.home()} (--purge deletes them)."))
+            elif args.action == "logs":
+                lines = native.log_path().read_text(encoding="utf-8", errors="replace").splitlines()
+                print("\n".join(lines[-args.lines:]) or "(no output)")
+            else:
+                s = native.status(cfg, with_engines=True)
+                h = health(cfg)
+                print(f"search         : {h['state']} — {h['message']}")
+                if not s["installed"]:
+                    print("native SearXNG : not installed (`llm-sidecar searxng install`)")
+                    return 0
+                print(f"native SearXNG : {'answering' if s['answering'] else 'NOT answering'}"
+                      f" at {s['url']} (service {'running' if s['service_running'] else 'stopped'})")
+                age = f", {s['age_days']} days old" if s["age_days"] is not None else ""
+                print(f"version        : {s['commit']}{age}"
+                      + ("  — run `llm-sidecar searxng update`" if s["stale"] else ""))
+                eng = s.get("engines")
+                if eng:
+                    failing = ", ".join(f"{e['engine']} ({e['reason']})" for e in eng["failing"])
+                    print(f"test query     : {eng['results']} results"
+                          + (f"; failing: {failing}" if failing else "; all engines answered"))
+                print(f"log            : {s['log']}")
+        except (SidecarError, OSError) as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
+        return 0
 
     if args.action == "status":
         s = services.status(cfg)
@@ -592,9 +645,14 @@ def main(argv: list[str] | None = None) -> int:
 
     sx = sub.add_parser("searxng", help="run a local SearXNG for better search")
     sx.add_argument("action", nargs="?", default="status",
-                    choices=["up", "down", "status", "logs"])
+                    choices=["install", "update", "uninstall", "status", "logs",
+                             "up", "down"])
     sx.add_argument("--port", type=int, default=None, help="host port (default 8888)")
     sx.add_argument("--volumes", action="store_true", help="with down: also remove volumes")
+    sx.add_argument("--purge", action="store_true",
+                    help="with uninstall: also delete the checkout and its environment")
+    sx.add_argument("--docker", action="store_true",
+                    help="with status/logs: the Docker instance rather than the native one")
     sx.add_argument("--lines", type=int, default=50, help="with logs: how many lines")
 
     ask = sub.add_parser("ask", help="one-shot completion")
