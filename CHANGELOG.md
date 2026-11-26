@@ -15,6 +15,10 @@ Fixed or Changed.
 
 ## [0.12.0] — 2026-11-26
 
+The first release since 0.9.3. It also carries 0.10.0 and 0.11.0 (below),
+which were never published on their own; read their **Action required**
+sections too if you are upgrading from 0.9.x.
+
 ### Added
 - **`claude-api/` provider: Claude through the Anthropic API, paid from API
   credits.** Max, Ultra and Team plans include a monthly credit grant; this
@@ -51,6 +55,19 @@ Fixed or Changed.
   change to a running daemon, rather than waiting for a restart.
 - The dashboard chat's model list includes the Claude subscription and API
   credit models; it listed Ollama and OpenRouter only.
+- **The phone app is faster.** The Android app's WebView no longer has a
+  transparent background, which put it on Android's slow drawing path and
+  made scrolling and typing lag. Pages are gzip-compressed (the app page goes
+  from 97 KB to 27 KB over Tailscale), the page carries an ETag so a reopen
+  costs one 304, and the browser version opens from its saved copy and
+  refreshes behind it instead of waiting for the network.
+- **The config file is owner-only.** It can hold an OpenRouter key and was
+  created readable by every account on the machine. New saves are 0600, and
+  an existing file holding a key is tightened the next time it is read.
+- An end-to-end suite (`LLM_SIDECAR_E2E=1 pytest -m e2e`) starts real
+  daemons, the CLI and the MCP server in a throwaway home, and checks
+  settings persistence, the Host check, the token, path escapes, idle
+  memory, and a clean install from the built wheel.
 - `claude/` calls now read Claude Code's `stream-json` output for blocking
   calls too, which is how the subscription's usage windows and the
   credential each call used are seen. When the last reading says a window

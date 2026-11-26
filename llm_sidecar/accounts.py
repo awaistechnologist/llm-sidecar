@@ -225,7 +225,9 @@ def openrouter_free_exhausted(config: Config) -> bool:
 
 
 def _usd(v) -> str:
-    return f"${float(v):,.2f}"
+    """Two decimals, except a real but tiny spend, which "$0.00" would hide."""
+    v = float(v or 0)
+    return "<$0.01" if 0 < v < 0.005 else f"${v:,.2f}"
 
 
 def _openrouter_entry(config: Config, refresh: bool) -> dict | None:

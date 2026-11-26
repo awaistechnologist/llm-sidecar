@@ -76,8 +76,10 @@
   #app { height: 100dvh; display: flex; flex-direction: column; }
   header.top {
     flex: none; display: flex; align-items: center; gap: 4px;
-    padding: calc(var(--top) + 6px) 8px 6px; background: color-mix(in srgb, var(--bg) 86%, transparent);
-    backdrop-filter: saturate(1.6) blur(14px); -webkit-backdrop-filter: saturate(1.6) blur(14px);
+    /* Solid, not a backdrop blur: the bar sits above the scroller rather
+       than over it, so the blur bought nothing, and on Android it is
+       redrawn on every scroll frame. */
+    padding: calc(var(--top) + 6px) 8px 6px; background: var(--bg);
     border-bottom: 1px solid transparent; transition: border-color .2s; z-index: 5;
   }
   header.top.scrolled { border-bottom-color: var(--line); }
@@ -988,7 +990,14 @@ function updateSend() {
     b.innerHTML = '<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>';
   }
 }
-input.addEventListener("input", () => { grow(); updateSend(); store.set("sc.draft", input.value); });
+// The draft is saved a moment after typing stops, not on every key:
+// localStorage writes are synchronous and land on the typing path.
+let draftTimer = 0;
+input.addEventListener("input", () => {
+  grow(); updateSend();
+  clearTimeout(draftTimer);
+  draftTimer = setTimeout(() => store.set("sc.draft", input.value), 400);
+});
 input.addEventListener("keydown", (e) => {
   // On a phone, Enter is a new line and the button sends — a chat app that
   // sends half a thought because the keyboard's return key is where your
@@ -1469,6 +1478,14 @@ connect();
 }
 if ("serviceWorker" in navigator && !NATIVE) {
   navigator.serviceWorker.register("/app/sw.js", { scope: "/app/" }).catch(() => {});
+  // The worker opens the app from its copy at once and fetches the new one
+  // behind it. When the copy turns out to be old, switch now if nothing
+  // would be lost; otherwise the next open picks it up.
+  navigator.serviceWorker.addEventListener("message", (ev) => {
+    if (ev.data?.type !== "updated") return;
+    if (!busy && !input.value && !current?.messages.length) location.reload();
+    else toast("Sidecar updated — it will load next time");
+  });
 }
 </script>
 </body>

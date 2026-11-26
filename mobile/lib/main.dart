@@ -318,7 +318,6 @@ class _ShellState extends State<Shell> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     web = WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
-      ..setBackgroundColor(Colors.transparent)
       ..addJavaScriptChannel('SidecarNative', onMessageReceived: (m) => _fromPage(m.message))
       ..setNavigationDelegate(NavigationDelegate(
         onProgress: (p) => setState(() => progress = p),

@@ -158,12 +158,24 @@ class Config:
         return self.models.get(tier) or None
 
 
+def _restrict(path: Path) -> None:
+    """Make a file holding a key owner-only. Files saved before 0.12 were
+    created world-readable; this tightens them the next time they are read."""
+    try:
+        if path.stat().st_mode & 0o077:
+            os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
 def _from_file(path: Path) -> dict:
     if not path.exists():
         return {}
     try:
         with path.open(encoding="utf-8") as f:
             data = json.load(f)
+        if isinstance(data, dict) and data.get("openrouter_api_key"):
+            _restrict(path)
         return data if isinstance(data, dict) else {}
     except (json.JSONDecodeError, OSError):
         # A broken config file should not stop the process from starting —
@@ -297,7 +309,11 @@ def save(config: Config, include_api_key: bool = False,
             if existing:
                 data["openrouter_api_key"] = existing
     tmp = CONFIG_FILE.with_suffix(".json.tmp")
-    with tmp.open("w", encoding="utf-8") as f:
+    # Owner-only from the first byte: the file can hold an API key, and
+    # open() would otherwise create it world-readable (umask 022).
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
+    os.chmod(tmp, 0o600)
     tmp.replace(CONFIG_FILE)
     return CONFIG_FILE

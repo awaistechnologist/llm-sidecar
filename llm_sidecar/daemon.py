@@ -216,6 +216,12 @@ def create_app(config: Config | None = None) -> FastAPI:
             allow_credentials=False,
         )
 
+    # Compress pages and JSON. The phone reaches this over Tailscale, where a
+    # round trip on phone Wi-Fi is ~100 ms, and the app page alone is ~96 KB.
+    # Starlette leaves text/event-stream alone, so streaming is unaffected.
+    from starlette.middleware.gzip import GZipMiddleware
+    app.add_middleware(GZipMiddleware, minimum_size=1024)
+
     # Before anything else answers: see phone.py for why a loopback daemon
     # checks the Host header (DNS rebinding, and Tailscale making phone
     # requests arrive from 127.0.0.1).

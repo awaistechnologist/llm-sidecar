@@ -155,14 +155,21 @@ def install_routes(app, cfg, sidecar, require_token, op) -> None:
     from fastapi import Depends, Header, HTTPException
     from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 
-    def page():
+    def page(if_none_match: str | None = None):
         if not cfg.ui_enabled:
             raise HTTPException(status_code=404, detail="The UI is disabled.")
-        p = UI / "app.html"
-        # no-cache so a phone that installed the app picks up a new version
-        # on its next open rather than whenever the service worker decides.
-        return HTMLResponse(p.read_text(encoding="utf-8"),
-                            headers={"Cache-Control": "no-cache"})
+        import hashlib
+        from fastapi import Response
+
+        body = (UI / "app.html").read_text(encoding="utf-8")
+        tag = '"' + hashlib.sha256(body.encode()).hexdigest()[:16] + '"'
+        # no-cache so a new version is picked up on the next open, with an
+        # ETag so checking costs one small 304 rather than the whole page.
+        # The Android app has no service worker, so this is its only cache.
+        headers = {"Cache-Control": "no-cache", "ETag": tag}
+        if if_none_match and tag in if_none_match:
+            return Response(status_code=304, headers=headers)
+        return HTMLResponse(body, headers=headers)
 
     @app.get("/app", include_in_schema=False)
     def app_redirect():
@@ -171,8 +178,8 @@ def install_routes(app, cfg, sidecar, require_token, op) -> None:
         return RedirectResponse("/app/", status_code=308)
 
     @app.get("/app/", include_in_schema=False)
-    def app_page():
-        return page()
+    def app_page(if_none_match: str | None = Header(default=None)):
+        return page(if_none_match)
 
     @app.get("/app/{name}", include_in_schema=False)
     def app_static(name: str):
