@@ -1432,7 +1432,8 @@ function settingsSheet() {
       <dt>Mac</dt><dd class="mono">${esc(host)}</dd>
       <dt>Sidecar</dt><dd>${e.version ? "v" + esc(e.version) : "—"}</dd>
       <dt>Local models</dt><dd>${(e.local || []).length}</dd>
-      <dt>Claude</dt><dd>${(e.claude || []).length ? "signed in here" : "off"}</dd>
+      <dt>Claude</dt><dd>${(e.claude || []).length ? "subscription signed in here" : "off"}</dd>
+      <dt>API credits</dt><dd>${(e.claude_api?.models || []).length ? `$${(e.claude_api.remaining_usd ?? 0).toFixed(2)} of $${e.claude_api.allowance_usd} left · renews ${esc(e.claude_api.resets)}` : "off"}</dd>
       <dt>OpenRouter</dt><dd>${e.cloud?.configured ? "key set" : "no key"}</dd>
       <dt>Images</dt><dd>${e.images?.available ? "available" : "not on this Mac"}</dd>
     </dl>

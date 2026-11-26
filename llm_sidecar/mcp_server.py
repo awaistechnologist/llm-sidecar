@@ -201,7 +201,7 @@ def extract_claims(text: str) -> dict:
 
 
 @mcp.tool()
-def delegate(prompt: str, tier: str = "fast", budget: str = "") -> dict:
+def delegate(prompt: str, tier: str = "fast", budget: str = "", model: str = "") -> dict:
     """
     Hand a bounded task to a cheaper or local model instead of doing it
     yourself. Good for bulk summarising, log triage, reformatting, and
@@ -211,12 +211,17 @@ def delegate(prompt: str, tier: str = "fast", budget: str = "") -> dict:
         prompt: The full task, self-contained.
         tier:   "fast" | "balanced" | "powerful" (default "fast").
         budget: "free" | "cheap" | "best" — overrides the configured default.
+        model:  Optional exact model, overriding tier and budget: an Ollama
+                model ("ollama/llama3.2:3b"), the Claude subscription
+                ("claude/haiku"), Claude API credits ("claude-api/haiku"), or
+                an OpenRouter id. Check `allowances` first for paid ones.
 
-    Returns {"text", "model", "cost_usd", "local"}. The model is chosen and
-    verified at call time; you don't need to name one.
+    Returns {"text", "model", "cost_usd", "local"}. Without `model` the
+    model is chosen and verified at call time; you don't need to name one.
     """
     try:
-        c = sidecar().complete(prompt, tier=tier, budget=budget or None, max_tokens=4000)
+        c = sidecar().complete(prompt, tier=tier, budget=budget or None,
+                               model=model or None, max_tokens=4000)
     except Exception as e:
         return {"error": f"Delegation failed: {e}"}
     return {

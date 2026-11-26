@@ -244,6 +244,19 @@ def _from_env() -> dict:
     return out
 
 
+def key_source(config: Config) -> str | None:
+    """Where the OpenRouter key in use came from: "env", "file" (saved on
+    this machine), "session" (set on the running daemon only), or None."""
+    key = config.openrouter_api_key
+    if not key:
+        return None
+    if os.getenv("OPENROUTER_API_KEY") == key:
+        return "env"
+    if _from_file(CONFIG_FILE).get("openrouter_api_key") == key:
+        return "file"
+    return "session"
+
+
 def load(**overrides) -> Config:
     """Build a Config from file + env, with keyword overrides winning outright."""
     data: dict = {}

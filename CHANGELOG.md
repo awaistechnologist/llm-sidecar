@@ -34,8 +34,23 @@ Fixed or Changed.
   estimated.
 - The phone app lists `claude-api/` models with the credit left.
 - `llm-sidecar ask --model <id>`. The README showed this flag; it did not exist.
+- **Default models for every provider.** The dashboard's Settings has a
+  default-model picker per tier listing local, `claude/`, `claude-api/` and
+  OpenRouter models; `llm-sidecar config tier <tier> <model|auto>` does the
+  same from the shell. Tier locks used to offer local models only.
+- A Claude API credits switch, allowance and renewal day on the dashboard.
+- `delegate` over MCP takes an optional `model`.
 
 ### Changed
+- **Settings changed on the dashboard are saved.** Budget, tier defaults
+  and the Claude switches used to apply to the running daemon only and
+  revert at the next restart. The OpenRouter key is still saved only when
+  "remember" is ticked, and the dashboard now says where the key in use
+  lives (saved on this machine, environment, or this session only).
+- `llm-sidecar config budget|tier|claude-cli|claude-api…` also applies the
+  change to a running daemon, rather than waiting for a restart.
+- The dashboard chat's model list includes the Claude subscription and API
+  credit models; it listed Ollama and OpenRouter only.
 - `claude/` calls now read Claude Code's `stream-json` output for blocking
   calls too, which is how the subscription's usage windows and the
   credential each call used are seen. When the last reading says a window

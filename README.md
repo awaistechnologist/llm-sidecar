@@ -528,19 +528,27 @@ llm-sidecar models --suggest    # what to pull, given your RAM
 are usable — "loaded" just means it answers immediately instead of paying a
 cold load first, and Ollama unloads after about five idle minutes.
 
-### Locking a tier
+### Default models (locking a tier)
 
 Normally a tier chooses its own model and re-checks every 15 minutes.
-**Locking** overrides that: always this model, no search, no probe, **no
-budget** — a locked tier stays put even if you ask for `best`.
+Giving it a **default model** overrides that: always this model, no search,
+no probe, **no budget** — it stays put even if you ask for `best`. Any model
+from any provider works: local, `claude/`, `claude-api/` or OpenRouter.
 
 ```bash
-LLM_SIDECAR_MODEL_FAST=ollama/gemma3:27b          # env
+llm-sidecar config tier powerful claude/opus      # saved; applied to a running daemon
+llm-sidecar config tier powerful auto             # back to picking by budget
 ```
 ```
-dashboard → Local models → click "fast" on a row
-POST /config/tier {"tier": "fast", "model": "..."}
+dashboard → Settings → Default models
+POST /config/tier {"tier": "fast", "model": "..."}   # "" for auto
+LLM_SIDECAR_MODEL_FAST=ollama/gemma3:27b          # env, for one process
 ```
+
+Settings changed on the dashboard (defaults, budget, the Claude toggles,
+the API credit allowance) are saved to the config file and survive a
+restart. The OpenRouter key is the one exception: it is saved only when you
+tick "remember", because the file is plain text.
 
 Worth it for reproducibility and no probe latency. The cost: a locked tier
 never rotates away, so if that model starts failing, your calls fail with it.

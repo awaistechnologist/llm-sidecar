@@ -14,3 +14,9 @@ def _private_data_dir(monkeypatch, tmp_path):
     for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_PROFILE"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("ANTHROPIC_CONFIG_DIR", str(tmp_path / "anthropic"))
+    # Settings are now saved when changed through the daemon, and the CLI
+    # also tells a running daemon. Neither may touch the real ones.
+    from llm_sidecar import cli, config
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path / "config")
+    monkeypatch.setattr(config, "CONFIG_FILE", tmp_path / "config" / "config.json")
+    monkeypatch.setattr(cli, "_tell_daemon", lambda *a, **k: False)

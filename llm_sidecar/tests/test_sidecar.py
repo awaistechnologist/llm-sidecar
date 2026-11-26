@@ -1077,10 +1077,19 @@ def test_dashboard_has_no_external_requests():
 
 
 def test_tier_pin_and_clear(api):
+    """Saved, so a default chosen on the dashboard survives a restart.
+    Writing the file must not add a key that was only set in memory."""
+    import json as _json
+    from llm_sidecar import config as config_mod
+
     r = api.post("/config/tier", json={"tier": "fast", "model": "ollama/x"}).json()
-    assert r["models"]["fast"] == "ollama/x"
-    assert r["persisted"] is False        # runtime only, never rewrites config
+    assert r["models"]["fast"] == "ollama/x" and r["persisted"] is True
+    saved = _json.loads(config_mod.CONFIG_FILE.read_text(encoding="utf-8"))
+    assert saved["models"] == {"fast": "ollama/x"}
+    assert not saved.get("openrouter_api_key")
+    assert config_mod.load().models == {"fast": "ollama/x"}
     assert api.post("/config/tier", json={"tier": "fast", "model": ""}).json()["models"] == {}
+    assert config_mod.load().models == {}
 
 
 def test_tier_pin_rejects_unknown_tier(api):
@@ -1898,8 +1907,8 @@ def test_dashboard_shows_key_state_as_a_badge():
 
     html = (Path(llm_sidecar.__file__).parent / "ui" / "index.html").read_text(encoding="utf-8")
     assert 'id="cfg-key-state"' in html
-    assert "no API key — local only" in html
-    assert "API key set" in html
+    assert "no OpenRouter key — local only" in html
+    assert "OpenRouter key set" in html
 
 
 def test_complete_json_rotates_past_a_model_that_cannot_do_schema(cfg, monkeypatch):

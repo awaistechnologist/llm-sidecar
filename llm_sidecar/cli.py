@@ -105,6 +105,20 @@ def _models(args) -> int:
     return 0
 
 
+def _tell_daemon(cfg, path: str, body: dict) -> bool:
+    """Apply a setting to a running daemon as well as the file, so a change
+    made here does not wait for a restart. False if no daemon answered."""
+    import httpx
+
+    headers = {"Authorization": f"Bearer {cfg.daemon_token}"} if cfg.daemon_token else {}
+    try:
+        r = httpx.post(f"http://127.0.0.1:{cfg.daemon_port}{path}", json=body,
+                       headers=headers, timeout=3.0)
+        return r.status_code == 200
+    except httpx.HTTPError:
+        return False
+
+
 def _allowances(args) -> int:
     import json as _json
     from . import Sidecar
@@ -170,6 +184,25 @@ def _config(args) -> int:
             return 1
         cfg.default_budget = args.value
         print(f"Saved to {config_mod.save(cfg)}")
+        if _tell_daemon(cfg, "/config/budget", {"budget": args.value}):
+            print("Applied to the running daemon too.")
+        return 0
+
+    if args.action == "tier":
+        tier, model = (args.value or "").strip(), (args.model or "").strip()
+        if tier not in ("fast", "balanced", "powerful") or not model:
+            print("Use: llm-sidecar config tier fast|balanced|powerful <model id|auto>\n"
+                  "  e.g. llm-sidecar config tier powerful claude/opus", file=sys.stderr)
+            return 1
+        models = dict(cfg.models)
+        if model == "auto":
+            models.pop(tier, None)
+        else:
+            models[tier] = model
+        cfg.models = models
+        print(f"{tier} → {model}. Saved to {config_mod.save(cfg)}")
+        if _tell_daemon(cfg, "/config/tier", {"tier": tier, "model": "" if model == "auto" else model}):
+            print("Applied to the running daemon too.")
         return 0
 
     if args.action == "show":
@@ -195,6 +228,9 @@ def _config(args) -> int:
             print("Give a number.", file=sys.stderr)
             return 1
         print(f"Saved to {config_mod.save(cfg)}")
+        _tell_daemon(cfg, "/config/claude-api", {
+            "monthly_credit_usd": cfg.claude_api_monthly_credit_usd,
+            "reset_day": cfg.claude_api_reset_day})
         return 0
 
     if args.action == "claude-api":
@@ -207,6 +243,7 @@ def _config(args) -> int:
         if want:
             cfg.claude_api_enabled = (want == "on")
             print(f"Saved to {config_mod.save(cfg)}")
+            _tell_daemon(cfg, "/config/claude-api", {"enabled": cfg.claude_api_enabled})
         info = claude_api.check(cfg)
         s = claude_api.spend(cfg)
         print(f"enabled        : {'yes' if info['enabled'] else 'no'}")
@@ -232,6 +269,7 @@ def _config(args) -> int:
         if want:
             cfg.claude_cli_enabled = (want == "on")
             print(f"Saved to {config_mod.save(cfg)}")
+            _tell_daemon(cfg, "/config/claude-cli", {"enabled": cfg.claude_cli_enabled})
 
         info = claude_cli.check(cfg)
         print(f"claude binary  : {info['binary'] or 'not found'}")
@@ -620,9 +658,11 @@ def main(argv: list[str] | None = None) -> int:
 
     cf = sub.add_parser("config", help="set your API key, budget, and see what's configured")
     cf.add_argument("action",
-                    choices=["key", "budget", "show", "clear-key", "claude-cli",
+                    choices=["key", "budget", "tier", "show", "clear-key", "claude-cli",
                              "claude-api", "claude-api-credit", "claude-api-reset-day"])
     cf.add_argument("value", nargs="?", default="")
+    cf.add_argument("model", nargs="?", default="",
+                    help="for `config tier`: a model id, or auto to pick by budget")
     cf.add_argument("--save", action="store_true",
                     help="write it to the config file (plain text) rather than this process only")
 

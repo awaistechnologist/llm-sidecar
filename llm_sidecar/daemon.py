@@ -75,6 +75,12 @@ class BudgetRequest(BaseModel):
     budget: str
 
 
+class ClaudeApiRequest(BaseModel):
+    enabled: bool | None = None
+    monthly_credit_usd: float | None = None
+    reset_day: int | None = None
+
+
 class EmbedRequest(BaseModel):
     # Named `input` to match the OpenAI embeddings shape, so existing clients
     # work unchanged. Accepts a string or a list, as that API does.
@@ -435,6 +441,18 @@ def create_app(config: Config | None = None) -> FastAPI:
             "models": cfg.models,
         }
 
+    def persist() -> bool:
+        """Write the running settings to the config file. The API key is
+        carried over as it is on disk, never added: saving a budget must not
+        also save a key the user chose to keep in memory."""
+        from . import config as config_mod
+        try:
+            config_mod.save(cfg)
+            return True
+        except OSError as e:
+            logger.warning(f"could not save settings: {e}")
+            return False
+
     @app.post("/config/api-key")
     def set_api_key(req: ApiKeyRequest, _: None = Depends(require_token)) -> dict:
         """Set or clear the OpenRouter key on the running daemon.
@@ -473,15 +491,18 @@ def create_app(config: Config | None = None) -> FastAPI:
             raise HTTPException(status_code=400,
                                 detail=f"Unknown budget {req.budget!r}. Expected one of {BUDGET_ALIASES}.")
         cfg.default_budget = req.budget
-        return {"ok": True, "default_budget": cfg.default_budget}
+        sidecar._resolved.clear()
+        return {"ok": True, "default_budget": cfg.default_budget, "persisted": persist()}
 
     @app.post("/config/tier")
     def set_tier(req: TierRequest, _: None = Depends(require_token)) -> dict:
-        """Pin a tier to a model, or clear the pin with an empty model.
+        """Set a tier's default model, or clear it (empty model) so the tier
+        picks automatically by budget.
 
-        Runtime only — deliberately not written to disk. The dashboard is for
-        trying things; a click that silently rewrites the user's config file
-        is a worse surprise than one that doesn't survive a restart."""
+        Saved to the config file. It used to be runtime-only, on the theory
+        that a click should not rewrite the config; in practice every setting
+        on the dashboard silently reverting at the next restart was the worse
+        surprise, and the panel is called Settings."""
         if req.tier not in TIER_ALIASES:
             raise HTTPException(status_code=400,
                                 detail=f"Unknown tier {req.tier!r}. Expected one of {TIER_ALIASES}.")
@@ -491,7 +512,8 @@ def create_app(config: Config | None = None) -> FastAPI:
         else:
             models.pop(req.tier, None)
         cfg.models = models
-        return {"ok": True, "models": cfg.models, "persisted": False}
+        sidecar._resolved.clear()
+        return {"ok": True, "models": cfg.models, "persisted": persist()}
 
     @app.post("/ops/summarise")
     def summarise(req: SummariseRequest, _: None = Depends(require_token)) -> dict:
@@ -639,6 +661,7 @@ def create_app(config: Config | None = None) -> FastAPI:
         cfg.claude_cli_enabled = bool(req.enabled)
         if req.path is not None:
             cfg.claude_cli_path = req.path or None
+        persist()
         return {
             "enabled": cfg.claude_cli_enabled,
             "installed": claude_cli.binary(cfg) is not None,
@@ -653,11 +676,19 @@ def create_app(config: Config | None = None) -> FastAPI:
         return sidecar.allowances(refresh=refresh)
 
     @app.post("/config/claude-api")
-    def set_claude_api(req: ClaudeCliRequest, _: None = Depends(require_token)) -> dict:
-        """Turn the claude-api/ provider on or off on the running daemon."""
+    def set_claude_api(req: ClaudeApiRequest, _: None = Depends(require_token)) -> dict:
+        """Turn the claude-api/ provider on or off, or change its allowance
+        or renewal day. Saved to the config file."""
         from . import claude_api
-        cfg.claude_api_enabled = bool(req.enabled)
-        return {**claude_api.check(cfg), "models": [m.id for m in claude_api.models(cfg)]}
+        if req.enabled is not None:
+            cfg.claude_api_enabled = bool(req.enabled)
+        if req.monthly_credit_usd is not None:
+            cfg.claude_api_monthly_credit_usd = max(0.0, float(req.monthly_credit_usd))
+        if req.reset_day is not None:
+            cfg.claude_api_reset_day = min(31, max(1, int(req.reset_day)))
+        persist()
+        return {**claude_api.check(cfg), **claude_api.spend(cfg),
+                "models": [m.id for m in claude_api.models(cfg)]}
 
     @app.get("/status")
     def status(_: None = Depends(require_token)) -> dict:

@@ -469,3 +469,70 @@ def test_ask_takes_a_model(monkeypatch, capsys):
     monkeypatch.setattr(Sidecar, "complete", complete)
     assert cli.main(["ask", "--model", "claude-api/haiku", "-q", "hi"]) == 0
     assert seen["model"] == "claude-api/haiku" and capsys.readouterr().out.strip() == "ok"
+
+
+# ── choosing models and defaults ─────────────────────────────────────────
+
+
+def test_cli_sets_and_clears_a_tier_default():
+    from llm_sidecar import cli, config as config_mod
+
+    assert cli.main(["config", "tier", "powerful", "claude/opus"]) == 0
+    assert config_mod.load().models == {"powerful": "claude/opus"}
+    assert cli.main(["config", "tier", "powerful", "auto"]) == 0
+    assert config_mod.load().models == {}
+    assert cli.main(["config", "tier", "turbo", "x"]) == 1
+
+
+def test_key_source_says_where_the_key_lives(monkeypatch):
+    from llm_sidecar import config as config_mod
+
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    assert config_mod.key_source(Config()) is None
+    assert config_mod.key_source(Config(openrouter_api_key="k1")) == "session"
+    config_mod.save(Config(openrouter_api_key="k1"), include_api_key=True)
+    assert config_mod.key_source(Config(openrouter_api_key="k1")) == "file"
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k1")
+    assert config_mod.key_source(Config(openrouter_api_key="k1")) == "env"
+
+
+def test_claude_api_settings_from_the_dashboard_are_saved():
+    from fastapi.testclient import TestClient
+    from llm_sidecar import config as config_mod, daemon
+
+    app = daemon.create_app(Config())
+    r = TestClient(app, base_url="http://127.0.0.1").post("/config/claude-api",
+                             json={"enabled": True, "monthly_credit_usd": 50, "reset_day": 18}).json()
+    assert r["allowance_usd"] == 50 and r["resets"].endswith("-18")
+    saved = config_mod.load()
+    assert saved.claude_api_enabled and saved.claude_api_monthly_credit_usd == 50
+    assert saved.claude_api_reset_day == 18
+
+
+def test_delegate_over_mcp_can_name_a_model(monkeypatch):
+    from llm_sidecar import mcp_server
+    from llm_sidecar.types import Completion
+
+    seen = {}
+
+    class Fake:
+        def complete(self, prompt, **kw):
+            seen.update(kw)
+            return Completion(text="ok", model=kw.get("model") or "auto")
+
+    monkeypatch.setattr(mcp_server, "sidecar", lambda: Fake())
+    assert mcp_server.delegate("x", model="claude-api/haiku")["model"] == "claude-api/haiku"
+    mcp_server.delegate("x")
+    assert seen["model"] is None
+
+
+def test_every_model_list_on_the_dashboard_includes_every_provider():
+    """The chat picker used to list Ollama and OpenRouter only, so neither
+    Claude provider could be chosen there even when switched on."""
+    from pathlib import Path
+    import llm_sidecar
+
+    html = (Path(llm_sidecar.__file__).parent / "ui" / "index.html").read_text(encoding="utf-8")
+    for owner in ('"ollama"', '"claude-cli"', '"anthropic"', '"openrouter"'):
+        assert owner in html.split("const PROVIDERS")[1].split("];")[0]
+    assert 'id="cfg-tier-powerful"' in html and 'id="cfg-api"' in html

@@ -521,6 +521,8 @@ class Sidecar:
             "cloud_configured": self.config.has_cloud,
             "key_preview": (f"…{self.config.openrouter_api_key[-4:]}"
                             if self.config.openrouter_api_key else ""),
+            "key_source": config_mod.key_source(self.config),
+            "default_tier": self.config.default_tier,
             "default_budget": self.config.default_budget,
             "search_provider": provider,
             # Installed-and-enabled only. Auth needs a real call, so status()
