@@ -47,6 +47,12 @@ def _status() -> int:
     elif cc.get("installed"):
         print("claude/ (CLI)  : installed but off   "
               "(`llm-sidecar config claude-cli on` to use your subscription)")
+    ca = s.get("claude_api") or {}
+    if ca.get("enabled"):
+        print(f"claude-api/    : on · {ca.get('detail', '')}")
+    elif ca.get("credentials"):
+        print("claude-api/    : credentials found but off   "
+              "(`llm-sidecar config claude-api on` to use API credits)")
     c = s["cache"]
     print(f"cache          : {c['completions']} completions, {c['searches']} searches "
           f"({c['bytes'] / 1024:.0f} KiB)")
@@ -96,6 +102,23 @@ def _models(args) -> int:
     print(f"\n✓ fits  ~ tight  ✗ too big   (at {args.context:,} token context)")
     print("All of them are usable. \"loaded\" means it is in memory now and answers")
     print("immediately; the rest cost a load first. Ollama unloads after ~5 idle minutes.")
+    return 0
+
+
+def _allowances(args) -> int:
+    import json as _json
+    from . import Sidecar
+
+    r = Sidecar().allowances(refresh=args.refresh)
+    if args.json:
+        print(_json.dumps(r, indent=2, default=str))
+        return 0
+    mark = {"ok": "ok  ", "warn": "low ", "exhausted": "OUT ", "off": "off ", "unknown": "?   "}
+    for e in r["providers"]:
+        print(f"{mark.get(e.get('state'), '?   ')} {e['label']}")
+        print(f"     {e.get('summary', '')}")
+        if e.get("source") == "estimated":
+            print("     (estimated: no API reports this balance)")
     return 0
 
 
@@ -158,7 +181,45 @@ def _config(args) -> int:
         print(f"search         : {cfg.search_provider}")
         print(f"locked tiers   : {cfg.models or 'none'}")
         print(f"claude/ (CLI)  : {'on' if cfg.claude_cli_enabled else 'off'}")
+        print(f"claude-api/    : {'on' if cfg.claude_api_enabled else 'off'} · "
+              f"${cfg.claude_api_monthly_credit_usd:g}/period from day {cfg.claude_api_reset_day}")
         return 0
+
+    if args.action in ("claude-api-credit", "claude-api-reset-day"):
+        try:
+            if args.action == "claude-api-credit":
+                cfg.claude_api_monthly_credit_usd = max(0.0, float(args.value))
+            else:
+                cfg.claude_api_reset_day = min(31, max(1, int(args.value)))
+        except ValueError:
+            print("Give a number.", file=sys.stderr)
+            return 1
+        print(f"Saved to {config_mod.save(cfg)}")
+        return 0
+
+    if args.action == "claude-api":
+        from . import claude_api
+
+        want = (args.value or "").strip().lower()
+        if want not in ("on", "off", ""):
+            print("Use: llm-sidecar config claude-api on|off", file=sys.stderr)
+            return 1
+        if want:
+            cfg.claude_api_enabled = (want == "on")
+            print(f"Saved to {config_mod.save(cfg)}")
+        info = claude_api.check(cfg)
+        s = claude_api.spend(cfg)
+        print(f"enabled        : {'yes' if info['enabled'] else 'no'}")
+        print(f"sdk            : {'installed' if info['sdk'] else 'missing'}")
+        print(f"credentials    : {info['credentials'] or 'none'}")
+        print(f"allowance      : ${s['allowance_usd']:g} per period, renews {s['resets']}")
+        print(f"spent          : ${s['spent_usd']:.4f} this period (sidecar's own count)")
+        print(f"               : {info['detail']}")
+        if info["enabled"] and info["credentials"]:
+            print()
+            print("Use it by naming a model:")
+            print("  llm-sidecar ask --model claude-api/haiku \"...\"")
+        return 0 if info["sdk"] and (not info["enabled"] or info["credentials"]) else 1
 
     if args.action == "claude-cli":
         from . import claude_cli
@@ -454,13 +515,16 @@ def _ask(args) -> int:
 
     sc = Sidecar()
     try:
-        c = sc.complete(args.prompt, tier=args.tier, budget=args.budget, max_tokens=args.max_tokens)
+        c = sc.complete(args.prompt, tier=args.tier, budget=args.budget,
+                        model=args.model or None, max_tokens=args.max_tokens)
     except Exception as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
     print(c.text)
     if not args.quiet:
         cost = "free" if c.usage.cost_usd == 0 else f"${c.usage.cost_usd:.6f}"
+        if c.model.startswith("claude/") and c.usage.cost_usd == 0:
+            cost = "subscription"
         print(f"\n— {c.model} · {c.usage.total_tokens} tokens · {cost}", file=sys.stderr)
     return 0
 
@@ -540,6 +604,12 @@ def main(argv: list[str] | None = None) -> int:
     use = sub.add_parser("usage", help="what you have spent, by model")
     use.add_argument("--days", type=int, default=30, help="0 for all time")
 
+    al = sub.add_parser("allowances",
+                        help="what each provider has left: credit, free requests, usage windows")
+    al.add_argument("--refresh", action="store_true",
+                    help="re-read now (spends one tiny claude/ call for the subscription windows)")
+    al.add_argument("--json", action="store_true")
+
     sm = sub.add_parser("sum", help="summarise a file (- for stdin)")
     sm.add_argument("file")
     sm.add_argument("--style", default="brief", choices=["brief", "bullets", "detailed", "tldr"])
@@ -550,7 +620,8 @@ def main(argv: list[str] | None = None) -> int:
 
     cf = sub.add_parser("config", help="set your API key, budget, and see what's configured")
     cf.add_argument("action",
-                    choices=["key", "budget", "show", "clear-key", "claude-cli"])
+                    choices=["key", "budget", "show", "clear-key", "claude-cli",
+                             "claude-api", "claude-api-credit", "claude-api-reset-day"])
     cf.add_argument("value", nargs="?", default="")
     cf.add_argument("--save", action="store_true",
                     help="write it to the config file (plain text) rather than this process only")
@@ -608,6 +679,8 @@ def main(argv: list[str] | None = None) -> int:
     ask.add_argument("prompt")
     ask.add_argument("--tier", default=None, choices=["fast", "balanced", "powerful"])
     ask.add_argument("--budget", default=None, choices=["free", "cheap", "best"])
+    ask.add_argument("--model", default=None,
+                     help="a model id, e.g. claude-api/haiku or ollama/llama3.2:3b")
     ask.add_argument("--max-tokens", type=int, default=1000, dest="max_tokens")
     ask.add_argument("-q", "--quiet", action="store_true", help="suppress the cost receipt")
 
@@ -639,6 +712,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "usage":
         args.days = args.days or None
         return _usage(args)
+    if args.cmd == "allowances":
+        return _allowances(args)
     if args.cmd == "sum":
         return _summarise(args)
     if args.cmd == "image":

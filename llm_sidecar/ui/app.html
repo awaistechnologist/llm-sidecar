@@ -556,6 +556,7 @@ function persistCurrent() {
 const pretty = (id) => {
   if (!id) return "";
   if (id.startsWith("claude/")) return "Claude " + id.slice(7).replace(/^./, (c) => c.toUpperCase());
+  if (id.startsWith("claude-api/")) return "Claude " + id.slice(11).replace(/^./, (c) => c.toUpperCase());
   if (id.startsWith("ollama/")) return id.slice(7).replace(/:latest$/, "");
   return id.split("/").pop().replace(/:free$/, "");
 };
@@ -563,13 +564,14 @@ function engineLabel(e = settings.engine) {
   switch (e.kind) {
     case "local":  return { name: pretty(e.model), sub: "on your Mac", cls: "" };
     case "claude": return { name: pretty(e.model), sub: "Claude subscription", cls: "sub" };
+    case "claude-api": return { name: pretty(e.model), sub: "Claude API credits", cls: "cloud" };
     case "cloud":  return { name: "Cloud · " + e.tier, sub: "OpenRouter · " + (e.budget || "free"), cls: "cloud" };
     default:       return { name: "Auto", sub: "the sidecar decides", cls: "" };
   }
 }
 function engineRequest(e = settings.engine) {
   switch (e.kind) {
-    case "local": case "claude": return { model: e.model };
+    case "local": case "claude": case "claude-api": return { model: e.model };
     case "cloud": return { model: e.tier, budget: e.budget || "free" };
     default: return settings.budget ? { model: "auto", budget: settings.budget } : { model: "auto" };
   }
@@ -600,6 +602,13 @@ function engineSheet() {
     h += `<h3>Claude · your subscription</h3>`;
     const blurb = { "claude/haiku": "Fastest", "claude/sonnet": "Best balance", "claude/opus": "Most capable" };
     for (const m of claude) h += opt(ICON.claude, "sub", pretty(m), (blurb[m] || "") + " · via claude -p", e.kind === "claude" && e.model === m, { kind: "claude", model: m });
+  }
+  const api = engines?.claude_api || {};
+  if ((api.models || []).length) {
+    const left = api.allowance_usd ? ` · $${(api.remaining_usd ?? 0).toFixed(2)} of $${api.allowance_usd} left` : "";
+    h += `<h3>Claude · API credits${esc(left)}</h3>`;
+    const blurb = { "claude-api/haiku": "Fastest, pennies", "claude-api/sonnet": "Best balance", "claude-api/opus": "Most capable" };
+    for (const m of api.models) h += opt(ICON.claude, "cloud", pretty(m), (blurb[m] || "") + " · stops before paid credit", e.kind === "claude-api" && e.model === m, { kind: "claude-api", model: m });
   }
   if (engines?.cloud?.configured) {
     h += `<h3>Cloud · OpenRouter</h3>`;
@@ -637,6 +646,7 @@ async function connect() {
     const e = settings.engine;
     if ((e.kind === "local" && !engines.local.includes(e.model)) ||
         (e.kind === "claude" && !engines.claude.includes(e.model)) ||
+        (e.kind === "claude-api" && !(engines.claude_api?.models || []).includes(e.model)) ||
         (e.kind === "cloud" && !engines.cloud.configured)) {
       settings.engine = { kind: "auto" }; saveSettings();
       toast("That model isn't available any more — using Auto");
@@ -735,6 +745,7 @@ function receiptHTML(meta = {}) {
   const id = meta.model;
   let tag;
   if (id.startsWith("claude/")) tag = `<span class="tag sub">subscription</span>`;
+  else if (id.startsWith("claude-api/")) tag = `<span class="tag cloud">${meta.cost ? "$" + meta.cost.toFixed(4) + " of credit" : "API credit"}</span>`;
   else if (meta.local || id.startsWith("ollama/")) tag = `<span class="tag">on your Mac</span>`;
   else tag = `<span class="tag cloud">${meta.cost ? "$" + meta.cost.toFixed(meta.cost < 0.01 ? 4 : 3) : "free"}</span>`;
   const bits = [esc(pretty(id)), tag];

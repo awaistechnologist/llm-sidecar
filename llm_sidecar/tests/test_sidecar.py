@@ -3652,6 +3652,7 @@ _MCP_TOOL_ARGS = {
     "extract_fields": {"text": "x", "fields": {"a": "desc"}},
     "fact_check_document": {"text": "x"},
     "usage_report": {},
+    "allowances": {},
     "sidecar_status": {},
     "list_image_profiles": {},
     "generate_image": {"prompt": "x", "out_dir": "/tmp/nope"},

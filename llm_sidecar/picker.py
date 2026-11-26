@@ -138,6 +138,12 @@ def candidates(config: Config, budget: str, tier: str | None = None) -> list[str
         in_budget.sort(key=lambda m: (family_rank(m.id, budget), -m.prompt_price_per_million))
 
     cloud_candidates = [m.id for m in in_budget]
+    if budget == "free":
+        # Today's free-model requests are used up (by the last reading, no
+        # fetch): every free cloud model would 429, so go straight to local.
+        from . import accounts
+        if accounts.openrouter_free_exhausted(config):
+            cloud_candidates = []
     if budget != "free":
         return cloud_candidates
 

@@ -197,10 +197,19 @@ def install_routes(app, cfg, sidecar, require_token, op) -> None:
         for m in sidecar.models():
             if m.is_local:
                 local.append(m.id)
-            elif not m.id.startswith("claude/"):
+            elif not m.id.startswith(("claude/", "claude-api/")):
                 cloud.append(m.id)
         claude = ([m.id for m in claude_cli.models(cfg)]
                   if cfg.claude_cli_enabled and claude_cli.binary(cfg) else [])
+
+        # API credits: models plus what is left, from local files only.
+        from . import claude_api
+        api_models = [m.id for m in claude_api.models(cfg)]
+        claude_api_info: dict = {"models": api_models}
+        if api_models:
+            s = claude_api.spend(cfg)
+            claude_api_info.update(remaining_usd=s["remaining_usd"],
+                                   allowance_usd=s["allowance_usd"], resets=s["resets"])
 
         images: dict = {"available": False}
         try:
@@ -236,6 +245,7 @@ def install_routes(app, cfg, sidecar, require_token, op) -> None:
             "search": search,
             "local": local,
             "claude": claude,
+            "claude_api": claude_api_info,
             "cloud": {"configured": cfg.has_cloud, "count": len(cloud)},
             "budget": cfg.default_budget,
             "images": images,

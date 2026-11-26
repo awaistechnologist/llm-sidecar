@@ -328,6 +328,24 @@ def usage_report(days: int = 30) -> dict:
 
 
 @mcp.tool()
+def allowances(refresh: bool = False) -> dict:
+    """
+    What each model provider has left right now: OpenRouter spend, key limit
+    and free-model requests left today; the Claude subscription's 5-hour and
+    weekly usage windows (as of the last claude/ call); and API credit used
+    against the monthly allowance (the sidecar's own count). Each entry has a
+    state (ok, warn, exhausted, off, unknown) and says whether its figures
+    are live, last-seen or estimated. Check this before choosing a paid or
+    subscription model for a large job. refresh=True re-reads now and spends
+    one tiny claude/ call.
+    """
+    try:
+        return sidecar().allowances(refresh=refresh)
+    except Exception as e:
+        return {"error": f"Allowance check failed: {e}"}
+
+
+@mcp.tool()
 def sidecar_status() -> dict:
     """
     What this sidecar can currently do: whether a cloud key is present, the

@@ -242,10 +242,14 @@ def _argv(
         "--disable-slash-commands",
         "--no-session-persistence",
         "--permission-prompts", "none",
-        "--output-format", "stream-json" if stream else "json",
+        # stream-json even for a blocking call: it is the only format that
+        # carries the subscription's usage windows (rate_limit_event) and
+        # which credential the call used (apiKeySource), and the final
+        # `result` line is the same envelope `json` prints.
+        "--output-format", "stream-json", "--verbose",
     ]
     if stream:
-        argv += ["--include-partial-messages", "--verbose"]
+        argv += ["--include-partial-messages"]
     if system:
         # Via argv, because there is no --system-prompt-file. argv is visible
         # in `ps`, so the *prompt* goes on stdin and only the system text is
@@ -280,7 +284,43 @@ def _raise_envelope(data: dict, model: str) -> None:
     raise _classify(detail)(f"claude/{model}: {detail}")
 
 
-def _usage_from(data: dict, config: Config) -> Usage:
+def _observe(event: dict, meta: dict) -> None:
+    """Note what a stream event says about the account, not the answer.
+
+    The usage windows go to accounts, so the allowances report can show
+    them without spending a call of its own."""
+    kind = event.get("type")
+    if kind == "rate_limit_event" and isinstance(event.get("rate_limit_info"), dict):
+        from . import accounts
+        accounts.note_claude_window(event["rate_limit_info"])
+    elif kind == "system" and event.get("subtype") == "init":
+        meta["api_key_source"] = event.get("apiKeySource")
+
+
+def _read_output(raw: str, model: str) -> tuple[dict, dict]:
+    """(final envelope, meta) from the CLI's stdout, one JSON object a line."""
+    final, meta = None, {}
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        if event.get("type") == "result" or ("type" not in event and
+                                              ("result" in event or "is_error" in event)):
+            final = event
+        else:
+            _observe(event, meta)
+    if final is None:
+        raise ClaudeCliError(f"claude/{model}: output was not JSON ({raw[:200]!r})")
+    return final, meta
+
+
+def _usage_from(data: dict, config: Config, api_key_source: str | None = None) -> Usage:
     """Token counts, and the one genuinely subtle field in this module.
 
     The CLI reports `total_cost_usd` as the metered-API equivalent even on a
@@ -298,7 +338,12 @@ def _usage_from(data: dict, config: Config) -> Usage:
     prompt = (u.get("input_tokens") or 0) + (u.get("cache_read_input_tokens") or 0)
     completion = u.get("output_tokens") or 0
     reported = float(data.get("total_cost_usd") or 0.0)
-    billed = 0.0 if config.claude_cli_use_subscription else reported
+    # The CLI says which credential it used. Anything but "none" (the
+    # subscription sign-in) is metered, whatever the setting intended: an
+    # `ant auth login` profile, say, which env-stripping does not remove.
+    metered = (not config.claude_cli_use_subscription) or (
+        api_key_source not in (None, "none"))
+    billed = reported if metered else 0.0
     return Usage(
         prompt_tokens=prompt,
         completion_tokens=completion,
@@ -306,6 +351,16 @@ def _usage_from(data: dict, config: Config) -> Usage:
         cost_usd=billed,
         notional_cost_usd=reported,
     )
+
+
+def _refuse_if_out() -> None:
+    """Fail at once when the last reading says the subscription is out and
+    has not reset, rather than starting a process to be told so. A sidecar
+    picking a model rotates on this straight away."""
+    from . import accounts
+    blocked = accounts.claude_window_blocked()
+    if blocked:
+        raise ClaudeCliLimitError(blocked)
 
 
 def _warn_ignored(max_tokens: int | None, temperature: float | None) -> None:
@@ -338,24 +393,20 @@ def complete(
         raise ClaudeCliError("No model named: expected claude/<model>, e.g. claude/sonnet.")
 
     _warn_ignored(max_tokens, temperature)
+    _refuse_if_out()
     system, prompt = split_messages(messages)
     argv = _argv(config, wire, system or DEFAULT_SYSTEM,
                  _schema_from(response_format))
 
     started = time.time()
     raw = _run(argv, prompt, config, timeout or config.claude_cli_timeout)
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        raise ClaudeCliError(
-            f"claude/{wire}: output was not JSON ({raw[:200]!r})"
-        ) from None
+    data, meta = _read_output(raw, wire)
 
     _raise_envelope(data, wire)
     return Completion(
         text=data.get("result") or "",
         model=f"{PREFIX}{wire}",
-        usage=_usage_from(data, config),
+        usage=_usage_from(data, config, meta.get("api_key_source")),
         latency_s=round(time.time() - started, 3),
     )
 
@@ -462,6 +513,7 @@ async def stream(
         )
     wire = model[len(PREFIX):] if model.startswith(PREFIX) else model
     _warn_ignored(max_tokens, temperature)
+    _refuse_if_out()
     system, prompt = split_messages(messages)
     argv = _argv(config, wire, system or DEFAULT_SYSTEM, None, stream=True)
 
@@ -478,6 +530,7 @@ async def stream(
     emitted = False
     whole: list[str] = []
     final: dict | None = None
+    meta: dict = {}
     try:
         proc.stdin.write(prompt.encode())
         await proc.stdin.drain()
@@ -500,6 +553,7 @@ async def stream(
             if event.get("type") == "result":
                 final = event
                 continue
+            _observe(event, meta)
 
             text = _delta_text(event)
             if text:
@@ -521,7 +575,7 @@ async def stream(
             if fallback:
                 yield {"type": "token", "text": fallback}
 
-        yield {"type": "usage", "usage": _usage_from(final, config)}
+        yield {"type": "usage", "usage": _usage_from(final, config, meta.get("api_key_source"))}
     finally:
         if proc.returncode is None:
             _kill_group_async(proc)

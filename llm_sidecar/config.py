@@ -56,6 +56,20 @@ class Config:
     # call is one subprocess, so there is no partial result to salvage.
     claude_cli_timeout: float = 300.0
 
+    # ── claude-api/ provider (Anthropic API, paid from API credits) ──────
+    # Off by default for the same reason as claude/: it spends something the
+    # user may not be watching. See claude_api.py.
+    claude_api_enabled: bool = False
+    # What your plan grants each billing period, in USD. The sidecar stops
+    # sending at 95% of it by its own count, so nothing is billed past the
+    # free credit. 0 refuses every call.
+    claude_api_monthly_credit_usd: float = 100.0
+    # Day of the month the grant renews (your plan's billing date).
+    claude_api_reset_day: int = 1
+    # low | medium | high | xhigh | max. Low suits summarising and
+    # classifying, which is what most sidecar calls are.
+    claude_api_effort: str = "low"
+
     # ── search ────────────────────────────────────────────────────────────
     # "auto" probes for a local SearXNG and falls back to DuckDuckGo, so a
     # fresh install works with no setup but transparently upgrades if the
@@ -203,6 +217,13 @@ def _from_env() -> dict:
         out["embed_model"] = os.environ["LLM_SIDECAR_EMBED_MODEL"]
     if _flag("LLM_SIDECAR_CLAUDE_CLI") is not None:
         out["claude_cli_enabled"] = _flag("LLM_SIDECAR_CLAUDE_CLI")
+    if _flag("LLM_SIDECAR_CLAUDE_API") is not None:
+        out["claude_api_enabled"] = _flag("LLM_SIDECAR_CLAUDE_API")
+    if os.getenv("LLM_SIDECAR_CLAUDE_API_CREDIT"):
+        try:
+            out["claude_api_monthly_credit_usd"] = float(os.environ["LLM_SIDECAR_CLAUDE_API_CREDIT"])
+        except ValueError:
+            pass
     if os.getenv("LLM_SIDECAR_CLAUDE_CLI_PATH"):
         out["claude_cli_path"] = os.environ["LLM_SIDECAR_CLAUDE_CLI_PATH"]
     if os.getenv("LLM_SIDECAR_NO_UI"):

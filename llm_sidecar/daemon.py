@@ -645,6 +645,20 @@ def create_app(config: Config | None = None) -> FastAPI:
             "models": [m.id for m in claude_cli.models(cfg)],
         }
 
+    @app.get("/allowances")
+    def allowances(refresh: bool = False, _: None = Depends(require_token)) -> dict:
+        """What each provider has left. `refresh=true` re-reads OpenRouter
+        now and spends one tiny claude/ call for the subscription windows;
+        without it this is cheap enough to poll."""
+        return sidecar.allowances(refresh=refresh)
+
+    @app.post("/config/claude-api")
+    def set_claude_api(req: ClaudeCliRequest, _: None = Depends(require_token)) -> dict:
+        """Turn the claude-api/ provider on or off on the running daemon."""
+        from . import claude_api
+        cfg.claude_api_enabled = bool(req.enabled)
+        return {**claude_api.check(cfg), "models": [m.id for m in claude_api.models(cfg)]}
+
     @app.get("/status")
     def status(_: None = Depends(require_token)) -> dict:
         """Everything about this sidecar: hardware, local model fit, search
@@ -688,6 +702,8 @@ def create_app(config: Config | None = None) -> FastAPI:
                 owner = "ollama"
             elif m.id.startswith("claude/"):
                 owner = "claude-cli"
+            elif m.id.startswith("claude-api/"):
+                owner = "anthropic"
             else:
                 owner = "openrouter"
             data.append({

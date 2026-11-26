@@ -13,6 +13,39 @@ aimed at whoever reported it. State what changed, what now breaks, and what
 to do instead. Anything that does not demand a change belongs in Added,
 Fixed or Changed.
 
+## [0.12.0] — 2026-11-26
+
+### Added
+- **`claude-api/` provider: Claude through the Anthropic API, paid from API
+  credits.** Max, Ultra and Team plans include a monthly credit grant; this
+  spends it and never goes past it. The sidecar keeps a running total of
+  each call's cost for the billing period and refuses a call before sending
+  it if its worst case could pass 95% of the allowance
+  (`claude_api_monthly_credit_usd`, default 100; `claude_api_reset_day`,
+  default 1). A "credit balance is too low" reply stops the provider until
+  the next period. Off by default and never auto-picked. Needs the
+  `[claude-api]` extra and credentials from `ant auth login` or
+  `ANTHROPIC_API_KEY`. Ids: `claude-api/haiku|sonnet|opus` or an exact id.
+- **Allowances: what each provider has left.** `llm-sidecar allowances`,
+  `GET /allowances`, the `allowances` MCP tool and a dashboard panel show
+  OpenRouter spend, key limit and free-model requests left today; the Claude
+  subscription's 5-hour and weekly usage windows; and API credit used
+  against its allowance. Each figure is labelled live, last-seen or
+  estimated.
+- The phone app lists `claude-api/` models with the credit left.
+- `llm-sidecar ask --model <id>`. The README showed this flag; it did not exist.
+
+### Changed
+- `claude/` calls now read Claude Code's `stream-json` output for blocking
+  calls too, which is how the subscription's usage windows and the
+  credential each call used are seen. When the last reading says a window
+  is used up, `claude/` fails at once with the reset time.
+- A `claude/` call that Claude Code reports as billed to an API key (for
+  example through an `ant auth login` sign-in, which stripping environment
+  variables does not remove) is now recorded as real spend.
+- When OpenRouter reports today's free-model requests used up, the `free`
+  budget skips OpenRouter's free models and goes to local ones.
+
 ## [0.11.0] — 2026-11-26
 
 ### Added

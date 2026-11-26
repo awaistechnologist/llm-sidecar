@@ -243,7 +243,7 @@ Or, after `pipx install llm-sidecar`:
 
 Both are copy-pasteable as they stand — no path to fill in.
 
-**17 tools**, grouped by what they are for.
+**18 tools**, grouped by what they are for.
 
 Evidence and verification:
 `search_web` · `answer_question` · `read_url` · `verify_claims` ·
@@ -256,7 +256,7 @@ Images, on Apple Silicon with the `[images]` extra:
 `list_image_profiles` · `generate_image` · `edit_with_references` ·
 `upscale_image`
 
-Housekeeping: `usage_report` · `sidecar_status` · `whats_new`
+Housekeeping: `usage_report` · `allowances` · `sidecar_status` · `whats_new`
 
 `whats_new(since="<the version you integrated against>")` is how an agent
 finds out what changed without anyone telling it — see
@@ -407,6 +407,87 @@ one, a one-line default otherwise.
 
 Keep the daemon on loopback with this enabled, and leave `cors_origins`
 empty. It is your subscription, and the daemon is unauthenticated.
+
+Every `claude -p` call also reports the subscription's **usage windows**
+(the 5-hour and weekly limits). The sidecar records them and shows them
+under `llm-sidecar allowances`. If the last reading says a window is used
+up, `claude/` calls fail at once with the reset time instead of starting a
+process to be told so, and an auto-picked request moves on to another model.
+
+### Your Claude API credits
+
+A fourth provider: `claude-api/` calls Claude through the Anthropic API,
+paid from **API credits**. Max, Ultra and Team plans include a monthly API
+credit grant, so for many people this is free up to an allowance. It is a
+separate pot from the subscription: `claude/` uses the subscription's usage
+windows, `claude-api/` uses the credit.
+
+```bash
+pip install 'llm-sidecar[claude-api]'     # the Anthropic SDK
+ant auth login                            # or set ANTHROPIC_API_KEY
+llm-sidecar config claude-api on
+llm-sidecar config claude-api-credit 100  # what your plan grants
+llm-sidecar config claude-api-reset-day 12  # the day it renews
+```
+
+```bash
+llm-sidecar ask --model claude-api/haiku "Summarise this in one line: ..."
+```
+
+Model ids are `claude-api/haiku`, `claude-api/sonnet`, `claude-api/opus`
+(each the newest of its family your account can use), or an exact id such
+as `claude-api/claude-opus-5-5`. The prefix is not `anthropic/` because
+OpenRouter's Claude models already use that one.
+
+**It never spends past the free credit.** No ordinary API key can read the
+account's balance, so the sidecar counts every call's cost from its token
+counts and keeps a running total for the billing period. A call is refused
+*before* it is sent if its worst case could take the total past 95% of the
+allowance. The margin is for spend the sidecar cannot see, such as other
+tools using the same credit. If the API ever says the balance is too low,
+the provider stops until the next period. Like `claude/`, it is off by
+default and never auto-picked: name it or lock a tier to it.
+
+For a background service, sign in with `ant auth login` (install with
+`brew install anthropics/tap/ant`): launchd does not pass your shell's
+environment, so an `ANTHROPIC_API_KEY` exported there is not seen.
+
+| | |
+|---|---|
+| `temperature` | ignored: the current API version rejects it on every model |
+| thinking | off on Haiku and Sonnet 5.5; low effort elsewhere, with room added to `max_tokens` |
+| JSON schema | enforced, via structured outputs |
+| refusals | retried on the API's default fallback model; an error if that declines too |
+| cost | real, estimated from published prices; an unknown model is priced high |
+
+### What you have left
+
+```bash
+llm-sidecar allowances
+```
+
+```
+ok   Ollama (local)
+     6 models on this machine · no allowance
+low  OpenRouter
+     $1.23 spent this month · 0 of 1000 free-model requests left today
+low  Claude subscription (claude/)
+     5-hour 72% used (resets 15:00 today) · weekly 83% used (resets Thu 09:00) · as of 3 min ago
+ok   Claude API credits (claude-api/)
+     $3.40 of $100.00 used this period (41 calls, sidecar's own count) · renews 2026-12-12
+```
+
+The same report is `GET /allowances`, the `allowances` MCP tool, and a panel
+on the dashboard. Each entry says where its figures came from: **live**
+(read just now), **last-seen** (from the last call that reported it) or
+**estimated** (the sidecar's own count). `--refresh` re-reads everything
+now, which spends one tiny `claude/` call.
+
+The readings steer routing too. When OpenRouter says today's free-model
+requests are used up, the `free` budget goes straight to local models
+instead of collecting a round of 429s. OpenRouter's account balance needs a
+management key, which the sidecar never asks for, so it shows what the key
+itself reports: spend, its limit if one is set, and free requests left.
 
 ### When free OpenRouter models are used
 

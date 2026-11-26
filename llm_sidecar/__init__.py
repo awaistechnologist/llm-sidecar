@@ -30,6 +30,7 @@ from . import (
     answer as answer_mod,
     cache,
     catalogue,
+    claude_api,
     claude_cli,
     client,
     config as config_mod,
@@ -55,7 +56,7 @@ from .types import (
 
 logger = logging.getLogger("llm_sidecar")
 
-__version__ = "0.11.0"
+__version__ = "0.12.0"
 
 __all__ = [
     "Sidecar",
@@ -75,7 +76,9 @@ __all__ = [
 
 
 def _is_claude(model: str) -> bool:
-    return bool(model) and model.startswith(claude_cli.PREFIX)
+    """claude/ or claude-api/: neither takes a temperature, so neither can be
+    cached as deterministic."""
+    return bool(model) and model.startswith((claude_cli.PREFIX, claude_api.PREFIX))
 
 
 def _json_schema(schema: dict) -> dict:
@@ -478,6 +481,7 @@ class Sidecar:
             catalogue.openrouter_models(self.config, force_refresh=refresh)
             + catalogue.ollama_models(self.config)
             + claude_cli.models(self.config)
+            + claude_api.models(self.config)
         )
 
     def claude_cli_check(self) -> dict:
@@ -486,6 +490,13 @@ class Sidecar:
         Makes one minimal call when enabled, because nothing cheaper
         distinguishes a live login from an expired one."""
         return claude_cli.check(self.config)
+
+    def allowances(self, refresh: bool = False) -> dict:
+        """What every provider has left: OpenRouter credit and free requests,
+        the Claude subscription's usage windows, API credit against its
+        allowance. See accounts.py for where each number comes from."""
+        from . import accounts
+        return accounts.report(self.config, refresh=refresh)
 
     def local_models(self, context_tokens: int = 8000) -> list[dict]:
         """Installed Ollama models scored against this machine's memory."""
@@ -518,6 +529,10 @@ class Sidecar:
                 "enabled": self.config.claude_cli_enabled,
                 "installed": claude_cli.binary(self.config) is not None,
                 "models": [m.id for m in claude_cli.models(self.config)],
+            },
+            "claude_api": {
+                **claude_api.check(self.config),
+                "models": [m.id for m in claude_api.models(self.config)],
             },
             "hardware": hardware.probe(),
             "local_models": [

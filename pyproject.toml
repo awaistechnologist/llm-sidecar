@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "llm-sidecar"
-version = "0.11.0"
+version = "0.12.0"
 description = "Local sidecar giving any tool grounded, cited, routed AI — Ollama or OpenRouter, no API key required."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -72,8 +72,15 @@ images = [
     "pillow; sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
 
+# The claude-api/ provider (Claude through the Anthropic API, paid from API
+# credits). An extra because most installs never use it, and the provider
+# says how to install it when asked for. 2.x is the line that sends the
+# current API version, which rejects sampling parameters; the provider never
+# sends them.
+claude-api = ["anthropic>=2.0,<3"]
+
 all = []
-dev = ["pytest", "openai", "build", "twine"]
+dev = ["pytest", "openai", "build", "twine", "anthropic>=2.0,<3"]
 
 [project.scripts]
 llm-sidecar = "llm_sidecar.cli:main"

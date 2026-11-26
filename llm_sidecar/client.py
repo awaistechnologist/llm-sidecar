@@ -34,6 +34,8 @@ OLLAMA_PREFIX = "ollama/"
 # before _route() rather than inside it, because a subprocess has no URL and
 # no headers to return.
 CLAUDE_PREFIX = "claude/"
+# The fourth, the Anthropic API through its SDK — also dispatched early.
+CLAUDE_API_PREFIX = "claude-api/"
 RETRYABLE_STATUS = (429, 503)
 
 
@@ -190,6 +192,15 @@ def complete(
             temperature=temperature, response_format=response_format,
         )
 
+    if model.startswith(CLAUDE_API_PREFIX):
+        from . import claude_api
+        if web:
+            logger.info(f"web=True ignored for {model} (no retrieval via claude-api/)")
+        return claude_api.complete(
+            messages, model, config, max_tokens=max_tokens,
+            response_format=response_format,
+        )
+
     url, wire_model, headers = _route(model, config)
     is_local = model.startswith(OLLAMA_PREFIX)
     payload = {
@@ -260,6 +271,11 @@ async def stream(
         async for event in claude_cli.stream(
             messages, model, config, max_tokens=max_tokens, temperature=temperature,
         ):
+            yield event
+        return
+    if model.startswith(CLAUDE_API_PREFIX):
+        from . import claude_api
+        async for event in claude_api.stream(messages, model, config, max_tokens=max_tokens):
             yield event
         return
 

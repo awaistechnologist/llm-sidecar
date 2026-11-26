@@ -266,6 +266,18 @@
       </section>
 
       <section class="panel wide">
+        <h2>Allowances &mdash; what each provider has left</h2>
+        <dl class="kv" id="allow-kv"><dd class="muted">Loading…</dd></dl>
+        <div class="row">
+          <button id="allow-refresh" title="Re-read now. Spends one tiny claude/ call to update the subscription windows.">Check now</button>
+        </div>
+        <p class="muted" style="margin:10px 0 0">
+          <em>live</em> was read just now; <em>last-seen</em> is from the last call that reported it;
+          <em>estimated</em> is the sidecar's own count, because no API reports that balance.
+        </p>
+      </section>
+
+      <section class="panel wide">
         <h2>Usage &mdash; last 30 days</h2>
         <dl class="kv" id="usage-kv"><dd class="muted">Loading…</dd></dl>
         <div class="chart" id="chart"></div>
@@ -635,6 +647,18 @@ async function loadModels() {
   });
 }
 
+async function loadAllowances(fresh = false) {
+  const r = await api("/allowances" + (fresh ? "?refresh=true" : ""));
+  const pill = { ok: "ok", warn: "warn", exhausted: "bad", off: "", unknown: "" };
+  const word = { ok: "ok", warn: "low", exhausted: "out", off: "off", unknown: "?" };
+  kv($("allow-kv"), (r.providers || []).map((e) => [
+    esc(e.label),
+    `<span class="pill ${pill[e.state] || ""}">${word[e.state] || esc(e.state)}</span> `
+      + esc(e.summary || "")
+      + (e.source && e.source !== "live" ? ` <span class="muted">(${esc(e.source)})</span>` : ""),
+  ]));
+}
+
 async function loadUsage() {
   const [u, d] = await Promise.all([api("/usage?days=30"), api("/usage/daily?days=30")]);
   kv($("usage-kv"), [
@@ -668,7 +692,7 @@ async function refresh() {
   banner("");
   try {
     await loadStatus();
-    await Promise.all([loadSearch(), loadModels(), loadUsage()]);
+    await Promise.all([loadSearch(), loadModels(), loadUsage(), loadAllowances()]);
     $("clock").textContent = "updated " + new Date().toLocaleTimeString();
   } catch (e) {
     banner("Could not reach the daemon: " + e.message);
@@ -1033,6 +1057,11 @@ $("cfg-claude-test").onclick = async () => {
 };
 
 $("refresh").onclick = refresh;
+$("allow-refresh").onclick = async (ev) => {
+  ev.target.disabled = true;
+  try { await loadAllowances(true); } catch (e) { banner("Could not check allowances: " + e.message); }
+  finally { ev.target.disabled = false; }
+};
 $("clear-cache").onclick = async () => {
   const btn = $("clear-cache");
   btn.disabled = true;
