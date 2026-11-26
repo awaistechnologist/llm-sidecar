@@ -1,11 +1,11 @@
 # SearXNG configuration for llm-sidecar.
 #
-# `use_default_settings` merges this on top of the image's own settings, so
+# `use_default_settings` merges this on top of SearXNG's own settings, so
 # only the differences that matter to us are listed here. Everything else —
 # the engine list, timeouts, locales — stays at upstream defaults.
 #
 # This file is copied to ~/.config/llm-sidecar/searxng/settings.yml on first
-# `llm-sidecar searxng up`, and the secret key is generated there. Edit that
+# `llm-sidecar searxng install`, and the secret key is generated there. Edit that
 # copy, not this one; it will not be overwritten.
 
 use_default_settings: true

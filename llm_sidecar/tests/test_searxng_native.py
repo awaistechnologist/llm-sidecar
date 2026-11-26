@@ -14,19 +14,19 @@ from llm_sidecar.types import SidecarError
 
 @pytest.fixture
 def sx(monkeypatch, tmp_path):
-    from llm_sidecar import ledger, searxng_native as n, services
+    from llm_sidecar import ledger, searxng_native as n
 
     monkeypatch.setattr(ledger, "DATA_DIR", tmp_path / "data")
-    monkeypatch.setattr(services, "INSTANCE_DIR", tmp_path / "config" / "searxng")
+    settings = tmp_path / "config" / "searxng" / "settings.yml"
+    monkeypatch.setattr(n, "settings_path", lambda: settings)
     monkeypatch.setattr(n, "plist_path", lambda: tmp_path / "LaunchAgents" / "sx.plist")
     monkeypatch.setattr(n, "log_path", lambda: tmp_path / "sx.log")
     monkeypatch.setattr(n.platform, "system", lambda: "Darwin")
     monkeypatch.setattr(n.shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(n.time, "sleep", lambda s: None)
 
-    state = {"calls": [], "commit": "aaa1111", "port_busy": False, "docker": False,
-             "answering": True, "running": False, "down_called": False,
-             "commits_answer": None}
+    state = {"calls": [], "commit": "aaa1111", "port_busy": False,
+             "answering": True, "running": False, "commits_answer": None}
 
     def sh(cmd, *, cwd=None, timeout=600, check=True):
         state["calls"].append(cmd)
@@ -48,8 +48,6 @@ def sx(monkeypatch, tmp_path):
             out = n.LABEL if state["running"] else ""
         elif cmd[:2] == ["launchctl", "load"]:
             state["running"] = True
-        elif cmd[0] == "docker" and cmd[1] == "ps":
-            out = "llm-sidecar-searxng" if state["docker"] else ""
         return type("R", (), {"returncode": 0, "stdout": out, "stderr": ""})()
 
     def answering(url, timeout=0):
@@ -57,18 +55,11 @@ def sx(monkeypatch, tmp_path):
             return state["commit"] in state["commits_answer"]
         return state["answering"]
 
-    def down(remove=False):
-        state["down_called"] = True
-        state["port_busy"] = False
-        state["docker"] = False
-        return {"ok": True}
-
     monkeypatch.setattr(n, "_sh", sh)
     monkeypatch.setattr(n, "_port_busy", lambda port: state["port_busy"])
     monkeypatch.setattr(n, "_answering", answering)
     monkeypatch.setattr(n, "_probe", lambda url: answering(url))
     monkeypatch.setattr(n, "find_python", lambda: "/opt/homebrew/bin/python3.13")
-    monkeypatch.setattr(services, "down", down)
     return n, state
 
 
@@ -77,7 +68,7 @@ def test_a_fresh_install_clones_builds_and_starts_a_login_service(sx):
     r = n.install(Config(), out=lambda s: None)
 
     assert r["url"] == "http://localhost:8888"
-    assert r["commit"] == "aaa1111" and r["replaced_docker"] is False
+    assert r["commit"] == "aaa1111"
     cmds = [" ".join(c[:2]) for c in state["calls"]]
     assert "git clone" in cmds and "launchctl load" in cmds
     assert n.info()["python"].endswith("python3.13")
@@ -96,16 +87,9 @@ def test_the_service_listens_on_loopback_only(sx):
     assert "searx.webapp:app" in plist
 
 
-def test_installing_over_the_docker_instance_migrates_it(sx):
-    n, state = sx
-    state.update(port_busy=True, docker=True)
-    r = n.install(Config(), out=lambda s: None)
-    assert state["down_called"] and r["replaced_docker"] is True
-
-
 def test_a_port_taken_by_something_else_is_refused(sx):
     n, state = sx
-    state.update(port_busy=True, docker=False)
+    state.update(port_busy=True)
     with pytest.raises(SidecarError, match="in use by something else"):
         n.install(Config(), out=lambda s: None)
     assert not any(c[:2] == ["git", "clone"] for c in state["calls"])

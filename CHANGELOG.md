@@ -25,8 +25,6 @@ Fixed or Changed.
   also stops depending on another app being started: every reboot without
   Docker at login had quietly turned it off.
 
-  Run over an existing Docker instance on the same port, it stops the
-  container and takes its place, keeping the same `settings.yml`.
 - `llm-sidecar searxng update` pulls the latest SearXNG and rolls back if
   the new version does not answer. SearXNG scrapes other sites and its
   engines break when they change; Docker hid updates behind `docker pull`.
@@ -45,12 +43,15 @@ Fixed or Changed.
   and in the phone app's Web mode where the question is typed. Before
   this, a dead search engine looked like an answer with no sources.
 
-### Changed
-- `llm-sidecar searxng status` and `logs` describe the native instance
-  when there is one, or when there is no Docker one either. `--docker`
-  shows the container. `up` and `down` still drive Docker or Podman and
-  remain the route for servers and anyone who prefers containers.
-- The CLI's hints now suggest `searxng install` rather than `searxng up`.
+### Removed
+- **The Docker route for SearXNG**: `llm-sidecar searxng up` and `down`,
+  the compose file, and the Docker/Podman detection. `/searxng/status` no
+  longer reports `container` or `docker`.
+
+### Action required
+- **You ran SearXNG with `llm-sidecar searxng up`.** Remove the container
+  (`docker rm -f llm-sidecar-searxng`), which frees port 8888, then run
+  `llm-sidecar searxng install`. Your `settings.yml` is kept and reused.
 
 ## [0.10.0] — 2026-11-18
 

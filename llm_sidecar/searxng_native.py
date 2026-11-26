@@ -1,11 +1,11 @@
 """SearXNG run natively, as a login service the sidecar owns.
 
-Why this exists when `llm-sidecar searxng up` (Docker) already did: on a Mac,
-a container needs a Linux VM, and Docker Desktop's VM took ~5 GiB of memory,
-plus ~1.8 GiB for its own apps, to host a search engine that uses 172 MiB.
-On a machine whose image models are sized to the last gigabyte that is not
-a rounding error. It also meant search depended on another app being
-started: every reboot without Docker at login quietly turned search off.
+Until 0.11.0 this was a Docker container. On a Mac a container needs a Linux
+VM, and Docker Desktop's VM took ~5 GiB of memory, plus ~1.8 GiB for its own
+apps, to host a search engine that uses 172 MiB. On a machine whose image
+models are sized to the last gigabyte that is not a rounding error. It also
+meant search depended on another app being started: every reboot without
+Docker at login quietly turned search off.
 
 SearXNG is an ordinary Python web app. Natively it is a git checkout, a venv
 and the same `granian` server the official container runs, under launchd
@@ -17,12 +17,14 @@ Layout, all under the sidecar's data directory:
     searxng/venv/         its own venv (never the sidecar's: their pins differ)
     searxng/sidecar.json  what was installed, from which commit, with which Python
 
-The settings file is the same one the Docker route uses, in the config
-directory, so edits carry over between the two.
+The settings file lives in the config directory, ~/.config/llm-sidecar/
+searxng/settings.yml, and is yours to edit once written. Without it the API
+returns 403: SearXNG ships with JSON output off, which reads as
+"unavailable" and silently falls back to DuckDuckGo.
 
 The cost of running it natively is updates: SearXNG scrapes other sites, and
-when they change, engines break until SearXNG ships a fix. Docker hid that
-behind `docker pull`. Here it is `llm-sidecar searxng update`, which rolls
+when they change, engines break until SearXNG ships a fix. A container hid
+that behind `docker pull`. Here it is `llm-sidecar searxng update`, which rolls
 back if the new version does not answer, and `status` says when the checkout
 is old or engines are failing.
 """
@@ -32,6 +34,7 @@ from __future__ import annotations
 import json
 import logging
 import platform
+import secrets
 import shutil
 import socket
 import subprocess
@@ -40,7 +43,7 @@ import time
 from pathlib import Path
 from typing import Callable
 
-from .config import Config
+from .config import CONFIG_DIR, Config
 from .types import SidecarError
 
 logger = logging.getLogger("llm_sidecar.searxng")
@@ -77,9 +80,25 @@ def marker() -> Path:
     return home() / "sidecar.json"
 
 
+SETTINGS_TEMPLATE = Path(__file__).parent / "deploy" / "searxng" / "settings.yml"
+
+
 def settings_path() -> Path:
-    from .services import INSTANCE_DIR
-    return INSTANCE_DIR / "settings.yml"
+    return CONFIG_DIR / "searxng" / "settings.yml"
+
+
+def write_settings(force: bool = False) -> Path:
+    """settings.yml with JSON on and a secret generated for this machine.
+    Never overwritten once it exists, unless `force`."""
+    dst = settings_path()
+    if dst.exists() and not force:
+        return dst
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    text = SETTINGS_TEMPLATE.read_text(encoding="utf-8")
+    # A shared secret key across every install would be worse than no key.
+    dst.write_text(text.replace("GENERATED_ON_FIRST_START", secrets.token_hex(32)),
+                   encoding="utf-8")
+    return dst
 
 
 def plist_path() -> Path:
@@ -113,8 +132,16 @@ def _port_busy(port: int) -> bool:
 
 
 def _answering(url: str, timeout: int = 0) -> bool:
-    from .services import wait_until_ready
-    return wait_until_ready(url, timeout=timeout) if timeout else _probe(url)
+    """Answers a JSON query — not merely reachable, which SearXNG is long
+    before (and even when it never will be) serving the JSON we need."""
+    if not timeout:
+        return _probe(url)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if _probe(url):
+            return True
+        time.sleep(2)
+    return False
 
 
 def _probe(url: str) -> bool:
@@ -247,8 +274,8 @@ def _start_service(port: int) -> None:
         _sh(["systemctl", "--user", "daemon-reload"], check=False, timeout=20)
         _sh(["systemctl", "--user", "enable", "--now", UNIT_NAME], timeout=30)
         return
-    raise SidecarError(f"No service integration for {system}; use `llm-sidecar searxng up` "
-                       f"(Docker) instead.")
+    raise SidecarError(f"No service integration for {system}. Run SearXNG yourself and "
+                       f"set SEARXNG_URL.")
 
 
 def restart() -> None:
@@ -284,42 +311,18 @@ def _pip_install() -> None:
          "-r", str(src_dir() / "requirements-server.txt")])
 
 
-def _docker_instance_running() -> bool:
-    from .services import CONTAINER
-    if not shutil.which("docker"):
-        return False
-    try:
-        r = _sh(["docker", "ps", "--filter", f"name={CONTAINER}", "--format", "{{.Names}}"],
-                check=False, timeout=20)
-        return CONTAINER in (r.stdout or "")
-    except (OSError, subprocess.SubprocessError):
-        return False
-
-
 def install(config: Config, port: int = DEFAULT_PORT,
             out: Callable[[str], None] = print) -> dict:
     """Set up SearXNG natively and start it at login. Safe to re-run."""
-    from . import services
-
     if not shutil.which("git"):
         raise SidecarError("Installing SearXNG natively needs git. On a Mac: "
                            "`xcode-select --install`.")
 
     url = f"http://localhost:{port}"
-    replaced_docker = False
     if _port_busy(port) and not service_running():
-        if _docker_instance_running():
-            # The migration this command exists for: same port, same settings.
-            out(f"Stopping the Docker SearXNG on port {port} (its settings are kept)…")
-            services.down()
-            replaced_docker = True
-            for _ in range(20):
-                if not _port_busy(port):
-                    break
-                time.sleep(0.5)
-        if _port_busy(port):
-            raise SidecarError(f"Port {port} is in use by something else. Free it, or pass "
-                               f"--port and set SEARXNG_URL to match.")
+        raise SidecarError(f"Port {port} is in use by something else (an old SearXNG "
+                           f"container?). Free it, or pass --port and set SEARXNG_URL "
+                           f"to match.")
 
     home().mkdir(parents=True, exist_ok=True)
     if not (src_dir() / ".git").exists():
@@ -334,7 +337,7 @@ def install(config: Config, port: int = DEFAULT_PORT,
     out("Installing its dependencies (about a minute the first time)…")
     _pip_install()
 
-    services.install(port)        # settings.yml with JSON on; kept if it exists
+    write_settings()
     commit, date = _commit()
     _write_marker(port=port, python=python, commit=commit, commit_date=date,
                   installed_at=time.strftime("%Y-%m-%dT%H:%M:%S"))
@@ -349,7 +352,7 @@ def install(config: Config, port: int = DEFAULT_PORT,
     if config.searxng_url.rstrip("/") != url:
         hint = f"Set SEARXNG_URL={url} so search finds it."
     return {"url": url, "commit": commit, "commit_date": date, "home": str(home()),
-            "replaced_docker": replaced_docker, "hint": hint}
+            "hint": hint}
 
 
 def update(out: Callable[[str], None] = print) -> dict:

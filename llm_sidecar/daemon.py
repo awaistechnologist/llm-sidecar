@@ -504,15 +504,14 @@ def create_app(config: Config | None = None) -> FastAPI:
 
     @app.get("/searxng/status")
     def searxng_status(_: None = Depends(require_token)) -> dict:
-        """The Docker instance, the native one, and whether search actually
-        works — three separate questions, because an instance can answer
-        while search is still falling back."""
-        from . import searxng_native, services
+        """The SearXNG instance, and whether search actually works — two
+        questions, because an instance can answer while search still falls
+        back."""
+        from . import searxng_native
+        from .search import searxng as provider
         from .search import health
-        try:
-            out = services.status(cfg)
-        except Exception as e:
-            out = {"error": str(e)}
+        provider._probe_cache.pop(cfg.searxng_url, None)
+        out = {"url": cfg.searxng_url, "answering_json": provider.available(cfg)}
         try:
             out["native"] = searxng_native.status(cfg)
         except Exception as e:

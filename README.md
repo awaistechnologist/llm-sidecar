@@ -519,18 +519,13 @@ until the instance really answers a JSON query before reporting success, and
 search detects it automatically. The daemon restarts it if it stops
 answering.
 
-Why not Docker: on a Mac a container needs a Linux VM. Docker Desktop's took
-~5 GiB, plus ~1.8 GiB for its own apps, to host a search engine using
-172 MiB; natively it is ~150 MiB. And search no longer depends on Docker
-having been started. Docker still works, for servers or if you prefer it:
+Settings go to `~/.config/llm-sidecar/searxng/settings.yml` and are yours to
+edit; they are never overwritten.
 
-```bash
-llm-sidecar searxng up         # Docker or Podman compose
-```
-
-That writes a compose file and settings to `~/.config/llm-sidecar/searxng/`
-and starts the container. Both routes share that `settings.yml`, so running
-`install` over a Docker instance stops the container and takes its place.
+Why not Docker, which this used until 0.11.0: on a Mac a container needs a
+Linux VM. Docker Desktop's took ~5 GiB, plus ~1.8 GiB for its own apps, to
+host a search engine using 172 MiB; natively it is ~150 MiB. And search no
+longer depends on Docker having been started.
 
 The cost of native is updates. SearXNG scrapes other search sites, and when
 they change, engines break until SearXNG ships a fix. `status` runs a real
@@ -951,9 +946,8 @@ an explanation rather than a stack trace.
 - No vector store or cross-session memory. Storing and retrieving embeddings
   is a different product; producing them is not.
 - `searxng install` runs SearXNG natively on macOS (launchd) and Linux
-  (systemd user unit), and needs git and Python 3.10+. `searxng up` drives
-  Docker or Podman compose. Anything else: run SearXNG yourself and set
-  `SEARXNG_URL`.
+  (systemd user unit), and needs git and Python 3.10+. Anywhere else, run
+  SearXNG yourself and set `SEARXNG_URL`.
 - **`claude/` ignores `max_tokens` and `temperature`**, because the CLI has no
   flag for either. They are dropped rather than approximated — a `max_tokens`
   that silently does nothing is worse than one that is documented as absent.
@@ -975,7 +969,7 @@ an explanation rather than a stack trace.
 | `verify.py` | Claim extraction, evidence, grading, escalation |
 | `ops.py` | `summarise` / `classify` / `extract` with pinned schemas |
 | `search/` | Provider dispatch, DDG, SearXNG, `read_url`, search health |
-| `searxng_native.py` · `services.py` | SearXNG natively (launchd/systemd) · in Docker |
+| `searxng_native.py` | SearXNG as a login service (launchd/systemd) |
 | `cache.py` · `ledger.py` · `hardware.py` | Cache, spend record, memory fit |
 | `daemon.py` · `mcp_server.py` · `cli.py` · `ui/` | The four doors |
 | `phone.py` · `ui/app.html` | The phone app, the Host check, `llm-sidecar phone` |

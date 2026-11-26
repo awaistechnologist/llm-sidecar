@@ -802,120 +802,70 @@ def test_verify_prompt_covers_namesakes():
     assert "namesake" in lowered
 
 
-# ── searxng service management ────────────────────────────────────────────────
+# ── SearXNG settings ──────────────────────────────────────────────────────────
 
 @pytest.fixture
-def instance(tmp_path, monkeypatch):
-    from llm_sidecar import services
+def sx_settings(tmp_path, monkeypatch):
+    from llm_sidecar import searxng_native
 
-    monkeypatch.setattr(services, "INSTANCE_DIR", tmp_path / "searxng")
-    return tmp_path / "searxng"
-
-
-def test_install_writes_a_runnable_instance(instance):
-    from llm_sidecar import services
-
-    services.install(port=9999)
-    assert (instance / "docker-compose.yml").exists()
-    assert (instance / "settings.yml").exists()
-    assert (instance / ".env").read_text(encoding="utf-8").strip() == "SEARXNG_PORT=9999"
+    path = tmp_path / "searxng" / "settings.yml"
+    monkeypatch.setattr(searxng_native, "settings_path", lambda: path)
+    return path
 
 
-def test_install_enables_json_output(instance):
-    """Without this the API 403s and search silently falls back to DDG —
-    the single reason shipping our own settings.yml is worth it."""
-    from llm_sidecar import services
+def test_settings_enable_json_output(sx_settings):
+    """Without it SearXNG answers 403, which reads as "unavailable" and
+    falls back to DuckDuckGo without a word."""
+    from llm_sidecar import searxng_native
 
-    services.install()
-    settings = (instance / "settings.yml").read_text(encoding="utf-8")
-    assert "formats:" in settings
-    assert "json" in settings
-    assert "limiter: false" in settings
+    text = searxng_native.write_settings().read_text(encoding="utf-8")
+    assert re.search(r"formats:\s*\n\s*- html\s*\n\s*- json", text)
+    assert "limiter: false" in text
 
 
-def test_secret_key_is_generated_and_unique(instance, tmp_path, monkeypatch):
-    from llm_sidecar import services
+def test_settings_secret_is_generated_and_unique(sx_settings, tmp_path, monkeypatch):
+    from llm_sidecar import searxng_native
 
-    services.install()
-    first = (instance / "settings.yml").read_text(encoding="utf-8")
-    assert "GENERATED_ON_FIRST_START" not in first
-
-    other = tmp_path / "second"
-    monkeypatch.setattr(services, "INSTANCE_DIR", other)
-    services.install()
-    assert (other / "settings.yml").read_text(encoding="utf-8") != first
-
-
-def test_install_does_not_clobber_user_edits(instance):
-    from llm_sidecar import services
-
-    services.install()
-    (instance / "settings.yml").write_text("# mine\n")
-    services.install()
-    assert (instance / "settings.yml").read_text(encoding="utf-8") == "# mine\n"
-    services.install(force=True)
-    assert (instance / "settings.yml").read_text(encoding="utf-8") != "# mine\n"
+    a = searxng_native.write_settings().read_text(encoding="utf-8")
+    other = tmp_path / "other" / "settings.yml"
+    monkeypatch.setattr(searxng_native, "settings_path", lambda: other)
+    b = searxng_native.write_settings().read_text(encoding="utf-8")
+    assert "GENERATED_ON_FIRST_START" not in a
+    key = re.compile(r'secret_key: "([0-9a-f]{64})"')
+    assert key.search(a).group(1) != key.search(b).group(1)
 
 
-def test_compose_binds_loopback_only():
-    """An instance with the bot limiter off must not be reachable off-box."""
-    from llm_sidecar import services
+def test_settings_are_never_clobbered_unless_forced(sx_settings):
+    from llm_sidecar import searxng_native
 
-    compose = (services.ASSETS / "docker-compose.yml").read_text(encoding="utf-8")
-    assert "127.0.0.1:" in compose
-    assert '"${SEARXNG_PORT:-8888}:8080"' not in compose
-
-
-def test_port_is_read_from_configured_url():
-    from llm_sidecar import services
-
-    assert services._port_from(Config(searxng_url="http://localhost:7777")) == 7777
-    assert services._port_from(Config(searxng_url="http://localhost:7777/")) == 7777
-    assert services._port_from(Config(searxng_url="http://searx.example.com")) == 8888
+    searxng_native.write_settings()
+    sx_settings.write_text("# mine\n", encoding="utf-8")
+    searxng_native.write_settings()
+    assert sx_settings.read_text(encoding="utf-8") == "# mine\n"
+    searxng_native.write_settings(force=True)
+    assert "json" in sx_settings.read_text(encoding="utf-8")
 
 
-def test_status_reports_a_reachable_instance_we_did_not_start(cfg, instance, monkeypatch):
-    """Someone running SearXNG their own way is just as good as our container;
-    reporting 'not installed' at something plainly answering would be wrong."""
-    from llm_sidecar import services
-    from llm_sidecar.search import searxng
+def test_searxng_status_ignores_the_probe_cache(cfg, monkeypatch):
+    """Status is the one place that must say what is true now."""
+    from llm_sidecar.search import searxng as provider
 
-    monkeypatch.setattr(searxng, "available", lambda config: True)
-    monkeypatch.setattr(services.shutil, "which", lambda n: None)
-    s = services.status(cfg)
-    assert s["answering_json"] is True
-    assert s["installed"] is False
-    assert s["docker"] == "not installed"
+    provider._probe_cache[cfg.searxng_url] = (True, time.time())
+    calls = []
 
+    def fake_get(url, **kw):
+        calls.append(url)
+        raise OSError("down")
 
-def test_status_ignores_the_probe_cache(cfg, monkeypatch):
-    """A stale 'unavailable' from earlier in the process must not make a
-    running instance look dead."""
-    from llm_sidecar import services
-    from llm_sidecar.search import searxng
+    monkeypatch.setattr(provider.httpx, "get", fake_get)
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
 
-    searxng._probe_cache[cfg.searxng_url] = False
-    monkeypatch.setattr(services.shutil, "which", lambda n: None)
-    monkeypatch.setattr(
-        services.httpx, "get",
-        lambda *a, **k: httpx_ok(),
-    )
-    assert services.status(cfg)["answering_json"] is True
+    from llm_sidecar.daemon import create_app
 
+    r = TestClient(create_app(cfg), base_url="http://localhost").get("/searxng/status")
+    assert r.json()["answering_json"] is False and calls
 
-def httpx_ok():
-    import httpx
-    return httpx.Response(200, json={"results": [{"title": "t"}]},
-                          request=httpx.Request("GET", "http://x"))
-
-
-def test_missing_docker_gives_an_actionable_error(monkeypatch):
-    from llm_sidecar import services
-
-    monkeypatch.setattr(services.shutil, "which", lambda n: None)
-    with pytest.raises(SidecarError) as e:
-        services._docker()
-    assert "SEARXNG_URL" in str(e.value)   # tells you the no-Docker way out
 
 
 # ── efficiency: memoisation, parallel probing, concurrency ────────────────────
@@ -1081,28 +1031,6 @@ def test_ledger_rotates_when_large(cfg, monkeypatch):
         ledger.record("m/a", 1, 1, 0.0)
     assert ledger.LEDGER_FILE.with_suffix(".jsonl.1").exists()
     assert ledger.LEDGER_FILE.stat().st_size <= 400
-
-
-# ── container runtime selection ───────────────────────────────────────────────
-
-def test_podman_is_accepted_when_docker_is_absent(monkeypatch):
-    from llm_sidecar import services
-
-    monkeypatch.setattr(services.shutil, "which", lambda n: "/usr/bin/podman" if n == "podman" else None)
-    monkeypatch.setattr(services.subprocess, "run",
-                        lambda *a, **k: type("R", (), {"returncode": 0})())
-    assert services._runtime() == ["podman", "compose"]
-
-
-def test_runtime_installed_but_stopped_says_so(monkeypatch):
-    from llm_sidecar import services
-
-    monkeypatch.setattr(services.shutil, "which", lambda n: "/usr/bin/docker" if n == "docker" else None)
-    monkeypatch.setattr(services.subprocess, "run",
-                        lambda *a, **k: type("R", (), {"returncode": 1})())
-    with pytest.raises(SidecarError) as e:
-        services._runtime()
-    assert "not running" in str(e.value)
 
 
 # ── dashboard ─────────────────────────────────────────────────────────────────
