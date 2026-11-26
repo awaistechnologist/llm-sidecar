@@ -111,3 +111,4 @@ include = ["llm_sidecar", "README.md", "USING.md", "CHANGELOG.md",
 
 [tool.pytest.ini_options]
 testpaths = ["llm_sidecar/tests"]
+markers = ["real_pressure: reads the real macOS memory pressure (no watchdog stub)"]

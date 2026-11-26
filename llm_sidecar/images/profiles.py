@@ -74,7 +74,9 @@ class Profile:
     # Measured with mx.get_peak_memory, reset per generation:
     #   standard               11.9 GiB  (1024x1024)
     #   characters-consistent  13.0 GiB at 2 refs, 13.9 at 3 (1024x640)
-    #   zimage-negprompt       27.8 GiB  (1024x768)
+    #   zimage-negprompt       27.8 GiB  (1024x768) loading from Hugging Face;
+    #                          11.0 GiB once `image prepare` has saved the
+    #                          q8 weights (the rest was mflux's bf16 copy)
     # fast, cinematic, kontext-edit and upscale are still estimates until
     # `llm-sidecar image bench` replaces them.
     peak_gib: float = 16.0

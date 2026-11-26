@@ -93,6 +93,10 @@ SAFETY_GIB = 2.0
 
 # How long to wait for memory to come back after asking Ollama to unload.
 FREE_WAIT_S = 10.0
+# prepare() may start with this share of the peak free, watchdog permitting.
+# The full peak plus margin, free, is close to unreachable on a 36 GiB Mac:
+# macOS and the login items hold ~10 GiB even after a restart.
+TIGHT_SHARE = 0.8
 # How often to look again while a caller waits for memory.
 WAIT_POLL_S = 5.0
 
@@ -743,7 +747,7 @@ def prepare(profile: Profile, config: Config | None = None,
     final = _prepared_dir(profile)
     partial = final.with_name(final.name + ".partial")
     with SCHEDULER.slot("prepare"), MACHINE_LOCK:
-        ensure_memory(profile, config, wait_s=wait_for_memory_s)
+        ensure_memory(profile, config, wait_s=wait_for_memory_s, tight=True)
 
         def work():
             import importlib
@@ -773,7 +777,8 @@ def prepare(profile: Profile, config: Config | None = None,
             }, indent=2), encoding="utf-8")
 
         try:
-            _on_mlx_thread(work)
+            with _Watchdog(f"preparing {profile.name}"):
+                _on_mlx_thread(work)
         except Exception as e:
             shutil.rmtree(partial, ignore_errors=True)
             if is_gpu_fault(e):
@@ -785,6 +790,98 @@ def prepare(profile: Profile, config: Config | None = None,
     logger.info("prepared %s at %s (%.1f GiB)", profile.name, final, size / GIB)
     return {"profile": profile.name, "path": str(final), "already": False,
             "size_gib": round(size / GIB, 1)}
+
+
+# ── memory watchdog ───────────────────────────────────────────────────────
+#
+# The check before a job is a forecast; this is the alarm while it runs.
+# What killed the machine was not a big allocation but the compressor
+# filling up until the kernel's watchdog gave up. macOS says when that is
+# coming: kern.memorystatus_vm_pressure_level goes 1 (normal), 2 (warn),
+# 4 (critical). At critical, or when swap is growing fast, the process
+# holding the model exits on the spot. That returns every byte of it at
+# once, launchd starts a clean daemon, and the job fails instead of the Mac.
+#
+# Read through sysctlbyname rather than a subprocess: forking under memory
+# pressure is exactly the thing that stalls.
+
+WATCH_INTERVAL_S = 1.0
+CRITICAL_SAMPLES = 2       # consecutive critical readings before acting
+SWAP_GROWTH_GIB = 3.0      # swap added during one job before acting
+PRESSURE_CRITICAL = 4
+
+
+def _sysctl_raw(name: str, size: int):
+    import ctypes
+    import ctypes.util
+    try:
+        libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+        buf = ctypes.create_string_buffer(size)
+        n = ctypes.c_size_t(size)
+        if libc.sysctlbyname(name.encode(), buf, ctypes.byref(n), None, 0) != 0:
+            return None
+        return buf.raw[:n.value]
+    except Exception:
+        return None
+
+
+def pressure_level() -> int | None:
+    raw = _sysctl_raw("kern.memorystatus_vm_pressure_level", 4)
+    return int.from_bytes(raw[:4], "little") if raw and len(raw) >= 4 else None
+
+
+def swap_used_gib() -> float | None:
+    # struct xsw_usage { u64 total; u64 avail; u64 used; u32 pagesize; ... }
+    raw = _sysctl_raw("vm.swapusage", 32)
+    if not raw or len(raw) < 24:
+        return None
+    return int.from_bytes(raw[16:24], "little") / GIB
+
+
+def _abort_for_memory(reason: str) -> None:
+    logger.critical("memory watchdog: %s. Exiting to release the image model "
+                    "before macOS runs out of memory.", reason)
+    try:
+        FAULT_FILE.parent.mkdir(parents=True, exist_ok=True)
+        FAULT_FILE.write_text(f"{time.time()}\nmemory watchdog: {reason}\n",
+                              encoding="utf-8")
+    except OSError:
+        pass
+    os._exit(75)
+
+
+class _Watchdog:
+    """Watches memory for the duration of one MLX job."""
+
+    def __init__(self, label: str) -> None:
+        self.label = label
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def __enter__(self):
+        if pressure_level() is None:
+            return self   # not macOS, or unreadable: nothing to watch with
+        start_swap = swap_used_gib() or 0.0
+
+        def loop():
+            critical = 0
+            while not self._stop.wait(WATCH_INTERVAL_S):
+                level = pressure_level()
+                critical = critical + 1 if level == PRESSURE_CRITICAL else 0
+                if critical >= CRITICAL_SAMPLES:
+                    _abort_for_memory(f"pressure critical during {self.label}")
+                swap = swap_used_gib()
+                if swap is not None and swap - start_swap > SWAP_GROWTH_GIB:
+                    _abort_for_memory(
+                        f"swap grew {swap - start_swap:.1f} GiB during {self.label}")
+
+        self._thread = threading.Thread(target=loop, name="memory-watchdog", daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._stop.set()
+        return False
 
 
 # ── memory right now, faults, and the MLX thread ──────────────────────────
@@ -823,7 +920,7 @@ def _unload_ollama(config: Config | None) -> list[str]:
 
 
 def ensure_memory(profile: Profile, config: Config | None = None,
-                  wait_s: float = 0) -> dict:
+                  wait_s: float = 0, tight: bool = False) -> dict:
     """Refuse to start a job the machine cannot hold *right now*.
 
     guard() asks whether the machine could ever hold the profile. This asks
@@ -849,6 +946,10 @@ def ensure_memory(profile: Profile, config: Config | None = None,
 
     held = _mlx_held_gib()
     need = max(0.0, profile.peak_gib - held) + SAFETY_GIB
+    if tight and pressure_level() is not None:
+        # Only with the watchdog able to stop it: start with most of the
+        # peak free and let the compressor cover the rest briefly.
+        need = max(0.0, profile.peak_gib * TIGHT_SHARE - held)
     have = hardware.available_now_gib()
     if have is None or have >= need:
         return {"available_gib": have, "needed_gib": round(need, 1)}
@@ -961,7 +1062,11 @@ def run(profile: Profile, *, prompt: str, negative: str | None, seed: int,
     with SCHEDULER.slot(RESIDENT.key_for(profile)), MACHINE_LOCK:
         # Inside the lock: memory is measured when this job is next, not
         # when it joined the queue behind three others.
-        ensure_memory(profile, config, wait_s=wait_for_memory_s)
+        # A prepared copy not yet measured is expected to peak far below the
+        # estimate, so its first run may start tight, under the watchdog.
+        info = prepared_info(profile)
+        unmeasured = info is not None and not info.get("peak_gib")
+        ensure_memory(profile, config, wait_s=wait_for_memory_s, tight=unmeasured)
         with RESIDENT._lock:
             RESIDENT.in_use += 1
 
@@ -980,7 +1085,8 @@ def run(profile: Profile, *, prompt: str, negative: str | None, seed: int,
             return load_s, warm, generate_s
 
         try:
-            load_s, warm, generate_s = _on_mlx_thread(work)
+            with _Watchdog(profile.name):
+                load_s, warm, generate_s = _on_mlx_thread(work)
         except Exception as e:
             if is_gpu_fault(e):
                 _on_fault(e)

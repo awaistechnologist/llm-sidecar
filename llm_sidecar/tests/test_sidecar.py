@@ -4857,7 +4857,7 @@ def test_the_memory_check_uses_the_prepared_peak(prepared_env, monkeypatch, tmp_
     (engine._prepared_dir(p) / "sidecar.json").write_text(json.dumps(info))
     seen = {}
 
-    def fake_ensure(profile, config=None, wait_s=0):
+    def fake_ensure(profile, config=None, wait_s=0, tight=False):
         seen["peak"] = profile.peak_gib
         raise engine.MemoryBusy("stop here")
 
@@ -4885,3 +4885,89 @@ def test_an_idle_model_gives_its_buffer_cache_back(monkeypatch):
     assert R.trim_if_idle() is True and R.model is not None
     assert R.trim_if_idle() is False, "trims once per idle spell"
     assert cleared == [1]
+
+
+# ── memory watchdog ────────────────────────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def _no_real_watchdog(monkeypatch, request):
+    """The watchdog exits the process at critical pressure. Under test that
+    would be pytest, on whatever the real Mac happens to be doing."""
+    if "real_pressure" in request.keywords:
+        return
+    from llm_sidecar.images import engine
+    monkeypatch.setattr(engine, "pressure_level", lambda: None)
+
+
+def _watch(monkeypatch, levels, swaps):
+    from llm_sidecar.images import engine
+
+    lv, sw = iter(levels), iter(swaps)
+    monkeypatch.setattr(engine, "pressure_level", lambda: next(lv, levels[-1]))
+    monkeypatch.setattr(engine, "swap_used_gib", lambda: next(sw, swaps[-1]))
+    monkeypatch.setattr(engine, "WATCH_INTERVAL_S", 0.01)
+    exits = []
+    monkeypatch.setattr(engine, "_abort_for_memory", lambda reason: exits.append(reason))
+    with engine._Watchdog("test"):
+        time.sleep(0.2)
+    return exits
+
+
+def test_the_watchdog_acts_on_sustained_critical_pressure(monkeypatch):
+    exits = _watch(monkeypatch, [1, 1, 4, 4, 4], [0.0])
+    assert exits and "critical" in exits[0]
+
+
+def test_one_critical_blip_is_not_enough(monkeypatch):
+    assert _watch(monkeypatch, [1, 1, 4, 1, 2, 1], [0.0]) == []
+
+
+def test_the_watchdog_acts_on_fast_swap_growth(monkeypatch):
+    exits = _watch(monkeypatch, [1], [0.5, 0.5, 1.0, 4.0])
+    assert exits and "swap grew" in exits[0]
+
+
+def test_normal_pressure_leaves_the_job_alone(monkeypatch):
+    assert _watch(monkeypatch, [1, 2, 2, 1], [0.0, 0.5, 1.0]) == []
+
+
+def test_the_abort_releases_memory_by_exiting(monkeypatch, tmp_path):
+    from llm_sidecar.images import engine
+
+    monkeypatch.setattr(engine, "FAULT_FILE", tmp_path / "f")
+    codes = []
+    monkeypatch.setattr(engine.os, "_exit", lambda c: codes.append(c))
+    engine._abort_for_memory("pressure critical during test")
+    assert codes == [75]
+    assert engine._fault_remaining() > 0, "should cool down before the next job"
+
+
+def test_prepare_may_start_tight_but_only_with_the_watchdog(memory, monkeypatch):
+    """30 GiB free on a 36 GiB Mac is close to unreachable; 80% of the peak
+    is not, and the watchdog covers the difference."""
+    from llm_sidecar.images import engine, profiles
+
+    p = profiles.get("zimage-negprompt")
+    memory["free"] = 24.0
+    with pytest.raises(engine.MemoryBusy):
+        engine.ensure_memory(p)                    # normal jobs stay strict
+    with pytest.raises(engine.MemoryBusy):
+        engine.ensure_memory(p, tight=True)        # no watchdog: strict
+    monkeypatch.setattr(engine, "pressure_level", lambda: 1)
+    engine.ensure_memory(p, tight=True)            # 24 >= 0.8 * 28
+    memory["free"] = 20.0
+    with pytest.raises(engine.MemoryBusy):
+        engine.ensure_memory(p, tight=True)
+
+
+@pytest.mark.real_pressure
+def test_pressure_and_swap_read_without_a_subprocess(monkeypatch):
+    import platform
+
+    from llm_sidecar.images import engine
+
+    if platform.system() != "Darwin":
+        pytest.skip("macOS only")
+    assert engine.pressure_level() in (1, 2, 4)
+    assert engine.swap_used_gib() >= 0

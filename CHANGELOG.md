@@ -62,6 +62,16 @@ Fixed or Changed.
   costs the old peak once and waits for the memory. It then makes one image
   to measure the new peak, which the memory check uses from then on.
   Also `POST /v1/images/prepare`, and `prepared` in `/v1/images/status`.
+- **A memory watchdog runs during every image job.** It reads macOS's
+  memory pressure level and swap use once a second, without forking a
+  process. If pressure stays critical or swap grows by more than 3 GiB
+  during a job, the process holding the model exits on the spot: that
+  releases all of its memory at once, launchd restarts the daemon, and
+  image work pauses for 60 seconds. One failed image, not a panicked Mac.
+  With that in place, `prepare` (and the first run of a freshly prepared
+  model) may start with 80% of the peak free instead of all of it plus a
+  margin. The full figure is close to unreachable on a 36 GiB Mac: macOS
+  and login items hold ~10 GiB even after a restart.
 - **Image requests wait for memory** (`wait_for_memory_s`, default 300)
   before refusing, because the callers that hit the limit are batch
   scripts that stop at the first error. The phone app passes 0.

@@ -758,6 +758,9 @@ formats.
 - **Big models can be prepared once.** `llm-sidecar image prepare --profile
   zimage-negprompt` saves the quantised weights, so loads skip mflux's
   full-precision copy. Run it once with the Mac otherwise quiet.
+- **A watchdog during every job.** If macOS memory pressure goes critical
+  or swap climbs fast, the daemon exits to release the model at once and
+  launchd restarts it. The job fails; the Mac does not.
 - **A GPU fault restarts the engine.** After a Metal timeout MLX is not
   usable in that process, so image work pauses for 60 seconds and the
   service exits for launchd to restart it.
