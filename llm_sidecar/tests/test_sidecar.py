@@ -4439,11 +4439,14 @@ def test_a_job_starts_when_there_is_room(memory):
     assert memory["asked"] == [], "Ollama was unloaded when nothing needed it"
 
 
-def test_a_job_is_refused_rather_than_starting_into_swap(memory):
+def test_a_job_is_refused_rather_than_starting_into_swap(memory, monkeypatch):
     """The crash on 25 Nov 2026: 27 GiB loaded with ~22 GiB actually free."""
     from llm_sidecar.images import engine, profiles
 
     memory["free"] = 22.0
+    # Which profiles count as lighter depends on the machine's total RAM;
+    # a CI runner has far less than the Macs this is written for.
+    monkeypatch.setattr(engine, "_fitting_profiles", lambda: ["standard", "zimage-negprompt"])
     with pytest.raises(engine.MemoryBusy) as e:
         engine.ensure_memory(profiles.get("zimage-negprompt"))
     assert "22 GiB is free" in str(e.value)

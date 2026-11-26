@@ -282,7 +282,10 @@ def restart() -> None:
     system = platform.system()
     if system == "Darwin":
         import os
-        _sh(["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{LABEL}"], timeout=20)
+        # getattr: os.getuid does not exist on Windows, and this module is
+        # imported (and tested) there even though the branch never runs.
+        _sh(["launchctl", "kickstart", "-k", f"gui/{getattr(os, 'getuid', lambda: 0)()}/{LABEL}"],
+            timeout=20)
     elif system == "Linux":
         _sh(["systemctl", "--user", "restart", UNIT_NAME], timeout=30)
 

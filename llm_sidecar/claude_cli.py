@@ -452,7 +452,9 @@ def _kill_group(proc: subprocess.Popen) -> None:
     import signal
     try:
         os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-    except (OSError, ProcessLookupError):
+    # AttributeError: Windows has no process groups (killpg, getpgid) and no
+    # SIGKILL; killing the process itself is the best there is.
+    except (OSError, ProcessLookupError, AttributeError):
         proc.kill()
 
 
@@ -589,7 +591,9 @@ def _kill_group_async(proc) -> None:
     import signal
     try:
         os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-    except (OSError, ProcessLookupError):
+    # AttributeError: Windows has no process groups (killpg, getpgid) and no
+    # SIGKILL; killing the process itself is the best there is.
+    except (OSError, ProcessLookupError, AttributeError):
         try:
             proc.kill()
         except ProcessLookupError:

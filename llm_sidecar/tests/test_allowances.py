@@ -536,3 +536,26 @@ def test_every_model_list_on_the_dashboard_includes_every_provider():
     for owner in ('"ollama"', '"claude-cli"', '"anthropic"', '"openrouter"'):
         assert owner in html.split("const PROVIDERS")[1].split("];")[0]
     assert 'id="cfg-tier-powerful"' in html and 'id="cfg-api"' in html
+
+
+def test_a_timed_out_claude_process_is_killed_on_windows_too(monkeypatch):
+    """Windows has no os.killpg or signal.SIGKILL; a timeout must still kill
+    the process rather than fail with AttributeError."""
+    from llm_sidecar import claude_cli
+
+    monkeypatch.delattr(claude_cli.os, "killpg", raising=False)
+    killed = []
+    claude_cli._kill_group(NS(pid=1, kill=lambda: killed.append(True)))
+    assert killed == [True]
+
+
+def test_searxng_restart_imports_cleanly_without_getuid(monkeypatch):
+    from llm_sidecar import searxng_native as n
+
+    calls = []
+    monkeypatch.delattr(n.platform, "system", raising=False)
+    monkeypatch.setattr(n.platform, "system", lambda: "Darwin", raising=False)
+    monkeypatch.delattr("os.getuid", raising=False)
+    monkeypatch.setattr(n, "_sh", lambda cmd, **k: calls.append(cmd))
+    n.restart()
+    assert calls and calls[0][:3] == ["launchctl", "kickstart", "-k"]
