@@ -447,6 +447,24 @@ def create_app(config: Config | None = None) -> FastAPI:
             "models": cfg.models,
         }
 
+    def same_config(x_sidecar_config: str | None = Header(default=None)) -> None:
+        """A CLI applying a setting says which config file it saved to. A
+        daemon using a different file refuses, so a command run against one
+        home (a test, a second install) cannot change another's settings.
+        This is how an end-to-end run once set a real daemon's budget to
+        `best`, and a paid model answered the next question."""
+        if x_sidecar_config is None:
+            return
+        from pathlib import Path
+        from . import config as config_mod
+        try:
+            same = Path(x_sidecar_config).expanduser().resolve() == config_mod.CONFIG_FILE.resolve()
+        except OSError:
+            same = False
+        if not same:
+            raise HTTPException(status_code=409,
+                                detail="This daemon uses a different config file.")
+
     def persist() -> bool:
         """Write the running settings to the config file. The API key is
         carried over as it is on disk, never added: saving a budget must not
@@ -492,7 +510,7 @@ def create_app(config: Config | None = None) -> FastAPI:
         }
 
     @app.post("/config/budget")
-    def set_budget(req: BudgetRequest, _: None = Depends(require_token)) -> dict:
+    def set_budget(req: BudgetRequest, _: None = Depends(require_token), __: None = Depends(same_config)) -> dict:
         if req.budget not in BUDGET_ALIASES:
             raise HTTPException(status_code=400,
                                 detail=f"Unknown budget {req.budget!r}. Expected one of {BUDGET_ALIASES}.")
@@ -501,7 +519,7 @@ def create_app(config: Config | None = None) -> FastAPI:
         return {"ok": True, "default_budget": cfg.default_budget, "persisted": persist()}
 
     @app.post("/config/tier")
-    def set_tier(req: TierRequest, _: None = Depends(require_token)) -> dict:
+    def set_tier(req: TierRequest, _: None = Depends(require_token), __: None = Depends(same_config)) -> dict:
         """Set a tier's default model, or clear it (empty model) so the tier
         picks automatically by budget.
 
@@ -661,7 +679,7 @@ def create_app(config: Config | None = None) -> FastAPI:
             return {"enabled": cfg.claude_cli_enabled, "detail": str(e)[:200]}
 
     @app.post("/config/claude-cli")
-    def set_claude_cli(req: ClaudeCliRequest, _: None = Depends(require_token)) -> dict:
+    def set_claude_cli(req: ClaudeCliRequest, _: None = Depends(require_token), __: None = Depends(same_config)) -> dict:
         """Turn the claude/ provider on or off on the running daemon."""
         from . import claude_cli
         cfg.claude_cli_enabled = bool(req.enabled)
@@ -682,7 +700,7 @@ def create_app(config: Config | None = None) -> FastAPI:
         return sidecar.allowances(refresh=refresh)
 
     @app.post("/config/claude-api")
-    def set_claude_api(req: ClaudeApiRequest, _: None = Depends(require_token)) -> dict:
+    def set_claude_api(req: ClaudeApiRequest, _: None = Depends(require_token), __: None = Depends(same_config)) -> dict:
         """Turn the claude-api/ provider on or off, or change its allowance
         or renewal day. Saved to the config file."""
         from . import claude_api

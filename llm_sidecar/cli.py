@@ -109,8 +109,11 @@ def _tell_daemon(cfg, path: str, body: dict) -> bool:
     """Apply a setting to a running daemon as well as the file, so a change
     made here does not wait for a restart. False if no daemon answered."""
     import httpx
+    from . import config as config_mod
 
-    headers = {"Authorization": f"Bearer {cfg.daemon_token}"} if cfg.daemon_token else {}
+    headers = {"X-Sidecar-Config": str(config_mod.CONFIG_FILE)}
+    if cfg.daemon_token:
+        headers["Authorization"] = f"Bearer {cfg.daemon_token}"
     try:
         r = httpx.post(f"http://127.0.0.1:{cfg.daemon_port}{path}", json=body,
                        headers=headers, timeout=3.0)

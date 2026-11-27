@@ -559,3 +559,17 @@ def test_searxng_restart_imports_cleanly_without_getuid(monkeypatch):
     monkeypatch.setattr(n, "_sh", lambda cmd, **k: calls.append(cmd))
     n.restart()
     assert calls and calls[0][:3] == ["launchctl", "kickstart", "-k"]
+
+
+def test_a_settings_change_for_another_config_file_is_refused(tmp_path):
+    from fastapi.testclient import TestClient
+    from llm_sidecar import config as config_mod, daemon
+
+    c = TestClient(daemon.create_app(Config()), base_url="http://127.0.0.1")
+    other = {"X-Sidecar-Config": str(tmp_path / "elsewhere" / "config.json")}
+    assert c.post("/config/budget", json={"budget": "best"}, headers=other).status_code == 409
+    assert c.post("/config/tier", json={"tier": "fast", "model": "x"}, headers=other).status_code == 409
+    mine = {"X-Sidecar-Config": str(config_mod.CONFIG_FILE)}
+    assert c.post("/config/budget", json={"budget": "cheap"}, headers=mine).status_code == 200
+    # No header (the dashboard) is unaffected.
+    assert c.post("/config/budget", json={"budget": "free"}).status_code == 200

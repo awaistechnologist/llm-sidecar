@@ -32,7 +32,7 @@ done
 ok=0
 for i in $(seq 1 40); do
   "$SERVICE_VENV/bin/python" -m pip install -q --no-cache-dir --upgrade \
-    "llm-sidecar[images]==$V" >/dev/null 2>&1 && { ok=1; echo "pip installed $V after $((i*30))s"; break; }
+    "llm-sidecar[images,claude-api]==$V" >/dev/null 2>&1 && { ok=1; echo "pip installed $V after $((i*30))s"; break; }
   sleep 30
 done
 [ "$ok" = 1 ] || fail "pip never saw $V"
@@ -40,7 +40,9 @@ done
 # 3. The CLI on PATH. A plain --force has repeatedly reinstalled a cached
 #    wheel, so this uninstalls first and then checks what actually landed.
 pipx uninstall llm-sidecar >/dev/null 2>&1 || true
-pipx install llm-sidecar >/dev/null 2>&1 || fail "pipx install failed"
+# The [claude-api] extra: without it the CLI cannot use API credits (0.12.0
+# was deployed without it, and `ask --model claude-api/...` failed).
+pipx install "llm-sidecar[claude-api]==$V" >/dev/null 2>&1 || fail "pipx install failed"
 
 # 4. Verify each one separately, from a neutral directory: running python
 #    inside the checkout imports the repo rather than site-packages, which

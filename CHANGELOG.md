@@ -13,6 +13,16 @@ aimed at whoever reported it. State what changed, what now breaks, and what
 to do instead. Anything that does not demand a change belongs in Added,
 Fixed or Changed.
 
+## [0.12.1] — 2026-11-27
+
+### Fixed
+- **A CLI could change the settings of a daemon using a different config
+  file.** `llm-sidecar config budget|tier|claude-cli|claude-api…` applies the
+  change to the daemon on the configured port as well as the file; a CLI run
+  with another home (a test, a second install) reached the main daemon and
+  changed its budget. The CLI now says which config file it saved to, and a
+  daemon using a different one refuses (409) and is left alone.
+
 ## [0.12.0] — 2026-11-26
 
 The first release since 0.9.3. It also carries 0.10.0 and 0.11.0 (below),

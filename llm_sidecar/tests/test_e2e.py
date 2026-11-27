@@ -50,6 +50,9 @@ def _env(home: Path, **extra) -> dict:
         LLM_SIDECAR_CACHE=str(home / "cache"),
         ANTHROPIC_CONFIG_DIR=str(home / "anthropic"),
         PYTHONPATH=str(ROOT),
+        # A port nothing listens on, so a CLI step that tells "the running
+        # daemon" can never reach the real one on 4001.
+        LLM_SIDECAR_PORT=str(_free_port()),
     )
     env.update({k: str(v) for k, v in extra.items()})
     return env
@@ -265,6 +268,29 @@ def test_an_idle_daemon_stays_small(daemon):
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────
+
+
+def test_a_cli_with_another_config_cannot_change_a_running_daemon(tmp_path):
+    """The leak this release shipped with: a CLI in one home told the daemon
+    of another to switch its budget to `best`."""
+    a, b = tmp_path / "a", tmp_path / "b"
+    a.mkdir(), b.mkdir()
+    d = Daemon(a).start()
+    try:
+        env = _env(b, LLM_SIDECAR_PORT=d.port)
+        r = subprocess.run([sys.executable, "-m", "llm_sidecar", "config", "budget", "best"],
+                           env=env, capture_output=True, text=True, timeout=60)
+        assert r.returncode == 0 and "Applied to the running daemon" not in r.stdout
+        assert d.get("/status").json()["default_budget"] == "free"
+        # The CLI that shares the daemon's config is still applied.
+        env = _env(a, LLM_SIDECAR_PORT=d.port)
+        r = subprocess.run([sys.executable, "-m", "llm_sidecar", "config", "budget", "cheap"],
+                           env=env, capture_output=True, text=True, timeout=60)
+        assert "Applied to the running daemon" in r.stdout
+        assert d.get("/status").json()["default_budget"] == "cheap"
+    finally:
+        d.stop()
+
 
 
 def test_cli_journeys_in_a_fresh_home(home):
