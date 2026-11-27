@@ -39,10 +39,19 @@ done
 
 # 3. The CLI on PATH. A plain --force has repeatedly reinstalled a cached
 #    wheel, so this uninstalls first and then checks what actually landed.
-pipx uninstall llm-sidecar >/dev/null 2>&1 || true
-# The [claude-api] extra: without it the CLI cannot use API credits (0.12.0
-# was deployed without it, and `ask --model claude-api/...` failed).
-pipx install "llm-sidecar[claude-api]==$V" >/dev/null 2>&1 || fail "pipx install failed"
+#
+#    Not uninstall-then-install: when the install then failed (0.12.1), the
+#    machine was left with no CLI at all. --force over the old one instead,
+#    with uv's cache off (pipx resolves through uv, whose cached index did
+#    not yet know a version pip could already see), retried like step 2.
+#    The [claude-api] extra: without it the CLI cannot use API credits.
+ok=0
+for i in $(seq 1 20); do
+  UV_NO_CACHE=1 pipx install --force "llm-sidecar[claude-api]==$V" >/dev/null 2>&1 \
+    && { ok=1; break; }
+  sleep 30
+done
+[ "$ok" = 1 ] || fail "pipx install never succeeded (the previous CLI is still installed)"
 
 # 4. Verify each one separately, from a neutral directory: running python
 #    inside the checkout imports the repo rather than site-packages, which
